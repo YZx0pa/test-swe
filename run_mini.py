@@ -25,15 +25,21 @@ RULES = """\
 Rules:
 - Do ONLY what the user's task asks. Do not add extra steps.
 - Issue exactly ONE command per response, then read its JSON output before the next.
-- match_id, app_id, profile_id, and job_id are DISTINCT id types. Never pass one
-  where another is expected, try to call "get-*" API to get the correct id.
-- Never invent ids, titles, or skills. Application ids and emails must come from the user.
-- A result may say status 'ok' but contain an error message in its fields
-  (e.g. "No match_id is obtained from db"). Treat such messages as FAILURES and
-  correct your next command; do not assume success from status alone.
-- If the task cannot be done with these commands, run
-  echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT and state plainly you cannot do it.
-- When the whole task is done, run echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT by itself.
+- match_id, app_id, profile_id, job_id are DISTINCT. Never pass one where another is
+  expected. If you need an id type you don't have, you MUST call the matching get-*
+  command (only one listed above; don't invent names). If none exists, run
+  echo Not_Able_to_obtain_the_correct_id and stop.
+- Never invent any field value. Every value must come from either the OUTPUT of a
+  previous command, or explicit user input. If a required value is available from
+  neither, ask the user or stop — do not guess.
+- "status": "ok" only means the API call was received — NOT that the operation
+  succeeded. Always read the result fields for the real outcome. If a result field
+  contains an error or a message saying nothing was found/obtained/processed, treat
+  it as a FAILURE even though status is "ok", and correct your next command.
+- If the task is only partially done or cannot be fully completed, before finishing
+  run: echo SUMMARY: <what succeeded> | <what failed or is missing> | <why>
+  then run echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT by itself.
+- When the whole task is fully done, run echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT by itself.
 """
 
 def build_system_prompt() -> str:
