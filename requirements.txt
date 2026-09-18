@@ -1,0 +1,11 @@
+# Runtime dependencies — Python 3.11
+#
+#   uv venv --python 3.11 .venv
+#   uv pip install -r requirements.txt
+#
+# (requirements.lock.txt holds the full transitive set, pinned.)
+
+mini-swe-agent==2.4.6    # `minisweagent` agent loop used by run_mini.py; pulls in litellm, pydantic, jinja2, typer
+python-dotenv==1.2.3     # load_dotenv() in recruiter_cli.py and run_mini.py
+requests==2.34.2         # real-mode VIRA calls in recruiter_cli._call
+PyYAML==6.0.3            # run_mini.build_agent() parses minisweagent's config/mini.yaml

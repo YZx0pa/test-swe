@@ -3,3 +3,10 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+
+# virtualenv
+.venv/
+
+# audit log written by recruiter_cli._audit()
+events.jsonl
+CLAUDE.md
