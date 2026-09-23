@@ -37,7 +37,7 @@ def test_values_are_traced_to_the_task_and_to_earlier_results():
     assert answer == {"12": ["task", "step 2", "step 4"], "0.95": ["step 2"]}
     assert grounding.summary(steps) == {"args": 4, "args_grounded": 4, "args_chained": 1,
                                         "numbers": 2, "numbers_grounded": 2, "ungrounded": [],
-                                        "misused": []}
+                                        "misused": [], "misused_blocked": []}
 
 
 def test_invented_values_are_flagged():
@@ -172,3 +172,22 @@ def test_mini_default_observation_format_is_unwrapped():
     ]
     steps = grounding.trace_from_mini(messages, "Find talents for job 123 and score them.")
     assert steps[2]["provenance"]["match_ids"][0]["misused_as"] == "profile_id"
+
+
+def test_a_wrong_kind_id_the_guard_refused_counts_as_blocked():
+    task = "Find talents for job 123 and score them."
+    messages = [
+        HumanMessage(task),
+        AIMessage("", tool_calls=[{"name": "find_talents", "args": {"job_ids": [123]},
+                                   "id": "c1", "type": "tool_call"}]),
+        ToolMessage(json.dumps({"result": {"suggested_profiles": [{"profile_id": 900001}]}}),
+                    tool_call_id="c1", name="find_talents"),
+        AIMessage("", tool_calls=[{"name": "score_candidates", "args": {"match_ids": [900001]},
+                                   "id": "c2", "type": "tool_call"}]),
+        ToolMessage('{"status": "error", "message": "Refused: 900001 is a profile_id, not a match_id."}',
+                    tool_call_id="c2", name="score_candidates", status="error"),
+        AIMessage("SUMMARY: found talents | could not score | no match_ids"),
+    ]
+    summary = grounding.summary(grounding.trace_from_messages(messages, task))
+    assert summary["misused"] == []
+    assert summary["misused_blocked"] == ["900001 (profile_id as match_ids)"]
