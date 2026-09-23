@@ -6,6 +6,10 @@ All domain "weight" lives HERE (outside mini's core, where the model can't
 reach it): endpoint routing, query-vs-body split, auth headers from env,
 PII masking, an audit log, and a confirm-gate for dangerous actions.
 
+The same guarded path is importable: execute() and the four typed actions
+(find_talents, generate_jd, score_candidates, candidate_insights) back
+vira_tools.py (LangGraph, deepagents, MCP) and run_workflow.py.
+
 Design notes tied to the four real curls you gave:
   * base url + 3 header auth (x-api-key / x-client-name / x-user-id), read
     from env, NEVER placed in model context.
@@ -93,16 +97,17 @@ def _audit(cmd: str, query: Dict, body: Dict, result: Dict) -> None:
         }, ensure_ascii=False) + "\n")
 
 
-def _guard(cmd: str, ns: argparse.Namespace) -> None:
-    if cmd in NEEDS_CONFIRM and not getattr(ns, "confirmed", False):
-        _emit({
+def _guard(cmd: str, confirmed: bool) -> Dict | None:
+    """Return the needs_confirmation result for a gated, unconfirmed command."""
+    if cmd in NEEDS_CONFIRM and not confirmed:
+        return {
             "status": "needs_confirmation",
             "message": (f"'{cmd}' affects candidates or is irreversible and "
                         f"needs explicit user confirmation. Tell the user exactly "
                         f"what will happen and to whom, get agreement, then retry "
                         f"with --confirmed."),
-        })
-        sys.exit(2)
+        }
+    return None
 
 
 def _emit(result: Dict) -> None:
@@ -136,52 +141,99 @@ def _call(path: str, query: Dict[str, Any], body: Dict[str, Any], mode: str) -> 
                 "result": {"raw": resp.text}}
 
 
-def _run(cmd: str, path: str, query: Dict, body: Dict, ns: argparse.Namespace) -> None:
-    _guard(cmd, ns)
-    result = _call(path, query, body, ns.mode)
+def execute(cmd: str, path: str, query: Dict, body: Dict, *, mode: str,
+            confirmed: bool = False) -> Dict:
+    """The one guarded path to VIRA: confirm-gate -> call -> audit -> PII mask.
+
+    Every runtime goes through here: this CLI (mini-swe-agent), vira_tools.py
+    (LangGraph, deepagents, MCP) and run_workflow.py.  `mode` is required so no
+    caller reaches the real backend by default.  Returns the masked result and
+    never prints (vira_mcp.py's stdout is its JSON-RPC channel).
+    """
+    blocked = _guard(cmd, confirmed)
+    if blocked:
+        return blocked
+    result = _call(path, query, body, mode)
     _audit(cmd, query, body, result)
-    _emit(result)
+    return _mask_pii(result)
 
 
-# --- subcommands (one per API you gave) ------------------------------------
-def cmd_find_talents(ns):
+# --- typed actions (one per API you gave) — the importable surface ----------
+def find_talents(job_ids: list[int], profile_ids: list[int] | None = None, *,
+                 mode: str, confirmed: bool = False) -> Dict:
     # #1 fast_retargeting — params all in BODY
-    _run("find-talents", "fast_retargeting",
-         query={},
-         body={"job_ids": _csv_int(ns.job_ids),
-               "profile_ids": _csv_int(ns.profile_ids)},
-         ns=ns)
+    return execute("find-talents", "fast_retargeting",
+                   query={},
+                   body={"job_ids": job_ids,
+                         "profile_ids": profile_ids or []},
+                   mode=mode, confirmed=confirmed)
+
+
+def generate_jd(job_title: str, skills: list[str] | None = None, lang: str = "en",
+                job_id: int = 0, job_function: list[str] | None = None,
+                industry: list[str] | None = None,
+                other_requirements: list[str] | None = None, *,
+                mode: str, confirmed: bool = False) -> Dict:
+    # #2 JD_generation — lang in QUERY, rest in BODY
+    return execute("generate-jd", "JD_generation/jd_generation",
+                   query={"lang": lang},
+                   body={"job_id": job_id or 0,
+                         "job_title": job_title,
+                         "skills": skills or [],
+                         "job_function": job_function or [],
+                         "industry": industry or [],
+                         "other_requirements": other_requirements or []},
+                   mode=mode, confirmed=confirmed)
+
+
+def score_candidates(app_ids: list[int] | None = None, match_ids: list[int] | None = None,
+                     *, mode: str, confirmed: bool = False) -> Dict:
+    # #3 candidate_score_calculation — scoring flags in QUERY, ids in BODY
+    return execute("score-candidates", "candidate_score_calculation",
+                   query={"composite_score": "True", "briq": "True", "recal_briq": "True"},
+                   body={"app_ids": app_ids or [],
+                         "match_ids": match_ids or []},
+                   mode=mode, confirmed=confirmed)
+
+
+def candidate_insights(app_ids: list[int] | None = None, match_ids: list[int] | None = None,
+                       *, mode: str, confirmed: bool = False) -> Dict:
+    # #4 candidate_score_calculation?version=v3 — SAME path, different query
+    return execute("candidate-insights", "candidate_score_calculation",
+                   query={"version": "v3"},
+                   body={"app_ids": app_ids or [],
+                         "match_ids": match_ids or []},
+                   mode=mode, confirmed=confirmed)
+
+
+# --- CLI subcommands: parse the CSV flags, call the typed action -------------
+def _finish(result: Dict) -> None:
+    _emit(result)
+    if result.get("status") == "needs_confirmation":
+        sys.exit(2)
+
+
+def _opts(ns: argparse.Namespace) -> Dict[str, Any]:
+    return {"mode": ns.mode, "confirmed": getattr(ns, "confirmed", False)}
+
+
+def cmd_find_talents(ns):
+    _finish(find_talents(_csv_int(ns.job_ids), _csv_int(ns.profile_ids), **_opts(ns)))
 
 
 def cmd_generate_jd(ns):
-    # #2 JD_generation — lang in QUERY, rest in BODY
-    _run("generate-jd", "JD_generation/jd_generation",
-         query={"lang": ns.lang},
-         body={"job_id": ns.job_id or 0,
-               "job_title": ns.job_title,
-               "skills": _csv_str(ns.skills),
-               "job_function": _csv_str(ns.job_function),
-               "industry": _csv_str(ns.industry),
-               "other_requirements": _csv_str(ns.other_requirements)},
-         ns=ns)
+    _finish(generate_jd(job_title=ns.job_title, skills=_csv_str(ns.skills), lang=ns.lang,
+                        job_id=ns.job_id, job_function=_csv_str(ns.job_function),
+                        industry=_csv_str(ns.industry),
+                        other_requirements=_csv_str(ns.other_requirements), **_opts(ns)))
 
 
 def cmd_score_candidates(ns):
-    # #3 candidate_score_calculation — scoring flags in QUERY, ids in BODY
-    _run("score-candidates", "candidate_score_calculation",
-         query={"composite_score": "True", "briq": "True", "recal_briq": "True"},
-         body={"app_ids": _csv_int(ns.app_ids),
-               "match_ids": _csv_int(ns.match_ids)},
-         ns=ns)
+    _finish(score_candidates(_csv_int(ns.app_ids), _csv_int(ns.match_ids), **_opts(ns)))
 
 
 def cmd_candidate_insights(ns):
-    # #4 candidate_score_calculation?version=v3 — SAME path, different query
-    _run("candidate-insights", "candidate_score_calculation",
-         query={"version": "v3"},
-         body={"app_ids": _csv_int(ns.app_ids),
-               "match_ids": _csv_int(ns.match_ids)},
-         ns=ns)
+    _finish(candidate_insights(_csv_int(ns.app_ids), _csv_int(ns.match_ids), **_opts(ns)))
 
 
 # --- argparse wiring --------------------------------------------------------
