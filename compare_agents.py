@@ -269,7 +269,8 @@ def details(r: Run) -> list[str]:
              f"Grounding: {g['args_grounded']}/{g['args']} tool args traced "
              f"({g['args_chained']} chained from earlier results), "
              f"{g['numbers_grounded']}/{g['numbers']} answer numbers traced"
-             + (f"; UNGROUNDED: {', '.join(g['ungrounded'])}" if g["ungrounded"] else ""), "",
+             + (f"; UNGROUNDED: {', '.join(g['ungrounded'])}" if g["ungrounded"] else "")
+             + (f"; WRONG ID KIND: {', '.join(g['misused'])}" if g["misused"] else ""), "",
              "Tool calls (as the model issued them):", "```"]
     lines += r.trajectory or ["(none)"]
     lines += ["```", "", "Reached VIRA (audit log):", "```"]
@@ -296,7 +297,8 @@ def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int) -
         g = [r.grounding for r in mine]
         costs = [c for c in (estimated_cost(r) for r in mine) if c is not None]
         totals.append(f"{sum(r.passed for r in mine)}/{len(mine)} pass · "
-                      f"~${sum(costs):.3f} · ungrounded values: {sum(len(x['ungrounded']) for x in g)}")
+                      f"~${sum(costs):.3f} · ungrounded values: {sum(len(x['ungrounded']) for x in g)} · "
+                      f"wrong-kind ids: {sum(len(x['misused']) for x in g)}")
     lines.append("| **total** | | " + " | ".join(totals) + " |")
     lines += ["", "## Runs (every failure, plus run 1 of each cell)", ""]
     for r in runs:

@@ -20,6 +20,10 @@ import shlex
 from typing import Any
 
 VIRA_TOOLS = {"find_talents", "generate_jd", "score_candidates", "candidate_insights"}
+# An id argument may only take ids that appeared as the same kind of id.
+ID_KINDS = {"job_ids": {"job_id", "job_ids"}, "profile_ids": {"profile_id", "profile_ids"},
+            "app_ids": {"app_id", "app_ids"}, "match_ids": {"match_id", "match_ids"}}
+_ALL_ID_KEYS = set().union(*ID_KINDS.values())
 LANGUAGES = {"ar": "arabic", "en": "english", "fr": "french", "de": "german",
              "es": "spanish", "hi": "hindi", "zh": "chinese", "ur": "urdu"}
 _NUMBER = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)([%+])?(?![\d])")
@@ -58,14 +62,56 @@ def _where(value: Any, sources: list[tuple[str, str]], *, arg: str = "") -> list
     return [label for label, text in sources if needle and needle in text.lower()]
 
 
+def _id_keys(text: str) -> dict[int, set[str]]:
+    """int -> the JSON keys it sits under in a tool result (for the id-kind check)."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    found: dict[int, set[str]] = {}
+
+    def walk(node, key=None):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, k)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, key)
+        elif isinstance(node, int) and not isinstance(node, bool) and key:
+            found.setdefault(node, set()).add(key)
+
+    walk(data)
+    return found
+
+
+def _misused_as(arg: str, value: Any, where: list[str], sources: list[tuple[str, str]]) -> str | None:
+    """The id kind `value` really was, if it's passed as a different kind (e.g. profile_id)."""
+    if arg not in ID_KINDS or not isinstance(value, int) or "task" in where:
+        return None
+    kinds = set()
+    for label, text in sources:
+        if label in where:
+            kinds |= _id_keys(text).get(value, set()) & _ALL_ID_KEYS
+    if kinds and not kinds & ID_KINDS[arg]:
+        return sorted(kinds)[0]
+    return None
+
+
 def ground_args(args: dict, sources: list[tuple[str, str]]) -> dict[str, list[dict]]:
-    """{arg: [{"value", "sources"}]} for every non-empty leaf value of a VIRA call."""
+    """{arg: [{"value", "sources", "misused_as"?}]} for every non-empty leaf value of a VIRA call."""
     out = {}
     for arg, value in (args or {}).items():
         values = value if isinstance(value, list) else [value]
         leaves = [v for v in values if v not in (None, "", 0) or arg == "lang"]
-        if leaves:
-            out[arg] = [{"value": v, "sources": _where(v, sources, arg=arg)} for v in leaves]
+        entries = []
+        for v in leaves:
+            entry = {"value": v, "sources": _where(v, sources, arg=arg)}
+            kind = _misused_as(arg, v, entry["sources"], sources)
+            if kind:
+                entry["misused_as"] = kind       # a real value, passed as the wrong kind of id
+            entries.append(entry)
+        if entries:
+            out[arg] = entries
     return out
 
 
@@ -150,6 +196,29 @@ def parse_cli(command: str) -> tuple[str, dict] | tuple[str, str] | None:
     return (sub or "").replace("-", "_"), args
 
 
+_OBSERVATION = re.compile(r"^<returncode>(-?\d+)</returncode>\s*<output>\n?(.*?)</output>\s*$", re.S)
+
+
+def mini_observation(content: str) -> tuple[str, int | None]:
+    """mini's tool message -> (command output, return code).
+
+    Handles mini.yaml's JSON observation template and the models' default
+    `<returncode>N</returncode><output>...</output>` one (what run_mini.py uses).
+    The code is None when the content was already plain output.
+    """
+    content = content or ""
+    try:
+        obs = json.loads(content)
+        if isinstance(obs, dict) and "returncode" in obs and "output" in obs:
+            return str(obs["output"]).strip(), int(obs["returncode"])
+    except (TypeError, ValueError):
+        pass
+    m = _OBSERVATION.match(content)
+    if m:
+        return m.group(2).strip(), int(m.group(1))
+    return content.strip(), None
+
+
 def trace_from_mini(messages: list[dict], task: str) -> list[dict]:
     """Steps of a mini-swe-agent run.  Off-policy commands and their output stay hidden."""
     steps, sources, answer, pending = [], [("task", task)], "", []
@@ -185,13 +254,10 @@ def trace_from_mini(messages: list[dict], task: str) -> list[dict]:
                 steps.append({"i": len(steps) + 1, "kind": "result", "tool": "bash",
                               "status": "hidden", "content": "<not shown>"})
                 continue
-            try:
-                observation = json.loads(m.get("content", ""))
-                text, code = observation.get("output", ""), observation.get("returncode", 0)
-            except (TypeError, ValueError):
-                text, code = str(m.get("content", "")), 0
+            text, code = mini_observation(m.get("content", ""))
+            code = 0 if code is None else code
             step = {"i": len(steps) + 1, "kind": "result", "tool": tool,
-                    "status": "success" if code == 0 else "error", "content": text.strip()}
+                    "status": "success" if code == 0 else "error", "content": text}
             steps.append(step)
             if code == 0:
                 sources.append((f"step {step['i']}", text))
@@ -199,16 +265,41 @@ def trace_from_mini(messages: list[dict], task: str) -> list[dict]:
     return steps
 
 
+def reground(steps: list[dict], task: str, *, mini: bool = False) -> list[dict]:
+    """Recompute provenance on a stored trace (e.g. one recorded by an older checker)."""
+    sources, out = [("task", task)], []
+    for st in steps:
+        st = dict(st)
+        if st["kind"] == "call" and st.get("tool") in VIRA_TOOLS:
+            st["provenance"] = ground_args(st.get("args") or {}, sources)
+        elif st["kind"] == "answer":
+            st["numbers"] = ground_answer(st.get("text", ""), sources)
+        elif st["kind"] == "result" and st.get("status") != "hidden":
+            if mini:                         # older traces kept mini's <returncode> wrapper
+                text, code = mini_observation(st.get("content", ""))
+                st["content"] = text
+                if code is not None:
+                    st["status"] = "success" if code == 0 else "error"
+            if not mini or st.get("status") == "success":
+                sources.append((f"step {st['i']}", st.get("content", "")))
+        out.append(st)
+    return out
+
+
 def summary(steps: list[dict]) -> dict:
     """Counts for the grounding badges: all args/numbers grounded? how many chained?"""
-    args = [p for s in steps for vals in (s.get("provenance") or {}).values() for p in vals]
+    args = [(arg, p) for s in steps for arg, vals in (s.get("provenance") or {}).items()
+            for p in vals]
     numbers = [n for s in steps if s["kind"] == "answer" for n in s["numbers"]]
     return {
         "args": len(args),
-        "args_grounded": sum(bool(p["sources"]) for p in args),
-        "args_chained": sum(any(src.startswith("step") for src in p["sources"]) for p in args),
+        "args_grounded": sum(bool(p["sources"]) and "misused_as" not in p for _, p in args),
+        "args_chained": sum(any(src.startswith("step") for src in p["sources"])
+                            and "misused_as" not in p for _, p in args),
         "numbers": len(numbers),
         "numbers_grounded": sum(bool(n["sources"]) for n in numbers),
-        "ungrounded": [f"{p['value']}" for p in args if not p["sources"]]
+        "ungrounded": [f"{p['value']}" for _, p in args if not p["sources"]]
                       + [n["value"] for n in numbers if not n["sources"]],
+        "misused": [f"{p['value']} ({p['misused_as']} as {arg})" for arg, p in args
+                    if "misused_as" in p],
     }

@@ -16,7 +16,9 @@ import argparse
 import json
 import os
 import threading
+import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
@@ -25,6 +27,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
+import grounding
 import vira_tools
 
 
@@ -265,6 +268,9 @@ def parser(description: str) -> argparse.ArgumentParser:
                    help="max model calls per task (run_mini.py uses 12)")
     p.add_argument("--trace", action="store_true",
                    help="allow LangSmith tracing if LANGSMITH_* is configured (off by default)")
+    p.add_argument("--trace-json", metavar="PATH",
+                   help="write each task's trace (steps + grounding) here, for the "
+                        "visualisation page; stays on this machine")
     return p
 
 
@@ -273,8 +279,21 @@ def setup(args: argparse.Namespace) -> None:
     vira_tools.configure(args.mode)
 
 
-def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None) -> dict:
+def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
+               seconds: float) -> dict:
+    """One run in compare_agents.py's --json format, so the page reads both."""
+    steps = grounding.trace_from_messages(result["messages"], task)
+    return {"runner": label, "task": task, "repeat": 1, "passed": None, "error": "",
+            "model_calls": counter.calls, "input_tokens": counter.input_tokens,
+            "output_tokens": counter.output_tokens, "seconds": round(seconds, 1), "cost": None,
+            "audit": [], "steps": steps, "grounding": grounding.summary(steps),
+            "final": final_text(result)}
+
+
+def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
+                 trace: dict | None = None, label: str = "") -> dict:
     counter = UsageCounter()
+    t0 = time.monotonic()
     result = run_task(agent, task, callbacks=[counter])
     print("\n=== trajectory ===")
     show(result["messages"])
@@ -282,13 +301,24 @@ def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None) 
         after(result)
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
           f"{counter.input_tokens}/{counter.output_tokens})")
+    if trace is not None:
+        trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0))
+        trace["tasks"][task] = {"text": task, "check": ""}
+        Path(trace["path"]).write_text(json.dumps({k: v for k, v in trace.items() if k != "path"},
+                                                  ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"(trace written to {trace['path']})")
     return result
 
 
 def repl(label: str, agent, args: argparse.Namespace,
          after: Callable[[dict], None] | None = None) -> None:
+    trace = None
+    if getattr(args, "trace_json", None):
+        trace = {"path": args.trace_json, "model": os.environ.get("CHAT_MODEL", "gpt-5-mini"),
+                 "mode": args.mode, "repeat": 1, "tasks": {}, "runs": [],
+                 "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if args.task:
-        run_and_show(agent, args.task, after)
+        run_and_show(agent, args.task, after, trace, label)
         return
     print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, or 'quit'.")
     while True:
@@ -301,6 +331,6 @@ def repl(label: str, agent, args: argparse.Namespace,
             print("bye")
             return
         try:
-            run_and_show(agent, task, after)
+            run_and_show(agent, task, after, trace, label)
         except Exception as exc:
             print(f"[error] {type(exc).__name__}: {exc}")

@@ -36,7 +36,8 @@ def test_values_are_traced_to_the_task_and_to_earlier_results():
     answer = {n["value"]: n["sources"] for n in steps[4]["numbers"]}
     assert answer == {"12": ["task", "step 2", "step 4"], "0.95": ["step 2"]}
     assert grounding.summary(steps) == {"args": 4, "args_grounded": 4, "args_chained": 1,
-                                        "numbers": 2, "numbers_grounded": 2, "ungrounded": []}
+                                        "numbers": 2, "numbers_grounded": 2, "ungrounded": [],
+                                        "misused": []}
 
 
 def test_invented_values_are_flagged():
@@ -114,3 +115,60 @@ def test_parse_cli_keeps_typos_as_ungroundable_strings():
     assert tool == "find_talents" and args == {"job_ids": ["123.."]}
     assert grounding.ground_args(args, [("task", "job 123")]) == {
         "job_ids": [{"value": "123..", "sources": []}]}
+
+
+def test_a_real_id_passed_as_the_wrong_kind_is_misuse_not_grounding():
+    # Seen live with gpt-4o-mini: profile ids from find_talents sent to scoring as match ids.
+    task = "Find talents for job 123 and score them."
+    messages = [
+        HumanMessage(task),
+        AIMessage("", tool_calls=[{"name": "find_talents", "args": {"job_ids": [123]},
+                                   "id": "c1", "type": "tool_call"}]),
+        ToolMessage(json.dumps({"status": "ok", "result": {"job_id": 123, "suggested_profiles": [
+            {"profile_id": 900001, "match_score": 0.91}]}}), tool_call_id="c1", name="find_talents"),
+        AIMessage("", tool_calls=[{"name": "score_candidates", "args": {"match_ids": [900001]},
+                                   "id": "c2", "type": "tool_call"}]),
+        ToolMessage('{"status": "ok", "result": {"scores": []}}', tool_call_id="c2",
+                    name="score_candidates"),
+        AIMessage("Scored."),
+    ]
+    steps = grounding.trace_from_messages(messages, task)
+    assert steps[2]["provenance"]["match_ids"] == [
+        {"value": 900001, "sources": ["step 2"], "misused_as": "profile_id"}]
+    summary = grounding.summary(steps)
+    assert summary["misused"] == ["900001 (profile_id as match_ids)"]
+    assert summary["args_grounded"] == 1 and summary["args_chained"] == 0
+
+
+def test_ids_of_the_right_kind_and_ids_from_the_task_are_fine():
+    result = json.dumps({"result": {"scores": [{"match_id": 500001}, {"app_id": 11}]}})
+    sources = [("task", "score applicant 11"), ("step 2", result)]
+    prov = grounding.ground_args({"match_ids": [500001], "app_ids": [11]}, sources)
+    assert "misused_as" not in prov["match_ids"][0]         # it was a match_id
+    assert "misused_as" not in prov["app_ids"][0]           # the user named it
+
+
+def test_reground_matches_a_fresh_trace():
+    steps = grounding.trace_from_messages(top_pick_messages(), TOP_PICK)
+    stale = [{k: v for k, v in s.items() if k not in ("provenance", "numbers")} for s in steps]
+    for s in stale:
+        if s["kind"] == "answer":
+            s["numbers"] = []
+    assert grounding.reground(stale, TOP_PICK) == steps
+
+
+def test_mini_default_observation_format_is_unwrapped():
+    wrapped = ('<returncode>0</returncode>\n<output>\n{"status": "ok", "result": '
+               '{"suggested_profiles": [{"profile_id": 900001}]}}\n</output>')
+    assert grounding.mini_observation(wrapped) == (
+        '{"status": "ok", "result": {"suggested_profiles": [{"profile_id": 900001}]}}', 0)
+    assert grounding.mini_observation("<returncode>1</returncode>\n<output>\nValueError\n</output>") == (
+        "ValueError", 1)
+    messages = [
+        _mini_call("python3 recruiter_cli.py --mode mock find-talents --job-ids 123"),
+        {"role": "tool", "content": wrapped},
+        _mini_call("python3 recruiter_cli.py --mode mock score-candidates --match-ids 900001"),
+        {"role": "tool", "content": "<returncode>0</returncode>\n<output>\n{}\n</output>"},
+    ]
+    steps = grounding.trace_from_mini(messages, "Find talents for job 123 and score them.")
+    assert steps[2]["provenance"]["match_ids"][0]["misused_as"] == "profile_id"
