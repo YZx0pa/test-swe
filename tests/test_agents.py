@@ -178,12 +178,12 @@ def test_workflow_waits_for_approval_then_runs_insights_on_the_shortlist(audit_l
     asked = []
     state = run_workflow.run(run_workflow.build_graph(), [11, 12, 13], 2,
                              lambda req: asked.append(req) or True)
-    assert asked[0]["shortlist"] == [11, 12]
+    assert asked[0]["shortlist"] == [12, 11]           # mock scores 11/12/13: 0.78/0.95/0.71
     assert state["approved"] is True
-    assert [i["app_id"] for i in state["insights"]] == [11, 12]
+    assert [i["app_id"] for i in state["insights"]] == [12, 11]
     assert [a["command"] for a in read_audit(audit_log)] == ["score-candidates",
                                                             "candidate-insights"]
-    assert "Shortlisted [11, 12]" in state["summary"]
+    assert "Shortlisted [12, 11]" in state["summary"]
 
 
 def test_workflow_rejection_skips_insights(audit_log):

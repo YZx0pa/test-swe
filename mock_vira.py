@@ -9,6 +9,19 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
+def _score(n: int, salt: int) -> float:
+    """Deterministic pseudo-score in [0.55, 0.95], different per id.
+
+    Rankings differ by id (e.g. applicants 11/12/13 -> 0.78/0.95/0.71), so an
+    agent choosing "the best one" can be checked against the data it saw.
+    """
+    return round(0.55 + (n * salt % 41) / 100, 2)
+
+
+_INSIGHTS = ["strong backend fit", "solid data-engineering background",
+             "good culture add; needs Go ramp-up"]
+
+
 class MockVira:
     @staticmethod
     def call(path: str, query: Dict[str, Any], body: Dict[str, Any]) -> Dict:
@@ -42,14 +55,16 @@ class MockVira:
             if "version" in query:  # #4 insights
                 return {"status": "ok", "http_status": 200, "result": {
                     "version": query["version"],
-                    "insights": [{"app_id": a, "summary": "strong backend fit (mock)"}
+                    "insights": [{"app_id": a, "summary": f"{_INSIGHTS[a % 3]} (mock)"}
                                  for a in app_ids],
                     "_note": "SYNTHETIC mock response"}}
             # #3 scoring — scores applicants (app_ids) and/or suggested
             # talents (match_ids)
             match_ids = body.get("match_ids") or []
-            scored = ([{"app_id": a, "composite_score": 0.78, "briq": 0.81} for a in app_ids]
-                      + [{"match_id": m, "composite_score": 0.74, "briq": 0.69} for m in match_ids])
+            scored = ([{"app_id": a, "composite_score": _score(a, 17), "briq": _score(a, 23)}
+                       for a in app_ids]
+                      + [{"match_id": m, "composite_score": _score(m, 13), "briq": _score(m, 29)}
+                         for m in match_ids])
             return {"status": "ok", "http_status": 200, "result": {
                 "scores": scored, "_note": "SYNTHETIC mock response"}}
 

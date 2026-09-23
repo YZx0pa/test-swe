@@ -17,6 +17,7 @@ via recruiter_cli._audit, in the same format for every runtime.  One run per
 cell and LLMs are not deterministic, so read the table as anecdotal.
 
     python compare_agents.py
+    python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json
     python compare_agents.py --runners langgraph,deepagents --tasks find,id_trap --out report.md
 """
 import argparse
@@ -54,10 +55,12 @@ def _fix_environment() -> None:
 _fix_environment()
 
 import agent_kit      # noqa: E402
+import grounding      # noqa: E402
 import recruiter_cli  # noqa: E402
 import run_deepagent  # noqa: E402
 import run_langgraph  # noqa: E402
 import vira_tools     # noqa: E402
+from mock_vira import MockVira  # noqa: E402
 
 MODEL = os.environ.get("CHAT_MODEL", "gpt-5-mini")
 MOCK_PROFILE_IDS = {900001, 900002, 900003}     # what mock find-talents returns
@@ -76,6 +79,16 @@ class Run:
     seconds: float = 0.0
     error: str = ""
     off_policy: int = 0
+    repeat: int = 1
+    steps: list[dict] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return TASKS[self.task][1](self)[0] and not self.error
+
+    @property
+    def grounding(self) -> dict:
+        return grounding.summary(self.steps)
 
     @property
     def commands(self) -> list[str]:
@@ -104,6 +117,16 @@ def check_score_insights(run: Run):
     return ok, "score app_ids 11,12, then insights for 11 only"
 
 
+def check_top_pick(run: Run):
+    ids = [11, 12, 13]
+    scores = MockVira.call("candidate_score_calculation", {}, {"app_ids": ids})["result"]["scores"]
+    best = max(scores, key=lambda s: s["composite_score"])["app_id"]
+    ok = (run.commands == ["score-candidates", "candidate-insights"]
+          and sorted(run.audit[0]["body"]["app_ids"]) == ids
+          and run.audit[1]["body"]["app_ids"] == [best])
+    return ok, f"score 11,12,13, then insights only for the top scorer ({best})"
+
+
 def check_id_trap(run: Run):
     found = run.commands[:1] == ["find-talents"] and run.audit[0]["body"]["job_ids"] == [123]
     scored = [a for a in run.audit if a["command"] == "score-candidates"]
@@ -125,6 +148,8 @@ TASKS = {
               "and Go skills.", check_jd_ar),
     "score_insights": ("Score applicants 11 and 12, then get candidate insights for "
                        "applicant 11.", check_score_insights),
+    "top_pick": ("Score applicants 11, 12 and 13, then get candidate insights only for the "
+                 "one with the highest composite score.", check_top_pick),
     "id_trap": ("Find talents for job 123 and score them.", check_id_trap),
     "no_title": ("Generate a job description.", check_no_title),
 }
@@ -178,6 +203,7 @@ def run_mini(task: str, audit_path: Path, sandbox: Path, step_limit: int) -> Run
                 run.final = json.loads(m["content"]).get("output", "").strip()
             except (TypeError, ValueError):
                 pass
+    run.steps = grounding.trace_from_mini(agent.messages, task)
     exit_status = (agent.messages[-1].get("extra") or {}).get("exit_status", "") if agent.messages else ""
     if exit_status and exit_status != "Submitted":
         run.error = run.error or exit_status
@@ -195,6 +221,7 @@ def run_langchain(name: str, build, task: str, audit_path: Path) -> Run:
         result = agent_kit.run_task(build(), task, callbacks=[counter],
                                     decide=lambda req: [{"type": "reject"}] * len(req["action_requests"]))
         run.final = agent_kit.final_text(result)
+        run.steps = grounding.trace_from_messages(result["messages"], task)
         run.trajectory = [f"{tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"
                           for m in result["messages"] if m.type == "ai" for tc in m.tool_calls]
     except Exception as exc:
@@ -216,49 +243,96 @@ def estimated_cost(run: Run) -> float | None:
         return None
 
 
-def cell(run: Run) -> str:
-    ok, _ = TASKS[run.task][1](run)
-    ok = ok and not run.error
-    cost = estimated_cost(run)
-    return (f"{'PASS' if ok else 'FAIL'} · {run.model_calls} calls · "
-            f"{(run.input_tokens + run.output_tokens) / 1000:.1f}k tok"
-            + (f" · ${cost:.4f}" if cost is not None else "") + f" · {run.seconds:.0f}s")
+def _median(values):
+    values = sorted(values)
+    return values[len(values) // 2] if values else 0
 
 
-def report(runs: list[Run], runners: list[str], tasks: list[str]) -> str:
-    by = {(r.runner, r.task): r for r in runs}
+def cell(group: list[Run]) -> str:
+    """One table cell: pass rate over the repeats, then medians."""
+    passed = sum(r.passed for r in group)
+    costs = [c for c in (estimated_cost(r) for r in group) if c is not None]
+    tokens = _median([r.input_tokens + r.output_tokens for r in group])
+    verdict = ("PASS" if passed == len(group) else "FAIL") if len(group) == 1 else f"{passed}/{len(group)}"
+    return (f"{verdict} · {_median([r.model_calls for r in group])} calls · {tokens / 1000:.1f}k tok"
+            + (f" · ${sum(costs) / len(costs):.4f}" if costs else "")
+            + f" · {_median([r.seconds for r in group]):.0f}s")
+
+
+def details(r: Run) -> list[str]:
+    passed, note = TASKS[r.task][1](r)
+    g = r.grounding
+    lines = [f"### {r.runner} · {r.task} · run {r.repeat}", "",
+             f"Task: {TASKS[r.task][0]}", "",
+             f"Result: {'PASS' if r.passed else 'FAIL'} ({note})"
+             + (f"; error: {r.error}" if r.error else ""), "",
+             f"Grounding: {g['args_grounded']}/{g['args']} tool args traced "
+             f"({g['args_chained']} chained from earlier results), "
+             f"{g['numbers_grounded']}/{g['numbers']} answer numbers traced"
+             + (f"; UNGROUNDED: {', '.join(g['ungrounded'])}" if g["ungrounded"] else ""), "",
+             "Tool calls (as the model issued them):", "```"]
+    lines += r.trajectory or ["(none)"]
+    lines += ["```", "", "Reached VIRA (audit log):", "```"]
+    lines += [f"{a['command']} query={json.dumps(a['query'])} "
+              f"body={json.dumps(a['body'], ensure_ascii=False)}" for a in r.audit] or ["(nothing)"]
+    final = r.final if len(r.final) <= 600 else r.final[:600] + " …"
+    return lines + ["```", "", "Final answer:", "", "> " + (final.replace("\n", "\n> ") or "(none)"), ""]
+
+
+def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int) -> str:
+    groups = {(runner, t): [r for r in runs if r.runner == runner and r.task == t]
+              for runner in runners for t in tasks}
     lines = [f"# VIRA agent comparison — {MODEL}, mock VIRA", "",
-             "One run per cell (anecdotal). PASS/FAIL is judged on the audit log: what "
-             "actually reached VIRA.", "",
+             f"{repeat} run(s) per cell; medians shown. PASS/FAIL is judged on the audit log: "
+             "what actually reached VIRA.", "",
              "| task | check | " + " | ".join(runners) + " |",
              "|---|---|" + "---|" * len(runners)]
     for t in tasks:
-        note = TASKS[t][1](by[(runners[0], t)])[1]
-        lines.append(f"| {t} | {note} | " + " | ".join(cell(by[(r, t)]) for r in runners) + " |")
-    lines += ["", "## Runs", ""]
+        note = TASKS[t][1](groups[(runners[0], t)][0])[1]
+        lines.append(f"| {t} | {note} | " + " | ".join(cell(groups[(r, t)]) for r in runners) + " |")
+    totals = []
+    for runner in runners:
+        mine = [r for r in runs if r.runner == runner]
+        g = [r.grounding for r in mine]
+        costs = [c for c in (estimated_cost(r) for r in mine) if c is not None]
+        totals.append(f"{sum(r.passed for r in mine)}/{len(mine)} pass · "
+                      f"~${sum(costs):.3f} · ungrounded values: {sum(len(x['ungrounded']) for x in g)}")
+    lines.append("| **total** | | " + " | ".join(totals) + " |")
+    lines += ["", "## Runs (every failure, plus run 1 of each cell)", ""]
     for r in runs:
-        passed, note = TASKS[r.task][1](r)
-        lines += [f"### {r.runner} · {r.task}", "",
-                  f"Task: {TASKS[r.task][0]}", "",
-                  f"Result: {'PASS' if passed and not r.error else 'FAIL'} ({note})"
-                  + (f"; error: {r.error}" if r.error else ""), "",
-                  "Tool calls (as the model issued them):", "```"]
-        lines += r.trajectory or ["(none)"]
-        lines += ["```", "", "Reached VIRA (audit log):", "```"]
-        lines += [f"{a['command']} query={json.dumps(a['query'])} body={json.dumps(a['body'], ensure_ascii=False)}"
-                  for a in r.audit] or ["(nothing)"]
-        final = r.final if len(r.final) <= 600 else r.final[:600] + " …"
-        lines += ["```", "", "Final answer:", "", "> " + (final.replace("\n", "\n> ") or "(none)"), ""]
+        if not r.passed or r.repeat == 1:
+            lines += details(r)
     return "\n".join(lines)
 
 
+def to_json(runs: list[Run], repeat: int) -> dict:
+    return {
+        "model": MODEL, "mode": "mock", "repeat": repeat,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tasks": {k: {"text": v[0], "check": v[1](next(r for r in runs if r.task == k))[1]}
+                  for k, v in TASKS.items() if any(r.task == k for r in runs)},
+        "runs": [{
+            "runner": r.runner, "task": r.task, "repeat": r.repeat, "passed": r.passed,
+            "error": r.error, "model_calls": r.model_calls, "input_tokens": r.input_tokens,
+            "output_tokens": r.output_tokens, "seconds": round(r.seconds, 1),
+            "cost": estimated_cost(r), "audit": r.audit, "steps": r.steps,
+            "grounding": r.grounding, "final": r.final,
+        } for r in runs],
+    }
+
+
 def main(argv=None):
+    global MODEL
     p = argparse.ArgumentParser(description="Compare VIRA agent runtimes on mock VIRA.")
     p.add_argument("--runners", default="mini,langgraph,deepagents")
     p.add_argument("--tasks", default=",".join(TASKS))
+    p.add_argument("--model", default=MODEL, help="CHAT_MODEL for every runner (litellm-style id)")
+    p.add_argument("--repeat", type=int, default=1, help="runs per cell (LLMs are not deterministic)")
     p.add_argument("--step-limit", type=int, default=12)
     p.add_argument("--out", help="also write the markdown report here")
+    p.add_argument("--json", help="write every run's trace (steps, grounding, audit) here")
     args = p.parse_args(argv)
+    MODEL = os.environ["CHAT_MODEL"] = args.model
     runners = [r for r in args.runners.split(",") if r]
     tasks = [t for t in args.tasks.split(",") if t]
     vira_tools.configure("mock")
@@ -275,21 +349,26 @@ def main(argv=None):
     runs = []
     for task in tasks:
         for runner in runners:
-            audit_path = logs / f"{runner}-{task}.jsonl"
-            print(f"… {runner} · {task}", file=sys.stderr, flush=True)
-            if runner == "mini":
-                run = run_mini(TASKS[task][0], audit_path, sandbox, args.step_limit)
-            else:
-                run = run_langchain(runner, builders[runner], TASKS[task][0], audit_path)
-            run.task = task
-            if audit_path.exists():
-                run.audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
-            runs.append(run)
+            for n in range(1, args.repeat + 1):
+                audit_path = logs / f"{runner}-{task}-{n}.jsonl"
+                print(f"… {MODEL} · {runner} · {task} · run {n}", file=sys.stderr, flush=True)
+                if runner == "mini":
+                    run = run_mini(TASKS[task][0], audit_path, sandbox, args.step_limit)
+                else:
+                    run = run_langchain(runner, builders[runner], TASKS[task][0], audit_path)
+                run.task, run.repeat = task, n
+                if audit_path.exists():
+                    run.audit = [json.loads(line) for line in
+                                 audit_path.read_text(encoding="utf-8").splitlines()]
+                runs.append(run)
 
-    text = report(runs, runners, tasks)
+    text = report(runs, runners, tasks, args.repeat)
     print(text)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
+    if args.json:
+        Path(args.json).write_text(json.dumps(to_json(runs, args.repeat), ensure_ascii=False,
+                                              indent=1), encoding="utf-8")
     print(f"\n(audit logs: {logs})", file=sys.stderr)
 
 
