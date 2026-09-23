@@ -70,19 +70,19 @@ def _mask_pii(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_mask_pii(x) for x in obj]
     return obj
-def cmd_get_match_id(ns):
-    # "assume this endpoint exists" — synthesize a real-shaped response locally,
-    # even in --mode real, since the server may not have it yet.
-    pids = _csv_int(ns.profile_ids)
-    result = {
-        "status": "ok",
-        "http_status": 200,
-        "result": {
-            "matches": [{"profile_id": p, "match_id": p + 500000} for p in pids]
-        },
-    }
-    _audit("get-match-id", {}, {"profile_ids": pids}, result)   # keep it in the audit log
-    _emit(result)
+# def cmd_get_match_id(ns):
+#     # "assume this endpoint exists" — synthesize a real-shaped response locally,
+#     # even in --mode real, since the server may not have it yet.
+#     pids = _csv_int(ns.profile_ids)
+#     result = {
+#         "status": "ok",
+#         "http_status": 200,
+#         "result": {
+#             "matches": [{"profile_id": p, "match_id": p + 500000} for p in pids]
+#         },
+#     }
+#     _audit("get-match-id", {}, {"profile_ids": pids}, result)   # keep it in the audit log
+#     _emit(result)
 
 def _audit(cmd: str, query: Dict, body: Dict, result: Dict) -> None:
     with open(EVENTS_LOG, "a", encoding="utf-8") as f:
@@ -219,9 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--match-ids", dest="match_ids", default="", help="csv of match ids")
     s.set_defaults(func=cmd_candidate_insights)
 
-    s = sub.add_parser("get-match-id", help="Convert profile_ids to match_ids (assumed endpoint).")
-    s.add_argument("--profile-ids", dest="profile_ids", required=True)
-    s.set_defaults(func=cmd_get_match_id)
+    # s = sub.add_parser("get-match-id", help="Convert profile_ids to match_ids (assumed endpoint).")
+    # s.add_argument("--profile-ids", dest="profile_ids", required=True)
+    # s.set_defaults(func=cmd_get_match_id)
     return p
 
 

@@ -5,23 +5,12 @@ Flags:
   --profile-ids CSV (optional) specific profile ids to consider
 Returns: profile_id values AND their scores (overall_score, skill_score, job_name_similarity).
 
-### get-match-id
-Get match_ids from profile_ids
-Flags:
-  --profile-ids CSV (REQUIRED) profile ids to convert
-Returns: matches[].match_id — the match_id for each profile_id.
-Note: profile_ids are NOT match_ids. Convert with this before score-candidates.
-
 ### score-candidates
 Trigger CV scoring calculation (composite + briq).
 Flags:
   --app-ids CSV   (optional) application ids (applicants who applied)
   --match-ids CSV (optional) match ids (from get-match-id, for suggested talents)
 Returns: scores[] with composite_score and briq per id.
-Note: needs match_ids, NOT profile_ids, for suggested talents. If you have
-profile_ids from find-talents, run get-match-id first to convert them.
-Note: if it returns "No match_id is obtained from db", you passed profile_ids by
-mistake — convert with get-match-id and retry.
 
 ### generate-jd
 LLM-generate a job posting/description.

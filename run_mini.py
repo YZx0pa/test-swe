@@ -28,16 +28,20 @@ Rules:
 - match_id, app_id, profile_id, job_id are DISTINCT. Never pass one where another is
   expected. If you need an id type you don't have, you MUST call the matching get-*
   command (only one listed above; don't invent names). If none exists, run
-  echo Not_Able_to_obtain_the_correct_id and stop.
+  echo Not_Able_to_obtain_the_correct_id ONCE, then finish as described below.
 - Never invent any field value. Every value must come from either the OUTPUT of a
   previous command, or explicit user input. If a required value is available from
-  neither, ask the user or stop — do not guess.
+  neither, do not guess — finish as described below and say what was missing.
+- Never issue a command you have already run with the same arguments, and never
+  repeat a command that failed the same way. If you cannot make progress, finish.
 - "status": "ok" only means the API call was received — NOT that the operation
   succeeded. Always read the result fields for the real outcome. If a result field
   contains an error or a message saying nothing was found/obtained/processed, treat
   it as a FAILURE even though status is "ok", and correct your next command.
 - If the task is only partially done or cannot be fully completed, before finishing
-  run: echo SUMMARY: <what succeeded> | <what failed or is missing> | <why>
+  run it as ONE quoted argument, exactly like this (the quotes matter — without
+  them the | characters are read as shell pipes and the text is lost):
+  echo "SUMMARY: <what succeeded> | <what failed or is missing> | <why>"
   then run echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT by itself.
 - When the whole task is fully done, run echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT by itself.
 """
@@ -71,7 +75,13 @@ def build_agent():
 
     model_kwargs = dict(model_cfg.get("model_kwargs", {}))
     model_kwargs["parallel_tool_calls"] = False   # one command per turn
-    model = LitellmModel(model_name=os.environ.get("CHAT_MODEL", "gpt-4o"),
+    # Reasoning models (gpt-5*) otherwise answer some turns in prose, which mini
+    # rejects as a format error — and the model then retries by re-issuing its
+    # previous command, firing real API calls a second time.  Forcing a tool call
+    # every turn removes that failure mode; the agent always ends on a command
+    # (echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT), so nothing needs a prose turn.
+    model_kwargs["tool_choice"] = "required"
+    model = LitellmModel(model_name=os.environ.get("CHAT_MODEL", "gpt-5-mini"),
                          model_kwargs=model_kwargs)
     env = LocalEnvironment(env=env_cfg["env"]) if env_cfg.get("env") else LocalEnvironment()
     return DefaultAgent(model, env, **agent_cfg)
