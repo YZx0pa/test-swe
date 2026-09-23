@@ -132,7 +132,25 @@ class ToolCallGuard(AgentMiddleware):
         return ToolMessage(content=json.dumps({"status": "error", "message": message}),
                            tool_call_id=call["id"], name=call["name"], status="error")
 
+    @staticmethod
+    def _misused_ids(request) -> list[str]:
+        """Ids passed as a different kind than they came back as (grounding's id-kind check)."""
+        messages = request.state.get("messages", [])
+        task = next((m.text for m in messages if m.type == "human"), "")
+        sources = [("task", task)] + [(f"step {i}", m.text) for i, m in enumerate(messages)
+                                      if m.type == "tool"]
+        found = []
+        for arg, entries in grounding.ground_args(request.tool_call["args"], sources).items():
+            for p in entries:
+                if "misused_as" in p:
+                    found.append(f"{p['value']} is a {p['misused_as']}, not a {arg[:-1]}")
+        return found
+
     def _refusal(self, request) -> ToolMessage | None:
+        misused = self._misused_ids(request)
+        if misused:
+            return self._result(request, "Refused: " + "; ".join(misused) + ". No tool converts "
+                                "between id kinds: finish and say which id is missing.")
         repeat = self._repeat_of_earlier_call(request)   # also orders parallel duplicates
         if not repeat and self.ledger is not None:
             info = request.runtime.execution_info

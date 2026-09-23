@@ -114,6 +114,24 @@ def test_different_args_are_not_duplicates(vira):
     assert len(vira) == 2
 
 
+def test_an_id_of_the_wrong_kind_is_refused_before_vira(monkeypatch, audit_log):
+    # Seen live with gpt-4o-mini: profile ids from find_talents sent to scoring as match ids.
+    result = run(scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")),
+        calls(call("score_candidates", {"match_ids": [900001]}, "c2")),
+        say("Stopped: I only have profile ids.")), task="Find talents for job 123 and score them.")
+    refused = tool_messages(result)["c2"]
+    assert refused.status == "error"
+    assert "900001 is a profile_id, not a match_id" in refused.text
+    assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
+
+
+def test_ids_the_user_named_are_not_refused(vira):
+    run(scripted(calls(call("score_candidates", {"match_ids": [900001]}, "c1")), say("done")),
+        task="Score match 900001.")
+    assert len(vira) == 1
+
+
 def test_a_crashing_tool_does_not_crash_the_run(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("internal detail")
