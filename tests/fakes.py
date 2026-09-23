@@ -1,10 +1,14 @@
 """A scripted chat model: replays AIMessages in order, so agent graphs run offline."""
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
+from pydantic import Field
 
 
 class ScriptedModel(GenericFakeChatModel):
+    offered: list[list[str]] = Field(default_factory=list)   # tool names per model request
+
     def bind_tools(self, tools, **kwargs):   # agents bind tools; the script already knows them
+        self.offered.append([getattr(t, "name", None) or t.get("name") for t in tools])
         return self
 
 
