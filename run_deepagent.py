@@ -45,8 +45,9 @@ language and details you are given. Answer with the job description text.
 """
 
 
-def subagents(tools: dict, step_limit: int) -> list[dict]:
-    # Custom middleware is not inherited by subagents, so each gets its own guard + cap.
+def subagents(tools: dict, step_limit: int, ledger: agent_kit.CallLedger) -> list[dict]:
+    # Custom middleware is not inherited by subagents, so each gets its own guard + cap,
+    # all sharing one ledger: a subagent can't repeat a VIRA call the parent already made.
     return [
         {"name": "sourcing-analyst",
          "description": ("Finds suggested talents for ONE job, scores applicants or suggested "
@@ -54,29 +55,30 @@ def subagents(tools: dict, step_limit: int) -> list[dict]:
                          "application or match ids."),
          "system_prompt": SOURCING_PROMPT + agent_kit.SYSTEM_PROMPT,
          "tools": [tools[n] for n in ("find_talents", "score_candidates", "candidate_insights")],
-         "middleware": agent_kit.middleware(step_limit)},
+         "middleware": agent_kit.middleware(step_limit, ledger)},
         {"name": "jd-writer",
          "description": ("Drafts a job description. Give it the job title, skills, language "
                          "and any other details from the user."),
          "system_prompt": JD_PROMPT + agent_kit.SYSTEM_PROMPT,
          "tools": [tools["generate_jd"]],
-         "middleware": agent_kit.middleware(step_limit)},
+         "middleware": agent_kit.middleware(step_limit, ledger)},
         # Replaces the auto-added general-purpose subagent, which would otherwise run
         # the VIRA tools without our guard, call cap or domain rules.
         {**GENERAL_PURPOSE_SUBAGENT,
          "system_prompt": GENERAL_PURPOSE_SUBAGENT["system_prompt"] + "\n\n" + agent_kit.SYSTEM_PROMPT,
-         "middleware": agent_kit.middleware(step_limit)},
+         "middleware": agent_kit.middleware(step_limit, ledger)},
     ]
 
 
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None):
     tools = vira_tools.langchain_tools()
+    ledger = agent_kit.CallLedger()
     return create_deep_agent(
         model=model or agent_kit.build_chat_model(),
         tools=tools,
         system_prompt=agent_kit.SYSTEM_PROMPT + WORKING_STYLE,
-        subagents=subagents({t.name: t for t in tools}, step_limit),
-        middleware=[TodoListMiddleware(), *agent_kit.middleware(step_limit)],
+        subagents=subagents({t.name: t for t in tools}, step_limit, ledger),
+        middleware=[TodoListMiddleware(), *agent_kit.middleware(step_limit, ledger)],
         interrupt_on=agent_kit.interrupt_on(approve_all) or None,   # subagents inherit it
         checkpointer=InMemorySaver(),
         name="vira-deepagent",

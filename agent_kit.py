@@ -15,6 +15,7 @@ minisweagent prints a banner on import.
 import argparse
 import json
 import os
+import threading
 import uuid
 from typing import Any, Callable
 
@@ -50,6 +51,8 @@ Rules:
   guess: finish as described below and say what was missing.
 - Never repeat a tool call with the same arguments, and never repeat a call that failed the
   same way. If you cannot make progress, finish.
+- Relay what the tools return. Do not write or rewrite content yourself (for example a job
+  description), and do not call a tool again just to get a longer or better result.
 - "status": "ok" only means the API call was received, NOT that the operation succeeded.
   Always read the result fields for the real outcome. If a result field contains an error or
   a message saying nothing was found/obtained/processed, treat it as a FAILURE even though
@@ -80,12 +83,34 @@ def _normalise(args: dict) -> str:
                       sort_keys=True, ensure_ascii=False)
 
 
+class CallLedger:
+    """VIRA calls already made, per task thread, shared by an agent and all its subagents.
+
+    A subagent runs in its own message context, so the message-history check alone
+    can't see a call the parent (or a sibling subagent) already made.  All of them
+    share the task's thread_id, so one ledger keyed by it covers the whole task.
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[tuple] = set()
+        self._lock = threading.Lock()
+
+    def claim(self, key: tuple) -> bool:
+        """True the first time `key` is seen; False for every repeat."""
+        with self._lock:
+            if key in self._seen:
+                return False
+            self._seen.add(key)
+            return True
+
+
 class ToolCallGuard(AgentMiddleware):
     """For the VIRA tools only: refuse exact repeats, never let a tool crash the run."""
 
-    def __init__(self, names=frozenset(vira_tools.NAMES)):
+    def __init__(self, names=frozenset(vira_tools.NAMES), ledger: CallLedger | None = None):
         super().__init__()
         self.names = set(names)
+        self.ledger = ledger
 
     def _repeat_of_earlier_call(self, request) -> bool:
         call = request.tool_call
@@ -105,7 +130,13 @@ class ToolCallGuard(AgentMiddleware):
                            tool_call_id=call["id"], name=call["name"], status="error")
 
     def _refusal(self, request) -> ToolMessage | None:
-        if self._repeat_of_earlier_call(request):
+        repeat = self._repeat_of_earlier_call(request)   # also orders parallel duplicates
+        if not repeat and self.ledger is not None:
+            info = request.runtime.execution_info
+            call = request.tool_call
+            repeat = not self.ledger.claim((info.thread_id if info else None, call["name"],
+                                            _normalise(call["args"])))
+        if repeat:
             return self._result(request, "Refused: identical to an earlier call in this task. "
                                          "Use that result instead of calling again.")
         return None
@@ -137,9 +168,12 @@ class ToolCallGuard(AgentMiddleware):
             return self._result(request, f"tool failed ({type(exc).__name__})")
 
 
-def middleware(step_limit: int = 12) -> list:
-    """Guard + a per-thread cap on model calls (each task runs on a fresh thread)."""
-    return [ToolCallGuard(),
+def middleware(step_limit: int = 12, ledger: CallLedger | None = None) -> list:
+    """Guard + a per-thread cap on model calls (each task runs on a fresh thread).
+
+    Pass one shared ledger to an agent and all its subagents.
+    """
+    return [ToolCallGuard(ledger=ledger),
             ModelCallLimitMiddleware(thread_limit=step_limit, exit_behavior="end")]
 
 

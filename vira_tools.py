@@ -65,23 +65,24 @@ def find_talents(
 
 def generate_jd(
     job_title: Annotated[str, Field(
-        min_length=1, description="The job title, exactly as the user gave it.")],
+        min_length=1, description="Just the job title the user gave; skills go in `skills`.")],
     skills: Annotated[list[str] | None, Field(
-        description="Skills to include.")] = None,
+        description="Skills the user named. Leave empty if they named none.")] = None,
     lang: Annotated[str, Field(
         description="Language code of the posting, e.g. en, ar.")] = "en",
     job_id: Annotated[int | None, Field(
-        description="Existing job id, if the posting is for one.")] = None,
+        description="Existing job id, only if the user gave one.")] = None,
     job_function: Annotated[list[str] | None, Field(
-        description="Job functions, e.g. Engineering.")] = None,
+        description="Job functions the user named. Leave empty if they named none.")] = None,
     industry: Annotated[list[str] | None, Field(
-        description="Industries, e.g. Fintech.")] = None,
+        description="Industries the user named. Leave empty if they named none.")] = None,
     other_requirements: Annotated[list[str] | None, Field(
-        description="Any other requirements to include.")] = None,
+        description="Other requirements the user stated. Leave empty if they stated none.")] = None,
 ) -> Dict[str, Any]:
     """LLM-generate a job posting / job description.
 
-    Returns the job_description text.
+    VIRA writes the description: pass only what the user gave, never
+    requirements of your own. Returns the job_description text.
     """
     return _call(vira.generate_jd, job_title=job_title, skills=skills or [],
                  lang=lang or "en", job_id=job_id or 0, job_function=job_function or [],

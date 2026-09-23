@@ -71,6 +71,31 @@ def test_subagent_runs_vira_and_returns_only_its_answer(audit_log):
                    for tc in m.tool_calls)
 
 
+def test_a_subagent_cannot_repeat_a_call_the_parent_made(audit_log):
+    # Seen live: the parent called generate_jd, then delegated the same call to jd-writer.
+    model = scripted(
+        calls(call("generate_jd", {"job_title": "X", "lang": "ar"}, "m1")),
+        calls(call("task", {"description": "Draft the JD for X in ar",
+                            "subagent_type": "jd-writer"}, "t1")),
+        calls(call("generate_jd", {"job_title": "X", "lang": "ar"}, "s1")),
+        say("refused: already drafted"),
+        say("Here is the draft from the first call."))
+    agent = run_deepagent.build_agent(model=model)
+    result = agent_kit.run_task(agent, "jd")
+    assert [a["command"] for a in read_audit(audit_log)] == ["generate-jd"]
+    task_result = next(m for m in result["messages"] if m.type == "tool" and m.tool_call_id == "t1")
+    assert "refused" in task_result.text
+
+
+def test_the_ledger_is_per_task(audit_log):
+    model = scripted(calls(call("find_talents", {"job_ids": [1]}, "a")), say("one"),
+                     calls(call("find_talents", {"job_ids": [1]}, "b")), say("two"))
+    agent = run_deepagent.build_agent(model=model)
+    agent_kit.run_task(agent, "first task")
+    agent_kit.run_task(agent, "second task")          # fresh thread: same call is allowed
+    assert [a["command"] for a in read_audit(audit_log)] == ["find-talents", "find-talents"]
+
+
 def test_subagents_inherit_approval(audit_log):
     model = scripted(
         calls(call("task", {"description": "Score applicant 11.",
