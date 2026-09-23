@@ -1,0 +1,6 @@
+# Test dependencies — tests/ run offline (mock VIRA + a scripted fake chat model)
+#
+#   uv pip install -r requirements-dev.txt
+
+-r requirements.txt
+pytest==9.1.1            # tests/

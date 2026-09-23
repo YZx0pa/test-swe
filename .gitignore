@@ -10,3 +10,5 @@ __pycache__/
 # audit log written by recruiter_cli._audit()
 events.jsonl
 CLAUDE.md
+# pytest
+.pytest_cache/

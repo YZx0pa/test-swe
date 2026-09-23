@@ -2,6 +2,7 @@
 #
 #   uv venv --python 3.11 .venv
 #   uv pip install -r requirements.txt
+#   uv pip install -r requirements-dev.txt   # + pytest, for tests/
 #
 # (requirements.lock.txt holds the full transitive set, pinned.)
 
@@ -9,3 +10,10 @@ mini-swe-agent==2.4.6    # `minisweagent` agent loop used by run_mini.py; pulls 
 python-dotenv==1.2.3     # load_dotenv() in recruiter_cli.py and run_mini.py
 requests==2.34.2         # real-mode VIRA calls in recruiter_cli._call
 PyYAML==6.0.3            # run_mini.build_agent() parses minisweagent's config/mini.yaml
+
+# --- agent frameworks: run_langgraph.py, run_workflow.py, run_deepagent.py, vira_mcp.py ---
+langchain==1.4.2         # create_agent + middleware (HITL, call limits) in agent_kit.py / run_langgraph.py
+langgraph==1.2.12        # StateGraph, interrupt(), InMemorySaver in run_workflow.py and every runner
+langchain-openai==1.6.4  # ChatOpenAI behind init_chat_model() for CHAT_MODEL=gpt-5-mini
+deepagents==0.7.18       # create_deep_agent in run_deepagent.py; pulls in langchain-anthropic, langchain-google-genai, langsmith
+mcp==1.30.0              # FastMCP stdio server in vira_mcp.py (v1 line: mcp.server.fastmcp)
