@@ -2,9 +2,12 @@
 #
 #   uv venv --python 3.11 .venv
 #   uv pip install -r requirements.txt
-#   uv pip install -r requirements-dev.txt   # + pytest, for tests/
+#   uv pip install -r requirements-dev.txt   # + pytest and pip-audit, for tests/
 #
-# (requirements.lock.txt holds the full transitive set, pinned.)
+# requirements.lock.txt holds the full transitive set, pinned with hashes:
+#   uv pip install --require-hashes -r requirements.lock.txt
+#   .venv/bin/pip-audit -r requirements.lock.txt --disable-pip     # known vulnerabilities
+# Its header has the command that regenerates it (keeping every other pin).
 
 mini-swe-agent==2.4.6    # `minisweagent` agent loop used by run_mini.py; pulls in litellm, pydantic, jinja2, typer
 python-dotenv==1.2.3     # load_dotenv() in recruiter_cli.py and run_mini.py

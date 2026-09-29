@@ -362,7 +362,9 @@ What the runs showed:
 ## 9. Running it
 
 ```bash
-uv pip install -r requirements-dev.txt
+uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
+# uv pip install --require-hashes -r requirements.lock.txt
+.venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
 .venv/bin/python -m pytest -q                                   # offline, 193 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
@@ -437,4 +439,5 @@ every control sits in code the model can't reach, and each one has a test.
 | Traces or reports readable by other users, or carrying the task's PII | `agent_kit.write_private()`: 0600 files (a missing directory is created 0700), emails and phone numbers scrubbed | `test_trace_json_is_owner_only_and_scrubbed` |
 | Model or VIRA text drives your terminal (ESC/OSC sequences, clipboard writes, bidi tricks in an approval prompt) | `terminal.printable()` on every trajectory, approval prompt, virtual-file and workflow print, in all runners | `test_printable_strips_terminal_escapes_and_bidi_controls`, `test_trajectories_print_without_escapes` |
 | A mistyped edit at the approval prompt crashes the task | `ask_human` asks again until it gets a JSON object | `test_a_bad_edit_is_asked_again_not_a_crash` |
+| A tampered or vulnerable dependency | `requirements.lock.txt` pins all 138 packages with hashes (`--require-hashes` installs); `pip-audit` is in the dev requirements. No known vulnerabilities on 2026-09-30 | `pip-audit -r requirements.lock.txt --disable-pip` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
