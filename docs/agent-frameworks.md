@@ -57,8 +57,9 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `agent_kit.py` | Shared prompt, model factory, middleware, approval loop and REPL for the LangChain-based runners. |
 | `run_langgraph.py` / `run_workflow.py` / `run_deepagent.py` | The runtimes. New runners default to `--mode mock`; `--mode real` reaches VIRA. |
 | `vira_mcp.py` | The same tools over MCP. |
-| `compare_agents.py` | Live side-by-side on mock VIRA (section 7). |
-| `tests/` | 43 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `compare_agents.py` | Live side-by-side on mock VIRA (section 7): `--model`, `--repeat`, `--json` traces. |
+| `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
+| `tests/` | 56 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer.
@@ -74,6 +75,7 @@ How mini's bash-era prompt rules became structure:
 | "Use `--mode mock`" (model-written) | Mode is fixed by the host; no tool parameter for it |
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
 | "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents |
+| "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`) |
 | `step_limit: 12` | `ModelCallLimitMiddleware(thread_limit=12)`, one fresh thread per task |
 | "Tell the user … retry with `--confirmed`" | `--approve-all`: a LangGraph interrupt pauses before the call; approve, edit or reject |
 | Arg validation by argparse (strings) | Pydantic schema: `job_ids` ≥1, `job_title` non-empty, and so on; the model gets the error and retries |
@@ -305,7 +307,7 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 43 tests
+.venv/bin/python -m pytest -q                                   # offline, 56 tests
 
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
 python run_langgraph.py --approve-all                                     # approve/edit/reject each call
@@ -313,6 +315,8 @@ python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
 python vira_mcp.py --mode mock                                            # for MCP clients
 python compare_agents.py --out report.md                                  # live LLM, mock VIRA only
+python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json   # traces for the page
+python run_langgraph.py --mode real --task "…" --trace-json real.json     # one real run, local file
 ```
 
 LangSmith tracing is forced off in the new runners; `--trace` allows it. Traces would carry
