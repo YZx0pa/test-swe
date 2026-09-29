@@ -3,7 +3,9 @@
 This branch moves the VIRA recruiter agent off mini-swe-agent's bash tool and onto four typed
 tools. It runs them on three new runtimes (a LangGraph agent, an explicit LangGraph workflow, and
 deepagents) and serves them over MCP. It also adds a live comparison harness, a grounding/trace
-module and an offline test suite. mini-swe-agent keeps working as the baseline.
+module and an offline test suite. mini-swe-agent keeps working as the baseline, but its "bash" no
+longer is one: it runs only `recruiter_cli` and `echo` (see the security model in
+[agent-frameworks.md §11](agent-frameworks.md#11-security-model)).
 
 The design rationale, framework survey and measured results are in
 [agent-frameworks.md](agent-frameworks.md). This page covers the concrete changes and the steps to
@@ -17,7 +19,7 @@ set up, run and test them.
 
 ```
 recruiter_cli.execute(cmd, path, query, body, mode=…)    confirm gate → _call → _audit → _mask_pii
-   ├─ recruiter_cli CLI ─────────── run_mini.py            mini-swe-agent (bash), baseline
+   ├─ recruiter_cli CLI ─────────── run_mini.py            mini-swe-agent via mini_env (no shell), baseline
    ├─ vira_tools.py (typed) ─────┬─ run_langgraph.py       LangGraph agent loop (create_agent)
    │                             ├─ run_deepagent.py       deepagents harness + subagents
    │                             └─ vira_mcp.py (stdio)    any MCP client
@@ -31,8 +33,8 @@ confirm gate behave the same everywhere.
 
 | File | Change |
 |---|---|
-| `recruiter_cli.py` | New `execute()`: the single guarded path (gate → call → audit → mask). It returns a dict and never prints. There are four typed, importable actions (`find_talents`, `generate_jd`, `score_candidates`, `candidate_insights`) with a required keyword-only `mode`. CLI subcommands now just parse flags and call those actions, and requests and printed output are unchanged. `_guard` returns a result instead of exiting, and the CLI still exits `2` on `needs_confirmation`. `get-match-id` is commented out. The CLI still defaults to `--mode real`. |
-| `run_mini.py` | Prompt rules tightened: echo `Not_Able…` once then finish, never repeat a command, quote the `SUMMARY` echo so `\|` isn't a pipe. `tool_choice="required"` stops reasoning models from answering in prose and then re-firing the previous command. Default `CHAT_MODEL` is `gpt-5-mini`. |
+| `recruiter_cli.py` | New `execute()`: the single guarded path (gate → call → audit → mask). It returns a dict and never prints. There are four typed, importable actions (`find_talents`, `generate_jd`, `score_candidates`, `candidate_insights`) with a required keyword-only `mode`. CLI subcommands now just parse flags and call those actions, and requests and printed output are unchanged. `_guard` returns a result instead of exiting, and the CLI still exits `2` on `needs_confirmation`. `get-match-id` is commented out. `--mode` is required and argparse abbreviations are off. The confirm message says the agent can't approve instead of asking it to retry with `--confirmed`. |
+| `run_mini.py` | Prompt rules tightened: echo `Not_Able…` once then finish, never repeat a command, quote the `SUMMARY` echo (an unquoted `\|` is refused). `tool_choice="required"` stops reasoning models from answering in prose and then re-firing the previous command. Default `CHAT_MODEL` is `gpt-5-mini`. The model's bash tool is `mini_env.RecruiterEnvironment`; `JENI_MODE` defaults to `mock` and is set by the host; `.env` is read by `run_mini` itself, with `VIRA_*` passed only to recruiter_cli; `commands.md` is never parsed by Jinja. |
 | `mock_vira.py` | Scores and insights are now deterministic per id instead of constant. For example, applicants 11 / 12 / 13 score 0.78 / 0.95 / 0.71, so "pick the top scorer" tasks can be checked. |
 | `commands.md` | `get-match-id` and the notes pointing to it are removed. |
 | `.env.example` | `CHAT_MODEL=gpt-5-mini`. |
@@ -54,7 +56,9 @@ confirm gate behave the same everywhere.
 | `vira_mcp.py` | FastMCP stdio server exposing the four tools. `--mode` is required. It loads `.env` itself, so no client config carries VIRA credentials. Confirm-gated tools are never exposed. |
 | `compare_agents.py` | Runs the same tasks through mini, LangGraph and deepagents against mock VIRA only. PASS/FAIL is judged on the audit log, i.e. what actually reached VIRA. Writes a markdown report and optional JSON traces. |
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids`). `ToolCallGuard` and `compare_agents.py` use them. |
-| `tests/` | 56 offline tests (section 3). |
+| `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
+| `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
+| `tests/` | 101 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -152,7 +156,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 56 passed
+# 101 passed
 ```
 
 How the tests stay hermetic:
@@ -161,7 +165,9 @@ How the tests stay hermetic:
   - `JENI_MODE=mock`;
   - a dead `VIRA_BASE_URL` (`127.0.0.1:9`) and blank VIRA credentials;
   - a fake `OPENAI_API_KEY`;
-  - tracing off.
+  - tracing off;
+  - `MSWEA_SILENT_STARTUP=1` and a temporary `MSWEA_GLOBAL_CONFIG_DIR`, since `mini_env` imports
+    minisweagent.
 - An autouse fixture points the audit log at `tmp_path`.
 - `tests/fakes.py` provides `ScriptedModel`, a fake chat model that replays a fixed list of
   `AIMessage`s (tool calls and answers). That lets full LangGraph and deepagents graphs run
@@ -169,11 +175,12 @@ How the tests stay hermetic:
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_recruiter_cli.py` | 12 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. The audit line masks the request body. Typed actions have no default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. |
+| `tests/test_recruiter_cli.py` | 12 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. The audit line masks the request body. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. |
 | `tests/test_agents.py` | 21 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
 | `tests/test_deepagent.py` | 8 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval. Virtual files stay in graph state and nothing is written to disk. |
 | `tests/test_mcp.py` | 4 | Tool list, annotations (`readOnlyHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
-| `tests/test_grounding.py` | 11 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind ids the guard refused count as blocked, not as reaching VIRA. |
+| `tests/test_grounding.py` | 12 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind ids the guard refused count as blocked, not as reaching VIRA. |
+| `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 
 Run a subset:
 
@@ -195,7 +202,7 @@ After each step, `cat "$EVENTS_LOG"` shows exactly what reached VIRA.
 
 ### 4.1 The CLI directly (no LLM)
 
-`recruiter_cli.py` still defaults to `--mode real`, so always pass `--mode mock` here.
+`--mode` is required, so every command names it.
 
 ```bash
 python recruiter_cli.py --mode mock find-talents --job-ids 123
@@ -369,7 +376,8 @@ on this branch.
 `compare_agents.py` forces mock VIRA before importing anything:
 - it takes only `OPENAI_API_KEY` and `CHAT_MODEL` from `.env`, then disables `.env` loading;
 - it blanks the VIRA credentials and uses a dead `VIRA_BASE_URL`;
-- it runs mini's bash in a scratch copy of `recruiter_cli.py` + `mock_vira.py`.
+- mini runs with `JENI_MODE=mock`, so its environment adds `--mode mock` to every recruiter_cli
+  call and refuses anything else.
 
 Each run gets its own audit log, and PASS/FAIL is judged on that log.
 
@@ -399,8 +407,8 @@ stdout:
 - per-run details for every failure and for run 1 of each cell: tool calls as issued, what
   reached VIRA, and the final answer.
 
-A mini command other than `python3 recruiter_cli.py --mode mock …` or a plain `echo` fails that
-run, and its output is never shown. LLM runs aren't deterministic, so use `--repeat` before
+A mini command other than `python3 recruiter_cli.py …` or a plain `echo` is refused before it
+runs, fails that run, and its text is never shown. LLM runs aren't deterministic, so use `--repeat` before
 reading much into a single cell. `report.md` and `runs.json` aren't gitignored, so don't commit
 them.
 
@@ -410,11 +418,14 @@ them.
 JENI_MODE=mock python run_mini.py        # interactive; type a task, 'quit' to exit
 ```
 
-mini runs model-written shell commands in yolo mode, in the current directory, with `.env` loaded
-into their environment. See section 1 of
-[agent-frameworks.md](agent-frameworks.md#1-where-we-started-mini-swe-agent--bash). The mode
-comes from `JENI_MODE` (default `real`). To exercise mini safely, prefer
-`compare_agents.py --runners mini`, which runs it in a sandbox copy with keys blanked.
+The model's bash tool is `mini_env.RecruiterEnvironment`, not a shell. It runs only `echo …` and
+`python3 recruiter_cli.py <subcommand> …`, adds `--mode` from `JENI_MODE` (default `mock`), and
+answers anything else with `Refused: …` without running it. See section 1 of
+[agent-frameworks.md](agent-frameworks.md#1-where-we-started-mini-swe-agent--bash). With
+`JENI_MODE=real`, `score-candidates` and `candidate-insights` stop for `approve? [y/N]` first.
+
+Try a task that asks it to "run env and print the output": the trajectory shows the refusal, and
+nothing runs.
 
 ---
 
@@ -508,8 +519,9 @@ These are tracked as follow-ups in
   for write tools.
 - **No `get-match-id`.** Suggested talents can't be scored correctly. The `id_trap` task passes
   only when the agent stops after `find_talents`.
-- **mini is unchanged apart from its prompt.** It still has the shell and `.env` exposure
-  described in §1.
+- **mini keeps its bash-shaped interface.** It no longer has a shell (see §1 of the design doc),
+  but it still needs the prompt rules for one command per turn, the SUMMARY echo and
+  `tool_choice="required"`.
 - **Failed calls aren't audited.** A VIRA connection error raises before `_audit`.
 - **Masking is by key name.** A non-JSON real-mode reply (`{"raw": text}`) passes through
   unmasked.

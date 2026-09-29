@@ -2,13 +2,16 @@
 
 The environment is fixed at module top, before any project module is imported,
 because recruiter_cli calls load_dotenv() and reads EVENTS_LOG / the VIRA
-headers at import time.  Tests must never import run_mini (it loads .env and
-minisweagent prints a banner).
+headers at import time.  Tests must never import run_mini (it reads .env and
+pulls in litellm); mini_env is importable, with minisweagent kept quiet below.
 """
 import json
 import os
+import tempfile
 
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"              # every load_dotenv() is a no-op
+os.environ["MSWEA_SILENT_STARTUP"] = "1"                # mini_env imports minisweagent: no banner
+os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = tempfile.mkdtemp(prefix="mswea-")   # not ~/.config
 os.environ["JENI_MODE"] = "mock"
 os.environ["VIRA_BASE_URL"] = "http://127.0.0.1:9/v1"    # dead port: real mode can't reach VIRA
 for _key in ("VIRA_API_KEY", "VIRA_CLIENT_NAME", "VIRA_USER_ID"):

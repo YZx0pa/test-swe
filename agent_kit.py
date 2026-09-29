@@ -9,8 +9,8 @@ What run_mini.py spells out as bash-era prompt rules becomes structure here:
   * ModelCallLimitMiddleware caps model calls per task (mini's step_limit).
   * --approve-all puts a human in front of every VIRA call (LangGraph interrupt).
 
-Never import run_mini from here: it loads .env into the bash env and
-minisweagent prints a banner on import.
+Never import run_mini from here: it reads .env and pulls in minisweagent and
+litellm on import.
 """
 import argparse
 import json

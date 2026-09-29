@@ -18,10 +18,12 @@ Design notes tied to the four real curls you gave:
   * #3 and #4 hit the SAME endpoint (candidate_score_calculation) with
     different query params, so they are two subcommands, one path.
 
-Run modes:
-  --mode real  -> calls VIRA at $VIRA_BASE_URL (your localhost).  Default.
+Run modes (--mode is required, so nothing reaches VIRA by default):
+  --mode real  -> calls VIRA at $VIRA_BASE_URL (your localhost).
   --mode mock  -> calls a local fake (mock_vira.MockVira) so the whole mini
-                  loop can run with no backend.  Used by run_demo.py.
+                  loop can run with no backend.
+Under mini-swe-agent the host adds --mode (mini_env.RecruiterEnvironment); the
+model can't choose it.
 """
 from __future__ import annotations
 
@@ -102,10 +104,9 @@ def _guard(cmd: str, confirmed: bool) -> Dict | None:
     if cmd in NEEDS_CONFIRM and not confirmed:
         return {
             "status": "needs_confirmation",
-            "message": (f"'{cmd}' affects candidates or is irreversible and "
-                        f"needs explicit user confirmation. Tell the user exactly "
-                        f"what will happen and to whom, get agreement, then retry "
-                        f"with --confirmed."),
+            "message": (f"'{cmd}' affects candidates or is irreversible and needs a "
+                        f"person's approval, which the agent cannot give. Tell the user "
+                        f"exactly what would happen and to whom, and do not retry."),
         }
     return None
 
@@ -238,18 +239,21 @@ def cmd_candidate_insights(ns):
 
 # --- argparse wiring --------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="recruiter-cli",
+    # allow_abbrev=False: "--mo real" must not pass for --mode.
+    p = argparse.ArgumentParser(prog="recruiter-cli", allow_abbrev=False,
                                 description="Recruiter AI actions for the agent.")
-    p.add_argument("--mode", choices=["real", "mock"], default="real",
+    p.add_argument("--mode", choices=["real", "mock"], required=True,
                    help="real: call VIRA; mock: call local fake backend")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("find-talents", help="Find potential talents for a job (read).")
+    s = sub.add_parser("find-talents", allow_abbrev=False,
+                       help="Find potential talents for a job (read).")
     s.add_argument("--job-ids", dest="job_ids", required=True, help="csv of job ids")
     s.add_argument("--profile-ids", dest="profile_ids", default="", help="csv of profile ids")
     s.set_defaults(func=cmd_find_talents)
 
-    s = sub.add_parser("generate-jd", help="LLM-generate a job posting (read/compute).")
+    s = sub.add_parser("generate-jd", allow_abbrev=False,
+                       help="LLM-generate a job posting (read/compute).")
     s.add_argument("--job-title", dest="job_title", required=True)
     s.add_argument("--skills", default="", help="csv of skills")
     s.add_argument("--lang", default="en", help="language code, e.g. ar, en")
@@ -259,19 +263,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--other-requirements", dest="other_requirements", default="")
     s.set_defaults(func=cmd_generate_jd)
 
-    s = sub.add_parser("score-candidates",
+    s = sub.add_parser("score-candidates", allow_abbrev=False,
                        help="Trigger AI scoring for applicants/suggested talents (compute).")
     s.add_argument("--app-ids", dest="app_ids", default="", help="csv of application ids")
     s.add_argument("--match-ids", dest="match_ids", default="", help="csv of match ids")
     s.set_defaults(func=cmd_score_candidates)
 
-    s = sub.add_parser("candidate-insights",
+    s = sub.add_parser("candidate-insights", allow_abbrev=False,
                        help="Trigger candidate insights for applicants (compute).")
     s.add_argument("--app-ids", dest="app_ids", default="", help="csv of application ids")
     s.add_argument("--match-ids", dest="match_ids", default="", help="csv of match ids")
     s.set_defaults(func=cmd_candidate_insights)
 
-    # s = sub.add_parser("get-match-id", help="Convert profile_ids to match_ids (assumed endpoint).")
+    # s = sub.add_parser("get-match-id", allow_abbrev=False, help="Convert profile_ids to match_ids (assumed endpoint).")
     # s.add_argument("--profile-ids", dest="profile_ids", required=True)
     # s.set_defaults(func=cmd_get_match_id)
     return p

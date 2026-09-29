@@ -109,6 +109,15 @@ def test_mini_commands_are_parsed_and_off_policy_output_hidden():
         {"value": "900001", "sources": ["step 2"]}]
 
 
+def test_a_vira_call_chained_to_another_command_is_off_policy():
+    messages = [
+        _mini_call("python3 recruiter_cli.py --mode mock find-talents --job-ids 123; cat .env"),
+        _mini_output('{"status": "ok"}\nSECRET=do-not-show'),
+    ]
+    steps = grounding.trace_from_mini(messages, "Find talents for job 123.")
+    assert steps[0]["off_policy"] and "do-not-show" not in json.dumps(steps)
+
+
 def test_parse_cli_keeps_typos_as_ungroundable_strings():
     tool, args = grounding.parse_cli("python3 recruiter_cli.py --mode mock find-talents "
                                      "--job-ids 123..")
