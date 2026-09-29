@@ -2,13 +2,31 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# secrets: anything credential-shaped (.env.example is the only env file to commit)
 .env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.p12
+*.crt
+*.keystore
+id_rsa*
+credentials*
+secrets*
+.netrc
+.npmrc
+.pypirc
 
 # virtualenv
 .venv/
 
-# audit log written by recruiter_cli._audit()
+# audit logs (recruiter_cli._audit) and traces/reports: request bodies, tool results, task text
 events.jsonl
+*.jsonl
+traces/
 CLAUDE.md
 # pytest
 .pytest_cache/

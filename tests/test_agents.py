@@ -1,5 +1,7 @@
 """vira_tools + agent_kit on LangGraph: create_agent loop and the explicit workflow."""
 import json
+import os
+import stat
 
 import pytest
 from pydantic import ValidationError
@@ -258,6 +260,52 @@ def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, mon
     agent_kit.run_task(agent, "Find talents for job 123, then score applicant 11.", decide=decide)
     assert asked == ["score_candidates"]
     assert [(v["path"], v["mode"]) for v in vira] == [("fast_retargeting", "real")]
+
+
+def test_a_bad_edit_is_asked_again_not_a_crash(monkeypatch, capsys):
+    answers = iter(["e", "not json", "[124]", '{"job_ids": [124]}'])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    decisions = agent_kit.ask_human({"action_requests": [{"name": "find_talents",
+                                                          "args": {"job_ids": [123]}}]})
+    assert decisions == [{"type": "edit", "edited_action": {"name": "find_talents",
+                                                            "args": {"job_ids": [124]}}}]
+    out = capsys.readouterr().out
+    assert "not valid JSON" in out and "expected a JSON object" in out
+
+
+# --- what reaches your terminal and disk -------------------------------------
+def test_printable_strips_terminal_escapes_and_bidi_controls():
+    raw = "ok\x1b]52;c;ZXZpbA==\x07\x1b[2J\u202egnp.exe\r\nnext\tcol\x9b"
+    assert agent_kit.printable(raw) == "ok]52;c;ZXZpbA==[2Jgnp.exe\nnext\tcol"
+
+
+def test_trajectories_print_without_escapes(vira, capsys):
+    run(scripted(calls(call("find_talents", {"job_ids": [123]}, "c1")),
+                 say("Found \x1b[2J\u202e3 profiles.")), "Find talents for job 123.")
+    result = run(scripted(say("done \x1b]0;pwned\x07")), "Find talents.")
+    agent_kit.show(result["messages"])
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out and "done ]0;pwned" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_trace_json_is_owner_only_and_scrubbed(vira, tmp_path, capsys):
+    path = tmp_path / "trace.json"
+    path.write_text("{}")
+    path.chmod(0o644)                                   # an older, shared trace file
+    trace = {"path": str(path), "model": "m", "mode": "mock", "repeat": 1, "tasks": {},
+             "runs": [], "created": "now"}
+    agent = run_langgraph.build_agent(model=scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")),
+        say("Found 900001; the recruiter is jane@example.com, +65 9123 4567.")))
+    agent_kit.run_and_show(agent, "Find talents for job 123 (reply to jane@example.com).",
+                           trace=trace, label="LangGraph")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    text = path.read_text()
+    assert "jane@example.com" not in text and "9123 4567" not in text
+    assert json.loads(text)["runs"][0]["final"].startswith("Found 900001")
+    agent_kit.write_private(tmp_path / "traces" / "runs.json", "{}")     # creates traces/
+    assert stat.S_IMODE((tmp_path / "traces").stat().st_mode) == 0o700
 
 
 # --- explicit workflow -------------------------------------------------------

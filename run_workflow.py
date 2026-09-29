@@ -24,6 +24,7 @@ from langgraph.types import Command, interrupt
 
 import agent_kit
 import vira_tools
+from terminal import printable
 
 
 class Review(TypedDict, total=False):
@@ -128,7 +129,7 @@ def main(argv=None):
     print("\n=== workflow result ===")
     for key in ("scores", "shortlist", "approved", "insights", "error", "summary"):
         if key in state:
-            print(f"{key:9}: {json.dumps(state[key], ensure_ascii=False)}")
+            print(printable(f"{key:9}: {json.dumps(state[key], ensure_ascii=False)}"))
 
 
 if __name__ == "__main__":

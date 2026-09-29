@@ -22,6 +22,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 import agent_kit
 import vira_tools
+from terminal import printable
 
 WORKING_STYLE = """
 Working style:
@@ -88,8 +89,8 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None):
 def show_files(result: dict) -> None:
     """Print whatever the agent wrote to its virtual filesystem."""
     for path, data in sorted((result.get("files") or {}).items()):
-        print(f"\n=== virtual file {path} ===")
-        print(data.get("content", "") if isinstance(data, dict) else data)
+        print(printable(f"\n=== virtual file {path} ==="))
+        print(printable(data.get("content", "") if isinstance(data, dict) else data))
 
 
 def main(argv=None):

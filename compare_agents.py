@@ -17,8 +17,11 @@ via recruiter_cli._audit, in the same format for every runtime.  One run per
 cell and LLMs are not deterministic, so read the table as anecdotal.
 
     python compare_agents.py
-    python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json
-    python compare_agents.py --runners langgraph,deepagents --tasks find,id_trap --out report.md
+    python compare_agents.py --model gpt-4o-mini --repeat 3 --json traces/runs.json
+    python compare_agents.py --runners langgraph,deepagents --tasks find,id_trap --out traces/report.md
+
+--out and --json files are written owner-only with emails and phone numbers
+scrubbed (agent_kit.write_private); traces/ is gitignored.
 """
 import argparse
 import json
@@ -361,10 +364,10 @@ def main(argv=None):
     text = report(runs, runners, tasks, args.repeat)
     print(text)
     if args.out:
-        Path(args.out).write_text(text + "\n", encoding="utf-8")
+        agent_kit.write_private(args.out, text + "\n")
     if args.json:
-        Path(args.json).write_text(json.dumps(to_json(runs, args.repeat), ensure_ascii=False,
-                                              indent=1), encoding="utf-8")
+        agent_kit.write_private(args.json, json.dumps(to_json(runs, args.repeat),
+                                                      ensure_ascii=False, indent=1))
     print(f"\n(audit logs: {logs})", file=sys.stderr)
 
 

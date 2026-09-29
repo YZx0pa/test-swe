@@ -107,8 +107,8 @@ _PII_NAME = re.compile(r"^(first|last|full|middle|given|family|sur|user|candidat
 # Inside any string value (free-text summaries, a non-JSON reply): emails, and phone
 # numbers written in groups or with a "+" (8+ digits; bare digit runs, like ids, stay).
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
-_PHONE = re.compile(r"(?<![\w+.])(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?"
-                    r"\d{2,4}(?:[ .-]\d{2,5}){1,4}(?![\w.])")
+_PHONE = re.compile(r"(?<![\w+])(?<!\d\.)(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?"
+                    r"\d{2,4}(?:[ .-]\d{2,5}){1,4}(?!\w|\.\d)")      # not inside a decimal
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 
 

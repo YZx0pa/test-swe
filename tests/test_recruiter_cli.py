@@ -75,12 +75,14 @@ def test_other_keys_are_kept(key):
 
 def test_emails_and_phones_inside_text_are_masked():
     text = ("Jane (jane.doe@example.com; +65 9123 4567; (555) 123-4567; 9123 4567) fits job "
-            "123456, noted 2026-09-30, score 0.91 for applicants 11, 12 and 13.")
+            "123456, noted 2026-09-30, score 0.91 for applicants 11, 12 and 13, v1.20.4567. "
+            "Call 555-123-4567.")
     out = recruiter_cli._mask_pii({"insights": [{"summary": text}]})["insights"][0]["summary"]
-    assert out.count("<redacted-email>") == 1 and out.count("<redacted-phone>") == 3
-    assert "jane.doe" not in out and "4567" not in out
-    for kept in ("fits job 123456", "2026-09-30", "0.91", "11, 12 and 13"):
+    assert out.count("<redacted-email>") == 1 and out.count("<redacted-phone>") == 4
+    assert "jane.doe" not in out and "123-4567" not in out and "9123 4567" not in out
+    for kept in ("fits job 123456", "2026-09-30", "0.91", "11, 12 and 13", "v1.20.4567"):
         assert kept in out
+    assert out.endswith("Call <redacted-phone>.")          # a number ending a sentence
 
 
 @pytest.mark.parametrize("action", [

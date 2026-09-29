@@ -57,6 +57,7 @@ from minisweagent.models.litellm_model import LitellmModel  # noqa: E402
 from minisweagent.agents.default import DefaultAgent  # noqa: E402
 
 from mini_env import RecruiterEnvironment  # noqa: E402
+from terminal import printable  # noqa: E402
 
 MODE = os.environ.get("JENI_MODE", "mock")   # real | mock
 if MODE not in ("real", "mock"):
@@ -107,7 +108,7 @@ INSTANCE = ("Recruiter task {{task}}. Use python3 recruiter_cli.py. "
 
 def approve(args: list[str]) -> bool:
     """Real mode: score/insights trigger calculations on VIRA, so a person approves each."""
-    print(f"\n[approval] recruiter_cli {' '.join(shlex.quote(a) for a in args)}")
+    print(printable(f"\n[approval] recruiter_cli {' '.join(shlex.quote(a) for a in args)}"))
     try:
         return input("approve? [y/N] > ").strip().lower().startswith("y")
     except EOFError:
@@ -152,11 +153,11 @@ def show(messages):
         if role == "assistant":
             for tc in (m.get("tool_calls") or []):
                 cmd = json.loads(tc["function"]["arguments"]).get("command", "")
-                print(f"[{i}] assistant → run: {cmd}")
+                print(printable(f"[{i}] assistant → run: {cmd}"))
         elif role == "tool":
-            print(f"[{i}] tool      → {m.get('content','')}")
+            print(printable(f"[{i}] tool      → {m.get('content','')}"))
         elif role == "user":
-            print(f"[{i}] user      : {m.get('content','')}")
+            print(printable(f"[{i}] user      : {m.get('content','')}"))
         elif role == "system":
             print(f"[{i}] system    : (instructions)")
         elif role == "exit":
@@ -176,10 +177,10 @@ def main():
         try:
             result = agent.run(task)
             print("\n=== result ===")
-            print(result)
+            print(printable(result))
             show(agent.messages)
         except Exception as exc:
-            print(f"[error] {type(exc).__name__}: {exc}")
+            print(printable(f"[error] {type(exc).__name__}: {exc}"))
 
 
 if __name__ == "__main__":

@@ -29,7 +29,9 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 import grounding
+import recruiter_cli
 import vira_tools
+from terminal import printable
 
 
 # langsmith reads *_TRACING_V2 before *_TRACING, under both prefixes.
@@ -241,6 +243,23 @@ def interrupt_on(approve_all: bool, mode: str | None = None) -> dict:
 
 
 # --- running a task ----------------------------------------------------------
+def write_private(path, text: str) -> None:
+    """A trace or report: owner-only (0600), with emails and phone numbers scrubbed.
+
+    Traces hold the task text and final answers, which _mask_pii never saw.  A missing
+    directory (e.g. traces/) is created owner-only.
+    """
+    Path(path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        try:
+            os.fchmod(fd, 0o600)              # an existing file keeps its mode otherwise
+        except OSError:
+            pass
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(recruiter_cli._scrub_text(text))
+
+
 class UsageCounter(BaseCallbackHandler):
     """Counts every chat-model call in a run, subagents included."""
 
@@ -258,18 +277,30 @@ class UsageCounter(BaseCallbackHandler):
                 self.output_tokens += usage.get("output_tokens", 0)
 
 
+def _ask_args() -> dict:
+    while True:
+        try:
+            args = json.loads(input("new args as JSON > "))
+        except ValueError:
+            print("not valid JSON; try again")
+            continue
+        if isinstance(args, dict):
+            return args
+        print('expected a JSON object, e.g. {"job_ids": [124]}')
+
+
 def ask_human(request: dict) -> list[dict]:
     """One decision per pending tool call: approve, reject, or edit its args."""
     decisions = []
     for action in request["action_requests"]:
-        print(f"\n[approval] {action['name']}({json.dumps(action['args'], ensure_ascii=False)})")
+        print(printable(f"\n[approval] {action['name']}"
+                        f"({json.dumps(action['args'], ensure_ascii=False)})"))
         answer = input("approve? [y]es / [n]o / [e]dit args > ").strip().lower()
         if answer.startswith("y"):
             decisions.append({"type": "approve"})
         elif answer.startswith("e"):
-            args = json.loads(input("new args as JSON > "))
             decisions.append({"type": "edit",
-                              "edited_action": {"name": action["name"], "args": args}})
+                              "edited_action": {"name": action["name"], "args": _ask_args()}})
         else:
             decisions.append({"type": "reject", "message": "The user declined this call."})
     return decisions
@@ -290,18 +321,18 @@ def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_hum
 
 
 def show(messages) -> None:
-    """Trajectory printout in the style of run_mini.show()."""
+    """Trajectory printout in the style of run_mini.show(); control characters removed."""
     for i, m in enumerate(messages):
         if m.type == "human":
-            print(f"[{i}] user      : {m.text}")
+            print(printable(f"[{i}] user      : {m.text}"))
         elif m.type == "ai":
             for tc in m.tool_calls:
-                print(f"[{i}] assistant → call: {tc['name']}"
-                      f"({json.dumps(tc['args'], ensure_ascii=False)})")
+                print(printable(f"[{i}] assistant → call: {tc['name']}"
+                                f"({json.dumps(tc['args'], ensure_ascii=False)})"))
             if m.text:
-                print(f"[{i}] assistant : {m.text}")
+                print(printable(f"[{i}] assistant : {m.text}"))
         elif m.type == "tool":
-            print(f"[{i}] tool      → {m.text}")
+            print(printable(f"[{i}] tool      → {m.text}"))
 
 
 def final_text(result: dict) -> str:
@@ -323,7 +354,8 @@ def parser(description: str) -> argparse.ArgumentParser:
                    help="allow LangSmith tracing if LANGSMITH_* is configured (off by default)")
     p.add_argument("--trace-json", metavar="PATH",
                    help="write each task's trace (steps + grounding) here, for the "
-                        "visualisation page; stays on this machine")
+                        "visualisation page; owner-only, emails/phones scrubbed, e.g. "
+                        "traces/run.json (gitignored)")
     return p
 
 
@@ -357,8 +389,8 @@ def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
     if trace is not None:
         trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0))
         trace["tasks"][task] = {"text": task, "check": ""}
-        Path(trace["path"]).write_text(json.dumps({k: v for k, v in trace.items() if k != "path"},
-                                                  ensure_ascii=False, indent=1), encoding="utf-8")
+        write_private(trace["path"], json.dumps({k: v for k, v in trace.items() if k != "path"},
+                                                ensure_ascii=False, indent=1))
         print(f"(trace written to {trace['path']})")
     return result
 
@@ -386,4 +418,4 @@ def repl(label: str, agent, args: argparse.Namespace,
         try:
             run_and_show(agent, task, after, trace, label)
         except Exception as exc:
-            print(f"[error] {type(exc).__name__}: {exc}")
+            print(printable(f"[error] {type(exc).__name__}: {exc}"))

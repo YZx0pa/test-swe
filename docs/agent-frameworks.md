@@ -82,8 +82,9 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `compare_agents.py` | Live side-by-side on mock VIRA (section 7): `--model`, `--repeat`, `--json` traces. |
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
+| `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 189 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 193 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -362,7 +363,7 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 189 tests
+.venv/bin/python -m pytest -q                                   # offline, 193 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -371,15 +372,19 @@ python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
-python compare_agents.py --out report.md                                  # live LLM, mock VIRA only
-python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json   # traces for the page
-python run_langgraph.py --mode real --task "…" --trace-json real.json     # one real run, local file
+python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
+python compare_agents.py --model gpt-4o-mini --repeat 3 --json traces/runs.json   # traces for the page
+python run_langgraph.py --mode real --task "…" --trace-json traces/real.json      # one real run, local file
 ```
 
 LangSmith tracing is forced off in the new runners: `set_tracing(False)` sets all four of
 `LANGSMITH_TRACING_V2`, `LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` and `LANGCHAIN_TRACING`
 (langsmith reads `…_V2` first) and clears langsmith's cached lookup. `--trace` allows it.
 Traces would carry prompts and (masked) tool results off the machine.
+
+Local traces and reports (`--trace-json`, `--json`, `--out`) are written owner-only (0600) with
+emails and phone numbers scrubbed, since they hold the task text and final answers. `traces/` and
+`*.jsonl` are gitignored, along with `.env.*`, key files and credential stores.
 
 ## 10. Follow-ups
 
@@ -428,4 +433,8 @@ every control sits in code the model can't reach, and each one has a test.
 | An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the task nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
 | An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
 | An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only find/JD unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
+| Secrets, audit logs or traces committed by accident | `.gitignore` covers `.env`/`.env.*` (except `.env.example`), `*.env`, key and certificate files, `credentials*`, `secrets*`, `.netrc`/`.npmrc`/`.pypirc`, `*.jsonl` and `traces/` | `git ls-files -ci --exclude-standard` is empty |
+| Traces or reports readable by other users, or carrying the task's PII | `agent_kit.write_private()`: 0600 files (a missing directory is created 0700), emails and phone numbers scrubbed | `test_trace_json_is_owner_only_and_scrubbed` |
+| Model or VIRA text drives your terminal (ESC/OSC sequences, clipboard writes, bidi tricks in an approval prompt) | `terminal.printable()` on every trajectory, approval prompt, virtual-file and workflow print, in all runners | `test_printable_strips_terminal_escapes_and_bidi_controls`, `test_trajectories_print_without_escapes` |
+| A mistyped edit at the approval prompt crashes the task | `ask_human` asks again until it gets a JSON object | `test_a_bad_edit_is_asked_again_not_a_crash` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
