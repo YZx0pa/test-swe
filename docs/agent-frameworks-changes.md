@@ -49,16 +49,16 @@ confirm gate behave the same everywhere.
 | `requirements-dev.txt` | `-r requirements.txt` plus `pytest==9.1.1`. |
 | `pytest.ini` | `pythonpath = .`, `testpaths = tests`. |
 | `vira_tools.py` | The model-facing contract: four typed functions whose `Annotated[…, Field(…)]` signatures and docstrings are the tool schema, including recruiter_cli's input limits (positive ids, max lengths, a `lang` pattern). `configure(mode)` sets real/mock once per process. Tools always pass `confirmed=False` and turn exceptions into `{"status": "error", …}` with the exception type only. `langchain_tools()` wraps them for LangChain. |
-| `agent_kit.py` | Shared by the LangChain runners: `SYSTEM_PROMPT`; `build_chat_model()`, which maps litellm-style ids such as `openai/gpt-5-mini` and uses Chat Completions for OpenAI; `ToolCallGuard` middleware; `CallLedger`; the model-call cap; `--approve-all` interrupts; usage counting; the REPL; and `--trace-json`. |
+| `agent_kit.py` | Shared by the LangChain runners: `SYSTEM_PROMPT`; `build_chat_model()`, which maps litellm-style ids such as `openai/gpt-5-mini` and uses Chat Completions for OpenAI; `ToolCallGuard` middleware; `CallLedger`; the model-call cap; approval interrupts (`--approve-all`, and score/insights always in real mode); usage counting; the REPL; and `--trace-json`. |
 | `run_langgraph.py` | LangGraph agent loop via `langchain.agents.create_agent`, with an `InMemorySaver` checkpointer. |
 | `run_workflow.py` | Explicit `StateGraph`: score → shortlist top-k (in code) → approval interrupt → insights → one-call summary. The model never picks a tool. |
 | `run_deepagent.py` | deepagents harness: `write_todos` planning, a virtual filesystem kept in graph state (`StateBackend`, never the host disk), and subagents `sourcing-analyst` and `jd-writer`, plus a guarded `general-purpose`. They share one `CallLedger` per task. |
-| `vira_mcp.py` | FastMCP stdio server exposing the four tools. `--mode` is required. It loads `.env` itself, so no client config carries VIRA credentials. Confirm-gated tools are never exposed. |
+| `vira_mcp.py` | FastMCP stdio server exposing the four tools. `--mode` is required. It loads `.env` itself, so no client config carries VIRA credentials. Confirm-gated tools are never exposed. In real mode only find/JD are listed unless `--allow-side-effects` is given; a per-process budget (`--max-calls`, default 50) caps VIRA calls; score/insights are annotated `destructiveHint`. |
 | `compare_agents.py` | Runs the same tasks through mini, LangGraph and deepagents against mock VIRA only. PASS/FAIL is judged on the audit log, i.e. what actually reached VIRA. Writes a markdown report and optional JSON traces. |
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 184 offline tests (section 3). |
+| `tests/` | 189 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -71,6 +71,8 @@ confirm gate behave the same everywhere.
   `--mode mock`.
 - Tools pass `confirmed=False`, so a command in `NEEDS_CONFIRM` can't run from an agent, and
   `vira_mcp.py` doesn't list it.
+- In real mode, `score_candidates` and `candidate_insights` pause for approval in every agent
+  runner (mini included), and MCP lists them only with `--allow-side-effects`.
 - Errors come back as `{"status": "error", …}` with the exception type only, never hosts or URLs,
   and a failed call still writes an audit line (`status: "exception"`).
 - `ToolCallGuard` refuses, without calling VIRA:
@@ -162,7 +164,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 184 passed
+# 189 passed
 ```
 
 How the tests stay hermetic:
@@ -182,9 +184,9 @@ How the tests stay hermetic:
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_recruiter_cli.py` | 84 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
-| `tests/test_agents.py` | 31 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed, invented ids refused before VIRA, ids from earlier results allowed. The schemas reject oversized or malformed input. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
-| `tests/test_deepagent.py` | 8 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval. Virtual files stay in graph state and nothing is written to disk. |
-| `tests/test_mcp.py` | 4 | Tool list, annotations (`readOnlyHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
+| `tests/test_agents.py` | 33 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed, invented ids refused before VIRA, ids from earlier results allowed. The schemas reject oversized or malformed input. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args. Real mode gates score/insights by default and a real-mode run pauses before scoring but not before a read. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
+| `tests/test_deepagent.py` | 9 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval, including real mode's gate on scoring. Virtual files stay in graph state and nothing is written to disk. |
+| `tests/test_mcp.py` | 6 | Tool list, annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. Real mode lists only the reads unless side effects are allowed. The call budget stops VIRA calls. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
 | `tests/test_grounding.py` | 13 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind and invented ids the guard refused count as blocked, not as reaching VIRA. |
 | `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 
@@ -309,6 +311,9 @@ approve? [y]es / [n]o / [e]dit args >
 - `e` prompts `new args as JSON >`. Enter e.g. `{"job_ids": [124]}` and the audit log shows
   `job_ids: [124]`.
 
+In `--mode real`, `score_candidates` and `candidate_insights` pause like this even without
+`--approve-all`.
+
 **Interactive mode:** run `python run_langgraph.py` with no `--task`. Type tasks at
 `input task>`, and `quit` to exit. Each task runs on a fresh thread.
 
@@ -373,7 +378,10 @@ claude mcp remove vira
 ```
 
 The server loads `.env` itself, found next to `recruiter_cli.py` whatever the working directory,
-so the client config carries no VIRA credentials. Snippets for LangGraph (via
+so the client config carries no VIRA credentials. Two more flags:
+- `--max-calls N`: VIRA calls this process makes before answering `Refused` (default 50);
+- `--allow-side-effects`: in `--mode real`, also list score/insights. Without it a real-mode
+  server lists only `find_talents` and `generate_jd`. Snippets for LangGraph (via
 `langchain-mcp-adapters`), the OpenAI Agents SDK and PydanticAI are in section 5 of
 [agent-frameworks.md](agent-frameworks.md#5-mcp-server-vira_mcppy). They weren't install-tested
 on this branch.
@@ -451,10 +459,12 @@ python recruiter_cli.py --mode real find-talents --job-ids <job_id>             
 python run_workflow.py --mode real --app-ids <id>,<id>,<id> --top 2                 # asks before insights
 python run_langgraph.py --mode real --approve-all --task "Find potential talents for job <job_id>" \
     --trace-json real.json                                                          # approve each call; local trace
-python vira_mcp.py --mode real                                                      # for an MCP client
+python vira_mcp.py --mode real                                                      # MCP: reads only
+python vira_mcp.py --mode real --allow-side-effects                                 # MCP: + score/insights
 ```
 
-Use `--approve-all` for agent runs in real mode so you see every call before it goes out.
+In real mode, score/insights always pause for approval; add `--approve-all` to see the reads
+before they go out too.
 `--trace-json` output contains masked tool results. It stays on the machine, but it isn't
 gitignored.
 

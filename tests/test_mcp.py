@@ -41,6 +41,8 @@ def test_tools_annotations_and_masked_results(monkeypatch, audit_log):
     assert tools["find_talents"].annotations.readOnlyHint is True
     assert tools["score_candidates"].annotations.readOnlyHint is False     # triggers scoring
     assert tools["score_candidates"].annotations.idempotentHint is True
+    assert tools["score_candidates"].annotations.destructiveHint is True    # overwrites scores
+    assert tools["find_talents"].annotations.destructiveHint is False
     assert tools["find_talents"].inputSchema["required"] == ["job_ids"]
 
     assert result.isError is False
@@ -65,6 +67,29 @@ def test_confirm_gated_tools_are_not_exposed(monkeypatch):
         return {t.name for t in (await client.list_tools()).tools}
 
     assert "score_candidates" not in session_run(vira_mcp.build_server(), scenario)
+
+
+def tool_names(server):
+    async def scenario(client):
+        return {t.name for t in (await client.list_tools()).tools}
+    return session_run(server, scenario)
+
+
+def test_real_mode_lists_only_reads_unless_side_effects_are_allowed(monkeypatch):
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    assert tool_names(vira_mcp.build_server()) == vira_tools.READ_ONLY
+    assert tool_names(vira_mcp.build_server(allow_side_effects=True)) == vira_tools.NAMES
+
+
+def test_the_server_stops_calling_vira_after_its_budget(audit_log):
+    async def scenario(client):
+        return [await client.call_tool("find_talents", {"job_ids": [job]}) for job in (1, 2, 3)]
+
+    results = session_run(vira_mcp.build_server(max_calls=2), scenario)
+    payloads = [json.loads(r.content[0].text) for r in results]
+    assert [p["status"] for p in payloads] == ["ok", "ok", "error"]
+    assert "budget of 2 VIRA calls" in payloads[2]["message"]
+    assert [a["body"]["job_ids"] for a in read_audit(audit_log)] == [[1], [2]]
 
 
 # --- the real process over stdio ---------------------------------------------

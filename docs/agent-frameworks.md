@@ -83,7 +83,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 184 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 189 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -91,6 +91,9 @@ Guarantees that hold in every new runtime:
 - Every VIRA call lands in the audit log in the same format.
 - The host sets real/mock once (`vira_tools.configure`); the model never sees a mode parameter.
 - Tools pass `confirmed=False`, so a confirm-gated command can't run from them (see follow-ups).
+- In real mode, `score_candidates` and `candidate_insights` (they trigger calculations on VIRA)
+  always pause for a person's approval in the LangGraph and deepagents runners, subagents
+  included. Over MCP they are listed only with `--allow-side-effects`.
 - A failure comes back as `{"status": "error", …}` with the exception type only, never hosts or URLs.
   It is audited too (`status: "exception"`, `error: <type>`), and the CLI prints one JSON line
   instead of a traceback.
@@ -114,7 +117,7 @@ How mini's bash-era prompt rules became structure:
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`) |
 | "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither the task nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(thread_limit=12)`, one fresh thread per task |
-| "Tell the user … retry with `--confirmed`" | `--approve-all`: a LangGraph interrupt pauses before the call; approve, edit or reject |
+| "Tell the user … retry with `--confirmed`" | A LangGraph interrupt pauses before the call (approve, edit or reject): for score/insights always in real mode, for every tool with `--approve-all` |
 | Arg validation by argparse (strings) | Pydantic schema: `job_ids` 1–50 positive ids, `job_title` 1–200 characters, `lang` a language code, and so on; the model gets the error and retries. The typed actions check the same limits, so the CLI and mini are covered too |
 
 ## 3. LangGraph
@@ -136,7 +139,7 @@ a model node ↔ tools node loop into a LangGraph graph. Behaviour is added as m
 ```python
 create_agent(build_chat_model(), vira_tools.langchain_tools(),
              system_prompt=SYSTEM_PROMPT,
-             middleware=[HumanInTheLoopMiddleware(...),   # only with --approve-all; outermost
+             middleware=[HumanInTheLoopMiddleware(...),   # real mode or --approve-all; outermost
                          ToolCallGuard(),                   # refuse repeats and unsourced ids, contain crashes
                          ModelCallLimitMiddleware(thread_limit=12, exit_behavior="end")],
              checkpointer=InMemorySaver())
@@ -167,8 +170,11 @@ whiteboard.
 
 ### Human in the loop
 
-`--approve-all` gates every VIRA tool. Each model turn raises one interrupt that batches all gated
-calls. The runner answers with one decision per call (`approve`, `edit` with new args, `reject`)
+`agent_kit.interrupt_on()` decides which tools pause. `--approve-all` gates every VIRA tool. In
+real mode, `score_candidates` and `candidate_insights` are gated even without it, because they
+trigger calculations on VIRA; the reads (`find_talents`, `generate_jd`) run straight through. The
+mode comes from `vira_tools.configure()`, so a real-mode agent can't be built without the gate.
+Each model turn raises one interrupt that batches all gated calls. The runner answers with one decision per call (`approve`, `edit` with new args, `reject`)
 via `Command(resume={"decisions": [...]})` on the same thread. A rejected call never reaches VIRA
 (tested). Interrupts need a checkpointer; `InMemorySaver` covers a single process.
 
@@ -186,7 +192,8 @@ Our configuration:
 - **Subagents:** `sourcing-analyst` gets find, score and insights; `jd-writer` gets `generate_jd`.
   We also pass our own `general-purpose` spec, replacing the auto-added one.
 - **Middleware:** `TodoListMiddleware` plus the same guard and call cap as the LangGraph agent.
-- **Approval:** `interrupt_on` is only set with `--approve-all`; subagents inherit it (tested).
+- **Approval:** `interrupt_on` gates every tool with `--approve-all`, and score/insights in real
+  mode; subagents inherit it (both tested).
 
 Security: keep the default **`StateBackend`**, where files live in graph state per thread and never
 touch the host disk. Never use `FilesystemBackend` (reads and writes real files, defaulting to the
@@ -225,10 +232,15 @@ claude mcp add vira -- "$PWD/.venv/bin/python" "$PWD/vira_mcp.py" --mode mock
   directory. No client config ever carries a VIRA key.
 - `--mode` is required. stdout is the JSON-RPC channel, and a test checks that every stdout line
   is JSON-RPC.
-- Annotations: find/JD are `readOnlyHint`; score/insights trigger calculations, so they're
-  `idempotentHint` only. They are hints, not enforcement.
+- Annotations: find/JD are `readOnlyHint`; score/insights trigger calculations that overwrite
+  scores, so they're `destructiveHint` (and `idempotentHint`). They are hints, not enforcement.
 - Confirm-gated tools are never exposed. MCP approval depends on the client (elicitation needs
   client support), so a write tool needs an approval design first.
+- The server can't see the client's conversation, so `ToolCallGuard` doesn't apply. Instead:
+  - in `--mode real`, only find/JD are listed unless you pass `--allow-side-effects`, and then
+    approving each score/insights call is the client's job;
+  - the process makes at most `--max-calls` VIRA calls (default 50), then answers `Refused`;
+  - the input limits of §2 are part of the tool schemas, so an oversized call is an MCP error.
 
 Client snippets (not run in this branch; versions per PyPI metadata):
 
@@ -350,7 +362,7 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 184 tests
+.venv/bin/python -m pytest -q                                   # offline, 189 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -358,6 +370,7 @@ python run_langgraph.py --approve-all                                     # appr
 python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
 python vira_mcp.py --mode mock                                            # for MCP clients
+python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out report.md                                  # live LLM, mock VIRA only
 python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json   # traces for the page
 python run_langgraph.py --mode real --task "…" --trace-json real.json     # one real run, local file
@@ -370,7 +383,8 @@ Traces would carry prompts and (masked) tool results off the machine.
 
 ## 10. Follow-ups
 
-- **Approval design for write tools.** Proposal: the HITL approval *is* the confirmation.
+- **Approval design for write tools.** Real mode already pauses score/insights (§3); a write
+  tool in `NEEDS_CONFIRM` still can't run anywhere. Proposal: the HITL approval *is* the confirmation.
   `vira_tools` passes `confirmed=True` only for tools that `agent_kit` gates with `interrupt_on`,
   asserted at build time for the main agent and every subagent. MCP keeps them off, or uses
   elicitation.
@@ -412,4 +426,6 @@ every control sits in code the model can't reach, and each one has a test.
 | Candidate PII reaches the model (and the model provider) | `_mask_pii`: normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply. Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
 | Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
 | An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the task nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
+| An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
+| An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only find/JD unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |

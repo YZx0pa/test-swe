@@ -235,6 +235,31 @@ def test_edit_runs_the_reviewers_args(vira):
     assert [v["body"]["job_ids"] for v in vira] == [[999]]
 
 
+def test_real_mode_always_gates_the_calls_that_change_vira(monkeypatch):
+    assert agent_kit.interrupt_on(False, "mock") == {}
+    assert set(agent_kit.interrupt_on(False, "real")) == {"score_candidates", "candidate_insights"}
+    assert set(agent_kit.interrupt_on(True, "mock")) == vira_tools.NAMES
+    monkeypatch.setattr(vira_tools, "_MODE", "real")            # the default follows configure()
+    assert set(agent_kit.interrupt_on(False)) == {"score_candidates", "candidate_insights"}
+
+
+def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, monkeypatch):
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    asked = []
+
+    def decide(request):
+        asked.extend(a["name"] for a in request["action_requests"])
+        return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
+
+    agent = run_langgraph.build_agent(model=scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")),
+        calls(call("score_candidates", {"app_ids": [11]}, "c2")),
+        say("Scoring was declined.")))
+    agent_kit.run_task(agent, "Find talents for job 123, then score applicant 11.", decide=decide)
+    assert asked == ["score_candidates"]
+    assert [(v["path"], v["mode"]) for v in vira] == [("fast_retargeting", "real")]
+
+
 # --- explicit workflow -------------------------------------------------------
 def test_workflow_waits_for_approval_then_runs_insights_on_the_shortlist(audit_log):
     asked = []

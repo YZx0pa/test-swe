@@ -115,6 +115,25 @@ def test_subagents_inherit_approval(audit_log):
     assert read_audit(audit_log) == []
 
 
+def test_real_mode_subagents_pause_before_scoring(audit_log, monkeypatch):
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    monkeypatch.setattr(recruiter_cli, "_call", lambda *a: pytest.fail("VIRA must not be called"))
+    model = scripted(
+        calls(call("task", {"description": "Score applicant 11.",
+                            "subagent_type": "sourcing-analyst"}, "t1")),
+        calls(call("score_candidates", {"app_ids": [11]}, "s1")),
+        say("could not score: declined"),
+        say("Scoring was declined."))
+    seen = []
+
+    def decide(request):
+        seen.extend(a["name"] for a in request["action_requests"])
+        return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
+
+    agent_kit.run_task(run_deepagent.build_agent(model=model), "score applicant 11", decide=decide)
+    assert seen == ["score_candidates"] and read_audit(audit_log) == []
+
+
 def test_virtual_files_stay_in_state(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     model = scripted(

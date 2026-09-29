@@ -7,7 +7,8 @@ What run_mini.py spells out as bash-era prompt rules becomes structure here:
   * ToolCallGuard refuses exact repeats of a VIRA call (the duplicate real API
     call run_mini.py works around) and turns crashes into error results.
   * ModelCallLimitMiddleware caps model calls per task (mini's step_limit).
-  * --approve-all puts a human in front of every VIRA call (LangGraph interrupt).
+  * --approve-all puts a human in front of every VIRA call (LangGraph interrupt);
+    in real mode, calls that change data on VIRA (score, insights) always pause.
 
 Never import run_mini from here: it reads .env and pulls in minisweagent and
 litellm on import.
@@ -225,9 +226,18 @@ def middleware(step_limit: int = 12, ledger: CallLedger | None = None) -> list:
 DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
 
 
-def interrupt_on(approve_all: bool) -> dict:
-    """Which tools pause for a human.  NEEDS_CONFIRM is empty today, so only --approve-all."""
-    return {name: DECISIONS for name in sorted(vira_tools.NAMES)} if approve_all else {}
+def interrupt_on(approve_all: bool, mode: str | None = None) -> dict:
+    """Which tools pause for a human: every one with --approve-all; in real mode, always
+    the ones that trigger calculations on VIRA (not in READ_ONLY).  `mode` defaults to
+    the configured one (vira_tools.configure), so a real-mode agent can't be built
+    without them."""
+    if approve_all:
+        names = vira_tools.NAMES
+    elif (mode or vira_tools.current_mode()) == "real":
+        names = vira_tools.NAMES - vira_tools.READ_ONLY
+    else:
+        names = set()
+    return {name: DECISIONS for name in sorted(names)}
 
 
 # --- running a task ----------------------------------------------------------
@@ -305,7 +315,8 @@ def parser(description: str) -> argparse.ArgumentParser:
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
     p.add_argument("--approve-all", action="store_true",
-                   help="pause for human approval before every VIRA tool call")
+                   help="pause for human approval before every VIRA tool call "
+                        "(in real mode, score/insights always pause)")
     p.add_argument("--step-limit", type=int, default=12,
                    help="max model calls per task (run_mini.py uses 12)")
     p.add_argument("--trace", action="store_true",
