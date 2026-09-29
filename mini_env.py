@@ -89,7 +89,10 @@ class RecruiterEnvironment(LocalEnvironment):
             # argparse's own error line helps the model fix its flags; a traceback never
             # reaches it (it can name hosts and paths).
             usage = [line for line in err.splitlines() if ": error: " in line]
-            out += (usage[-1] if usage else f"recruiter_cli failed (exit {proc.returncode})") + "\n"
+            if usage:
+                out += usage[-1] + "\n"
+            elif not out.strip():
+                out = f"recruiter_cli failed (exit {proc.returncode})\n"
         if len(out) > self.config.max_output:
             out = out[:self.config.max_output] + "\n[output truncated]\n"
         return {"output": out, "returncode": proc.returncode, "exception_info": ""}

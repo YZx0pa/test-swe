@@ -147,7 +147,9 @@ def test_argparse_errors_reach_the_model_but_tracebacks_do_not(audit_log):
     assert missing["returncode"] == 2
     assert "error: the following arguments are required: --job-ids" in missing["output"]
     crashed = run(env, "python3 recruiter_cli.py find-talents --job-ids abc")
-    assert crashed["returncode"] != 0 and "Traceback" not in crashed["output"]
+    assert crashed["returncode"] == 1 and "Traceback" not in crashed["output"]
+    assert json.loads(crashed["output"]) == {"status": "error",
+                                             "message": "recruiter_cli failed (ValueError)"}
 
 
 def test_real_mode_side_effects_wait_for_approval(fake_popen, audit_log):

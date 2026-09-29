@@ -44,7 +44,8 @@ def _fix_environment() -> None:
         "VIRA_API_KEY": "", "VIRA_CLIENT_NAME": "", "VIRA_USER_ID": "",
         "EVENTS_LOG": os.devnull,               # each run points it at its own file
         "MSWEA_SILENT_STARTUP": "1",
-        "LANGSMITH_TRACING": "false", "LANGCHAIN_TRACING_V2": "false",
+        "LANGSMITH_TRACING_V2": "false", "LANGSMITH_TRACING": "false",
+        "LANGCHAIN_TRACING_V2": "false", "LANGCHAIN_TRACING": "false",
     })
 
 

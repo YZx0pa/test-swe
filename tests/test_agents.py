@@ -71,6 +71,15 @@ def test_vira_failure_becomes_an_error_result_without_hosts(monkeypatch):
         "status": "error", "message": "VIRA call failed (ConnectionError)"}
 
 
+def test_tracing_stays_off_even_with_langsmith_tracing_v2_set(monkeypatch):
+    from langsmith import utils
+    monkeypatch.setenv("LANGSMITH_TRACING_V2", "true")
+    utils.get_env_var.cache_clear()
+    assert utils.tracing_is_enabled() is True          # the variable alone turns it on
+    agent_kit.set_tracing(False)
+    assert utils.tracing_is_enabled() is False
+
+
 def test_build_chat_model_accepts_litellm_style_ids(monkeypatch):
     for model_id in ("gpt-5-mini", "openai/gpt-5-mini"):
         model = agent_kit.build_chat_model(model_id)

@@ -79,7 +79,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 101 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 116 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer.
@@ -87,6 +87,12 @@ Guarantees that hold in every new runtime:
 - The host sets real/mock once (`vira_tools.configure`); the model never sees a mode parameter.
 - Tools pass `confirmed=False`, so a confirm-gated command can't run from them (see follow-ups).
 - A failure comes back as `{"status": "error", …}` with the exception type only, never hosts or URLs.
+  It is audited too (`status: "exception"`, `error: <type>`), and the CLI prints one JSON line
+  instead of a traceback.
+- Real calls go only to an `https://` `VIRA_BASE_URL` (plain http only to loopback), never follow
+  redirects, ignore proxy and CA variables from the environment (`VIRA_CA_BUNDLE` sets a CA), and
+  aren't sent at all when a `VIRA_*` credential is empty.
+- The audit log is owner-only (0600), and its `query` is masked like the body.
 
 How mini's bash-era prompt rules became structure:
 
@@ -328,7 +334,7 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 101 tests
+.venv/bin/python -m pytest -q                                   # offline, 116 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -341,8 +347,10 @@ python compare_agents.py --model gpt-4o-mini --repeat 3 --json runs.json   # tra
 python run_langgraph.py --mode real --task "…" --trace-json real.json     # one real run, local file
 ```
 
-LangSmith tracing is forced off in the new runners; `--trace` allows it. Traces would carry
-prompts and (masked) tool results off the machine.
+LangSmith tracing is forced off in the new runners: `set_tracing(False)` sets all four of
+`LANGSMITH_TRACING_V2`, `LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` and `LANGCHAIN_TRACING`
+(langsmith reads `…_V2` first) and clears langsmith's cached lookup. `--trace` allows it.
+Traces would carry prompts and (masked) tool results off the machine.
 
 ## 10. Follow-ups
 
@@ -357,7 +365,6 @@ prompts and (masked) tool results off the machine.
 - **Per-task tool budgets shared across subagents** (e.g. one `generate_jd` per task). Exact-repeat
   refusal doesn't stop retries with tweaked arguments, and `ToolCallLimitMiddleware` counts per
   agent context, so the budget needs the ledger approach.
-- **Audit failed calls:** a VIRA connection error raises before `_audit` today.
 - **Mask non-JSON replies** (`{"raw": text}`), since masking is by key name.
 - **Model choice for deepagents:** gpt-5-mini works, but a stronger model is what deepagents is
   tuned and evaluated on.
@@ -381,3 +388,10 @@ every control sits in code the model can't reach, and each one has a test.
 | Tracebacks put hosts and paths into mini's context | Only argparse's error line is returned on failure | `test_argparse_errors_reach_the_model_but_tracebacks_do_not` |
 | A chained command's output lands in traces | `grounding.parse_cli` uses `mini_policy`, so such a call is off-policy and its output hidden | `test_a_vira_call_chained_to_another_command_is_off_policy` |
 | `commands.md` parsed as a template (SSTI, key injection) | The system prompt is passed as a template variable; Jinja never parses `commands.md` | smoke-tested; `run_mini` is kept out of the offline suite |
+| The API key follows a redirect, or goes through an env-configured proxy | `requests.Session` with `trust_env=False` and `allow_redirects=False` (requests strips only `Authorization` on a cross-host redirect); a 3xx is an error result | `test_real_calls_ignore_proxy_env_and_follow_no_redirects` |
+| The key is sent in cleartext, or sent empty | `https://` required except for loopback hosts; an empty `VIRA_*` credential returns an error before any request | `test_plain_http_only_to_loopback`, `test_missing_credentials_fail_closed` |
+| Error text carries hosts or large bodies into model context | Exceptions become `{"status": "error"}` with the type only; a non-JSON reply is capped at 500 characters | `test_failed_calls_are_audited_and_the_cli_prints_one_json_line`, `test_non_json_replies_are_capped`, `test_vira_failure_becomes_an_error_result_without_hosts` |
+| Failed calls leave no trace | `execute()` audits the exception type, then re-raises | `test_failed_calls_are_audited_and_the_cli_prints_one_json_line` |
+| Other local users read the audit log or `.env` | The audit log is created 0600 (and tightened if older); recruiter_cli warns on stderr when `.env` is group- or world-readable, checking mode bits only | `test_audit_log_is_owner_only`, `test_a_shared_dotenv_is_reported_by_mode_bits_only` |
+| `.env` from a parent directory gets loaded | recruiter_cli loads the `.env` next to it, by path | — |
+| Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |

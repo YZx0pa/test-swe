@@ -1,5 +1,7 @@
 """recruiter_cli: the CLI and the typed actions share one guarded path."""
 import json
+import os
+import stat
 
 import pytest
 
@@ -93,3 +95,127 @@ def test_confirm_gate_blocks_before_any_call(calls, audit_log, monkeypatch, caps
 
     assert recruiter_cli.score_candidates([11], mode="mock", confirmed=True)["status"] == "ok"
     assert len(calls) == 1
+
+
+def test_failed_calls_are_audited_and_the_cli_prints_one_json_line(monkeypatch, audit_log, capsys):
+    def down(*args):
+        raise ConnectionError("http://vira.internal:8080/v1 refused")
+    monkeypatch.setattr(recruiter_cli, "_call", down)
+    with pytest.raises(ConnectionError):                  # vira_tools turns this into a result
+        recruiter_cli.find_talents([123], mode="mock")
+    with pytest.raises(SystemExit) as exc:
+        recruiter_cli.main(["--mode", "mock", "find-talents", "--job-ids", "123"])
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out) == {"status": "error", "message": "recruiter_cli failed (ConnectionError)"}
+    assert "vira.internal" not in out + err and "Traceback" not in err
+    assert [(a["status"], a["error"]) for a in read_audit(audit_log)] == [
+        ("exception", "ConnectionError")] * 2
+
+
+def test_audit_line_masks_the_query(calls, audit_log):
+    recruiter_cli.execute("find-talents", "fast_retargeting", {"email": "jane@example.com"}, {},
+                          mode="mock")
+    assert read_audit(audit_log)[0]["query"] == {"email": "<redacted>"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_audit_log_is_owner_only(audit_log):
+    recruiter_cli.find_talents([123], mode="mock")
+    assert stat.S_IMODE(audit_log.stat().st_mode) == 0o600
+    audit_log.chmod(0o644)                                # a log from before this change
+    recruiter_cli.find_talents([124], mode="mock")
+    assert stat.S_IMODE(audit_log.stat().st_mode) == 0o600
+    assert len(read_audit(audit_log)) == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_a_shared_dotenv_is_reported_by_mode_bits_only(tmp_path, capsys):
+    path = tmp_path / ".env"
+    path.write_text("VIRA_API_KEY=value-that-must-not-be-printed\n")
+    path.chmod(0o600)
+    recruiter_cli._warn_if_shared(path)
+    assert capsys.readouterr().err == ""
+    path.chmod(0o644)
+    recruiter_cli._warn_if_shared(path)
+    err = capsys.readouterr().err
+    assert "chmod 600" in err and "value-that-must-not-be-printed" not in err
+
+
+# --- real mode: what may leave the machine ----------------------------------------
+class FakeResponse:
+    def __init__(self, status=200, payload=None, text=""):
+        self.status_code, self.ok, self._payload, self.text = status, status < 400, payload, text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not JSON")
+        return self._payload
+
+
+@pytest.fixture
+def session(monkeypatch):
+    """Stand-in for requests.Session: records how a real-mode call is configured."""
+    import requests
+
+    class FakeSession:
+        made: list = []
+        response = FakeResponse(200, {"ok": True})
+
+        def __init__(self):
+            self.trust_env, self.verify, self.posts = True, True, []
+            FakeSession.made.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, url, **kwargs):
+            self.posts.append((url, kwargs))
+            return FakeSession.response
+
+    monkeypatch.setattr(requests, "Session", FakeSession)
+    monkeypatch.setattr(recruiter_cli, "VIRA_BASE_URL", "https://vira.example.test/v1")
+    for header, value in (("x-api-key", "k"), ("x-client-name", "c"), ("x-user-id", "u")):
+        monkeypatch.setitem(recruiter_cli.HEADERS, header, value)
+    return FakeSession
+
+
+def test_real_calls_ignore_proxy_env_and_follow_no_redirects(session):
+    assert recruiter_cli.find_talents([123], mode="real")["status"] == "ok"
+    [made] = session.made
+    [(url, kwargs)] = made.posts
+    assert url == "https://vira.example.test/v1/fast_retargeting"
+    assert made.trust_env is False and made.verify is True
+    assert kwargs["allow_redirects"] is False and kwargs["timeout"] == 30
+    session.response = FakeResponse(307)
+    result = recruiter_cli.find_talents([124], mode="real")
+    assert result["status"] == "error" and result["http_status"] == 307
+
+
+@pytest.mark.parametrize("url,allowed", [
+    ("https://vira.example.test/v1", True), ("http://localhost:8080/v1", True),
+    ("http://127.0.0.1:8080/v1", True), ("http://[::1]:8080/v1", True),
+    ("http://vira.example.test/v1", False), ("ftp://vira.example.test/v1", False),
+    ("vira.example.test/v1", False),
+])
+def test_plain_http_only_to_loopback(session, monkeypatch, url, allowed):
+    monkeypatch.setattr(recruiter_cli, "VIRA_BASE_URL", url)
+    result = recruiter_cli.find_talents([123], mode="real")
+    assert (result["status"] == "ok") is allowed and bool(session.made) is allowed
+    assert "vira.example.test" not in json.dumps(result)
+
+
+def test_missing_credentials_fail_closed(session, monkeypatch):
+    monkeypatch.setitem(recruiter_cli.HEADERS, "x-api-key", "")
+    result = recruiter_cli.find_talents([123], mode="real")
+    assert result["status"] == "error" and "VIRA_API_KEY" in result["result"]["message"]
+    assert session.made == []
+
+
+def test_non_json_replies_are_capped(session):
+    session.response = FakeResponse(502, None, "x" * 10_000)
+    result = recruiter_cli.find_talents([123], mode="real")
+    assert result["status"] == "error" and len(result["result"]["raw"]) == recruiter_cli.RAW_LIMIT

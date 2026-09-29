@@ -31,11 +31,20 @@ import grounding
 import vira_tools
 
 
+# langsmith reads *_TRACING_V2 before *_TRACING, under both prefixes.
+TRACING_VARS = ("LANGSMITH_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
+
+
 def set_tracing(enabled: bool) -> None:
     """LangSmith tracing ships prompts and tool results off the machine: opt-in only."""
     value = "true" if enabled else "false"
-    os.environ["LANGSMITH_TRACING"] = value
-    os.environ["LANGCHAIN_TRACING_V2"] = value
+    for name in TRACING_VARS:
+        os.environ[name] = value
+    try:                                   # langsmith caches its env lookups
+        from langsmith.utils import get_env_var
+        get_env_var.cache_clear()
+    except (ImportError, AttributeError):
+        pass
 
 
 set_tracing(False)  # before any run; runners re-enable it only for --trace

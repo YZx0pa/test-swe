@@ -18,8 +18,8 @@ for _key in ("VIRA_API_KEY", "VIRA_CLIENT_NAME", "VIRA_USER_ID"):
     os.environ[_key] = ""
 os.environ["EVENTS_LOG"] = os.devnull                   # the fixture below points it at tmp_path
 os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
-os.environ["LANGSMITH_TRACING"] = "false"
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
+for _key in ("LANGSMITH_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"):
+    os.environ[_key] = "false"
 
 import pytest  # noqa: E402
 
