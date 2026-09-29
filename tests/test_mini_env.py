@@ -141,15 +141,18 @@ def test_real_mock_subprocess_reaches_mock_vira_and_the_audit_log(audit_log):
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
 
 
-def test_argparse_errors_reach_the_model_but_tracebacks_do_not(audit_log):
+def test_argparse_errors_reach_the_model_but_tracebacks_do_not(audit_log, tmp_path):
     env = env_for(audit_log)
     missing = run(env, "python3 recruiter_cli.py find-talents")
     assert missing["returncode"] == 2
     assert "error: the following arguments are required: --job-ids" in missing["output"]
-    crashed = run(env, "python3 recruiter_cli.py find-talents --job-ids abc")
+    typo = run(env, "python3 recruiter_cli.py find-talents --job-ids 123..")
+    assert json.loads(typo["output"])["result"]["message"] == "job_ids: ids are positive integers"
+    crashing = mini_env.RecruiterEnvironment(mode="mock", env={"EVENTS_LOG": str(tmp_path)})
+    crashed = run(crashing, FIND)                          # the audit log is a directory
     assert crashed["returncode"] == 1 and "Traceback" not in crashed["output"]
     assert json.loads(crashed["output"]) == {"status": "error",
-                                             "message": "recruiter_cli failed (ValueError)"}
+                                             "message": "recruiter_cli failed (IsADirectoryError)"}
 
 
 def test_real_mode_side_effects_wait_for_approval(fake_popen, audit_log):

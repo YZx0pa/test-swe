@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
 import agent_kit
 import recruiter_cli
@@ -32,7 +33,7 @@ def tool_messages(result):
     return {m.tool_call_id: m for m in result["messages"] if m.type == "tool"}
 
 
-def run(model, task="task", **build):
+def run(model, task, **build):
     return agent_kit.run_task(run_langgraph.build_agent(model=model, **build), task)
 
 
@@ -92,7 +93,7 @@ def test_build_chat_model_accepts_litellm_style_ids(monkeypatch):
 # --- create_agent loop -------------------------------------------------------
 def test_agent_sees_only_masked_tool_output(vira, audit_log):
     result = run(scripted(calls(call("find_talents", {"job_ids": [123]}, "c1")),
-                          say("Found profile 900001.")))
+                          say("Found profile 900001.")), "Find talents for job 123.")
     content = tool_messages(result)["c1"].text
     assert "jane@example.com" not in content and "<redacted>" in content
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
@@ -103,7 +104,7 @@ def test_exact_repeat_is_refused_without_calling_vira(vira):
     result = run(scripted(
         calls(call("find_talents", {"job_ids": [123]}, "c1")),
         calls(call("find_talents", {"job_ids": [123], "profile_ids": []}, "c2")),  # same call
-        say("done")))
+        say("done")), "Find talents for job 123.")
     assert len(vira) == 1
     refused = tool_messages(result)["c2"]
     assert refused.status == "error" and "Refused" in refused.text
@@ -112,14 +113,14 @@ def test_exact_repeat_is_refused_without_calling_vira(vira):
 def test_parallel_duplicates_run_once(vira):
     run(scripted(calls(call("find_talents", {"job_ids": [5]}, "a"),
                        call("find_talents", {"job_ids": [5]}, "b")),
-                 say("done")))
+                 say("done")), "Find talents for job 5.")
     assert len(vira) == 1
 
 
 def test_different_args_are_not_duplicates(vira):
     run(scripted(calls(call("find_talents", {"job_ids": [1]}, "c1")),
                  calls(call("find_talents", {"job_ids": [2]}, "c2")),
-                 say("done")))
+                 say("done")), "Find talents for jobs 1 and 2.")
     assert len(vira) == 2
 
 
@@ -141,11 +142,44 @@ def test_ids_the_user_named_are_not_refused(vira):
     assert len(vira) == 1
 
 
+def test_an_invented_id_is_refused_before_vira(vira, audit_log):
+    result = run(scripted(calls(call("score_candidates", {"app_ids": [77]}, "c1")),
+                          say("Stopped: no application ids.")), task="Score the applicants.")
+    refused = tool_messages(result)["c1"]
+    assert refused.status == "error" and "77 isn't in the task or any earlier result" in refused.text
+    assert vira == [] and read_audit(audit_log) == []
+
+
+def test_ids_from_an_earlier_result_are_not_invented(vira):
+    # the fake VIRA answers every call with profile_id 900001
+    run(scripted(calls(call("find_talents", {"job_ids": [123]}, "c1")),
+                 calls(call("find_talents", {"job_ids": [123], "profile_ids": [900001]}, "c2")),
+                 say("done")), task="Find talents for job 123.")
+    assert len(vira) == 2
+
+
+@pytest.mark.parametrize("name,args", [
+    ("find_talents", {"job_ids": list(range(1, 52))}),
+    ("find_talents", {"job_ids": [0]}),
+    ("score_candidates", {"app_ids": [-3]}),
+    ("generate_jd", {"job_title": "x" * 201}),
+    ("generate_jd", {"job_title": "Dev", "lang": "en; drop"}),
+    ("generate_jd", {"job_title": "Dev", "skills": ["s"] * 31}),
+    ("generate_jd", {"job_title": "Dev", "industry": ["i" * 201]}),
+])
+def test_schemas_reject_oversized_or_malformed_input(vira, name, args):
+    tool = {t.name: t for t in vira_tools.langchain_tools()}[name]
+    with pytest.raises(ValidationError):
+        tool.invoke(args)
+    assert vira == []
+
+
 def test_a_crashing_tool_does_not_crash_the_run(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("internal detail")
     monkeypatch.setattr(vira_tools, "_call", boom)
-    result = run(scripted(calls(call("find_talents", {"job_ids": [1]}, "c1")), say("done")))
+    result = run(scripted(calls(call("find_talents", {"job_ids": [1]}, "c1")), say("done")),
+                 "Find talents for job 1.")
     failed = tool_messages(result)["c1"]
     assert failed.status == "error" and "RuntimeError" in failed.text
     assert "internal detail" not in failed.text
@@ -153,14 +187,15 @@ def test_a_crashing_tool_does_not_crash_the_run(monkeypatch):
 
 
 def test_invalid_args_come_back_as_an_error_for_the_model(vira):
-    result = run(scripted(calls(call("find_talents", {"job_ids": []}, "c1")), say("done")))
+    result = run(scripted(calls(call("find_talents", {"job_ids": []}, "c1")), say("done")),
+                 "Find talents.")
     assert tool_messages(result)["c1"].status == "error"
     assert vira == []
 
 
 def test_model_call_cap_ends_the_run(vira):
     loop = [calls(call("find_talents", {"job_ids": [i]}, f"c{i}")) for i in range(1, 10)]
-    run(scripted(*loop), step_limit=3)
+    run(scripted(*loop), "Find talents for jobs 1, 2, 3, 4, 5, 6, 7, 8 and 9.", step_limit=3)
     assert len(vira) == 3
 
 
@@ -173,7 +208,7 @@ def approve_all_run(vira_model_replies, decision):
         return [decision for _ in request["action_requests"]]
 
     agent = run_langgraph.build_agent(model=scripted(*vira_model_replies), approve_all=True)
-    return agent_kit.run_task(agent, "task", decide=decide), requests
+    return agent_kit.run_task(agent, "Find talents for job 123.", decide=decide), requests
 
 
 def test_approve_all_pauses_and_approval_runs_the_call(vira):

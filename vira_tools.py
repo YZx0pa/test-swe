@@ -27,6 +27,10 @@ import recruiter_cli as vira
 
 _MODE = "mock"
 
+# The model sees these limits in the schema; recruiter_cli enforces the same numbers.
+Id = Annotated[int, Field(ge=1)]
+Text = Annotated[str, Field(max_length=vira.MAX_TEXT)]
+
 
 def configure(mode: str) -> None:
     """Set real|mock for every tool call in this process."""
@@ -49,10 +53,10 @@ def _call(action: Callable[..., Dict], *args, **kwargs) -> Dict:
 
 # --- the four tools ----------------------------------------------------------
 def find_talents(
-    job_ids: Annotated[list[int], Field(
-        min_length=1, description="Job ids to source talents for.")],
-    profile_ids: Annotated[list[int] | None, Field(
-        description="Optional: only consider these profile ids.")] = None,
+    job_ids: Annotated[list[Id], Field(
+        min_length=1, max_length=vira.MAX_IDS, description="Job ids to source talents for.")],
+    profile_ids: Annotated[list[Id] | None, Field(
+        max_length=vira.MAX_IDS, description="Optional: only consider these profile ids.")] = None,
 ) -> Dict[str, Any]:
     """Find potential/suggested talents for one or more jobs (read-only).
 
@@ -65,18 +69,24 @@ def find_talents(
 
 def generate_jd(
     job_title: Annotated[str, Field(
-        min_length=1, description="Just the job title the user gave; skills go in `skills`.")],
-    skills: Annotated[list[str] | None, Field(
+        min_length=1, max_length=vira.MAX_TEXT,
+        description="Just the job title the user gave; skills go in `skills`.")],
+    skills: Annotated[list[Text] | None, Field(
+        max_length=vira.MAX_ITEMS,
         description="Skills the user named. Leave empty if they named none.")] = None,
     lang: Annotated[str, Field(
+        pattern=vira.LANG_RE.pattern,
         description="Language code of the posting, e.g. en, ar.")] = "en",
-    job_id: Annotated[int | None, Field(
+    job_id: Annotated[Id | None, Field(
         description="Existing job id, only if the user gave one.")] = None,
-    job_function: Annotated[list[str] | None, Field(
+    job_function: Annotated[list[Text] | None, Field(
+        max_length=vira.MAX_ITEMS,
         description="Job functions the user named. Leave empty if they named none.")] = None,
-    industry: Annotated[list[str] | None, Field(
+    industry: Annotated[list[Text] | None, Field(
+        max_length=vira.MAX_ITEMS,
         description="Industries the user named. Leave empty if they named none.")] = None,
-    other_requirements: Annotated[list[str] | None, Field(
+    other_requirements: Annotated[list[Text] | None, Field(
+        max_length=vira.MAX_ITEMS,
         description="Other requirements the user stated. Leave empty if they stated none.")] = None,
 ) -> Dict[str, Any]:
     """LLM-generate a job posting / job description.
@@ -90,10 +100,10 @@ def generate_jd(
 
 
 def score_candidates(
-    app_ids: Annotated[list[int] | None, Field(
-        description="Application ids (applicants who applied).")] = None,
-    match_ids: Annotated[list[int] | None, Field(
-        description="Match ids of suggested talents. Not profile ids.")] = None,
+    app_ids: Annotated[list[Id] | None, Field(
+        max_length=vira.MAX_IDS, description="Application ids (applicants who applied).")] = None,
+    match_ids: Annotated[list[Id] | None, Field(
+        max_length=vira.MAX_IDS, description="Match ids of suggested talents. Not profile ids.")] = None,
 ) -> Dict[str, Any]:
     """Trigger CV scoring (composite score + briq) for applicants and/or suggested talents.
 
@@ -106,10 +116,10 @@ def score_candidates(
 
 
 def candidate_insights(
-    app_ids: Annotated[list[int], Field(
-        min_length=1, description="Application ids to get insights for.")],
-    match_ids: Annotated[list[int] | None, Field(
-        description="Optional match ids. Not profile ids.")] = None,
+    app_ids: Annotated[list[Id], Field(
+        min_length=1, max_length=vira.MAX_IDS, description="Application ids to get insights for.")],
+    match_ids: Annotated[list[Id] | None, Field(
+        max_length=vira.MAX_IDS, description="Optional match ids. Not profile ids.")] = None,
 ) -> Dict[str, Any]:
     """Trigger candidate insights (v3) for applicants.
 

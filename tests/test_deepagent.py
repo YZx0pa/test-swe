@@ -91,8 +91,8 @@ def test_the_ledger_is_per_task(audit_log):
     model = scripted(calls(call("find_talents", {"job_ids": [1]}, "a")), say("one"),
                      calls(call("find_talents", {"job_ids": [1]}, "b")), say("two"))
     agent = run_deepagent.build_agent(model=model)
-    agent_kit.run_task(agent, "first task")
-    agent_kit.run_task(agent, "second task")          # fresh thread: same call is allowed
+    agent_kit.run_task(agent, "Find talents for job 1.")
+    agent_kit.run_task(agent, "Find talents for job 1.")   # fresh thread: same call is allowed
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents", "find-talents"]
 
 

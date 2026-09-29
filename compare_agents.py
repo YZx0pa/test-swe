@@ -262,6 +262,8 @@ def details(r: Run) -> list[str]:
              f"({g['args_chained']} chained from earlier results), "
              f"{g['numbers_grounded']}/{g['numbers']} answer numbers traced"
              + (f"; UNGROUNDED: {', '.join(g['ungrounded'])}" if g["ungrounded"] else "")
+             + (f"; invented ids refused by the guard: {', '.join(g['ungrounded_blocked'])}"
+                if g["ungrounded_blocked"] else "")
              + (f"; WRONG ID KIND: {', '.join(g['misused'])}" if g["misused"] else "")
              + (f"; refused by the guard: {', '.join(g['misused_blocked'])}" if g["misused_blocked"] else ""), "",
              "Tool calls (as the model issued them):", "```"]
@@ -290,7 +292,8 @@ def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int) -
         g = [r.grounding for r in mine]
         costs = [c for c in (estimated_cost(r) for r in mine) if c is not None]
         totals.append(f"{sum(r.passed for r in mine)}/{len(mine)} pass · "
-                      f"~${sum(costs):.3f} · ungrounded values: {sum(len(x['ungrounded']) for x in g)} · "
+                      f"~${sum(costs):.3f} · ungrounded values: {sum(len(x['ungrounded']) for x in g)} "
+                      f"(+{sum(len(x['ungrounded_blocked']) for x in g)} refused) · "
                       f"wrong-kind ids reaching VIRA: {sum(len(x['misused']) for x in g)} "
                       f"(+{sum(len(x['misused_blocked']) for x in g)} refused)")
     lines.append("| **total** | | " + " | ".join(totals) + " |")

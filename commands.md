@@ -27,3 +27,8 @@ Flags:
   --app-ids CSV   (REQUIRED) application ids
   --match-ids CSV (optional) match ids
 Returns: insights per id.
+
+### Limits (all commands)
+Ids are positive integers, at most 50 per flag. Text values are at most 200 characters and
+CSV lists at most 30 entries. --lang is a language code such as en, ar or zh-CN. A command
+outside these limits returns an error and nothing is sent.

@@ -287,10 +287,10 @@ def reground(steps: list[dict], task: str, *, mini: bool = False) -> list[dict]:
 
 def summary(steps: list[dict]) -> dict:
     """Counts for the grounding badges: all args/numbers grounded? how many chained?"""
-    args = [(arg, p) for s in steps for arg, vals in (s.get("provenance") or {}).items()
+    args = [(s["i"], arg, p) for s in steps for arg, vals in (s.get("provenance") or {}).items()
             for p in vals]
     numbers = [n for s in steps if s["kind"] == "answer" for n in s["numbers"]]
-    # Pair each call with its result: a wrong-kind id the guard refused never reached VIRA.
+    # Pair each call with its result: a value in a call the guard refused never reached VIRA.
     refused_calls, pending = set(), {}
     for s in steps:
         if s["kind"] == "call":
@@ -304,13 +304,16 @@ def summary(steps: list[dict]) -> dict:
                   if "misused_as" in p]
     return {
         "args": len(args),
-        "args_grounded": sum(bool(p["sources"]) and "misused_as" not in p for _, p in args),
+        "args_grounded": sum(bool(p["sources"]) and "misused_as" not in p for _, _, p in args),
         "args_chained": sum(any(src.startswith("step") for src in p["sources"])
-                            and "misused_as" not in p for _, p in args),
+                            and "misused_as" not in p for _, _, p in args),
         "numbers": len(numbers),
         "numbers_grounded": sum(bool(n["sources"]) for n in numbers),
-        "ungrounded": [f"{p['value']}" for _, p in args if not p["sources"]]
+        "ungrounded": [f"{p['value']}" for i, _, p in args
+                       if not p["sources"] and i not in refused_calls]
                       + [n["value"] for n in numbers if not n["sources"]],
+        "ungrounded_blocked": [f"{p['value']}" for i, _, p in args
+                               if not p["sources"] and i in refused_calls],
         "misused": [text for i, text in wrong_kind if i not in refused_calls],
         "misused_blocked": [text for i, text in wrong_kind if i in refused_calls],
     }

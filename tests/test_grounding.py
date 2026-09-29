@@ -37,7 +37,8 @@ def test_values_are_traced_to_the_task_and_to_earlier_results():
     assert answer == {"12": ["task", "step 2", "step 4"], "0.95": ["step 2"]}
     assert grounding.summary(steps) == {"args": 4, "args_grounded": 4, "args_chained": 1,
                                         "numbers": 2, "numbers_grounded": 2, "ungrounded": [],
-                                        "misused": [], "misused_blocked": []}
+                                        "ungrounded_blocked": [], "misused": [],
+                                        "misused_blocked": []}
 
 
 def test_invented_values_are_flagged():
@@ -200,3 +201,16 @@ def test_a_wrong_kind_id_the_guard_refused_counts_as_blocked():
     summary = grounding.summary(grounding.trace_from_messages(messages, task))
     assert summary["misused"] == []
     assert summary["misused_blocked"] == ["900001 (profile_id as match_ids)"]
+
+
+def test_an_invented_id_the_guard_refused_counts_as_blocked():
+    messages = [
+        HumanMessage("Score the applicants."),
+        AIMessage("", tool_calls=[{"name": "score_candidates", "args": {"app_ids": [77]},
+                                   "id": "c1", "type": "tool_call"}]),
+        ToolMessage('{"status": "error", "message": "Refused: 77 isn\'t in the task or any '
+                    'earlier result."}', tool_call_id="c1", name="score_candidates", status="error"),
+        AIMessage("SUMMARY: nothing scored | no application ids | none given"),
+    ]
+    summary = grounding.summary(grounding.trace_from_messages(messages, "Score the applicants."))
+    assert summary["ungrounded"] == [] and summary["ungrounded_blocked"] == ["77"]

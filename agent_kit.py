@@ -117,7 +117,7 @@ class CallLedger:
 
 
 class ToolCallGuard(AgentMiddleware):
-    """For the VIRA tools only: refuse exact repeats, never let a tool crash the run."""
+    """For the VIRA tools only: refuse repeats and ids the model can't have, never crash the run."""
 
     def __init__(self, names=frozenset(vira_tools.NAMES), ledger: CallLedger | None = None):
         super().__init__()
@@ -142,24 +142,39 @@ class ToolCallGuard(AgentMiddleware):
                            tool_call_id=call["id"], name=call["name"], status="error")
 
     @staticmethod
-    def _misused_ids(request) -> list[str]:
-        """Ids passed as a different kind than they came back as (grounding's id-kind check)."""
+    def _bad_ids(request) -> tuple[list[str], list[str]]:
+        """(wrong-kind ids, invented ids), from grounding's provenance of the call's id args.
+
+        Wrong kind: an id passed as a different kind than it came back as.  Invented: an id
+        that is in neither the task nor any earlier tool result.  A reviewer's edited args
+        (HumanInTheLoopMiddleware) count as user input, like the task.
+        """
         messages = request.state.get("messages", [])
         task = next((m.text for m in messages if m.type == "human"), "")
         sources = [("task", task)] + [(f"step {i}", m.text) for i, m in enumerate(messages)
                                       if m.type == "tool"]
-        found = []
+        edited = (request.state.get("hitl_edited_tool_calls") or {}).get(request.tool_call.get("id"))
+        if edited:
+            sources.append(("task", json.dumps(edited.get("args", {}))))
+        misused, invented = [], []
         for arg, entries in grounding.ground_args(request.tool_call["args"], sources).items():
+            if arg not in grounding.ID_KINDS:
+                continue
             for p in entries:
                 if "misused_as" in p:
-                    found.append(f"{p['value']} is a {p['misused_as']}, not a {arg[:-1]}")
-        return found
+                    misused.append(f"{p['value']} is a {p['misused_as']}, not a {arg[:-1]}")
+                elif not p["sources"]:
+                    invented.append(f"{p['value']}")
+        return misused, invented
 
     def _refusal(self, request) -> ToolMessage | None:
-        misused = self._misused_ids(request)
+        misused, invented = self._bad_ids(request)
         if misused:
             return self._result(request, "Refused: " + "; ".join(misused) + ". No tool converts "
                                 "between id kinds: finish and say which id is missing.")
+        if invented:
+            return self._result(request, f"Refused: {', '.join(invented)} isn't in the task or any "
+                                "earlier result. Never invent ids: finish and say which id is missing.")
         repeat = self._repeat_of_earlier_call(request)   # also orders parallel duplicates
         if not repeat and self.ledger is not None:
             info = request.runtime.execution_info

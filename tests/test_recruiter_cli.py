@@ -83,6 +83,29 @@ def test_emails_and_phones_inside_text_are_masked():
         assert kept in out
 
 
+@pytest.mark.parametrize("action", [
+    lambda: recruiter_cli.find_talents(list(range(1, 52)), mode="mock"),
+    lambda: recruiter_cli.find_talents([0], mode="mock"),
+    lambda: recruiter_cli.score_candidates(["123.."], mode="mock"),
+    lambda: recruiter_cli.candidate_insights([11], [True], mode="mock"),
+    lambda: recruiter_cli.generate_jd("x" * 201, mode="mock"),
+    lambda: recruiter_cli.generate_jd("Dev", lang="en;x", mode="mock"),
+    lambda: recruiter_cli.generate_jd("Dev", skills=["s"] * 31, mode="mock"),
+    lambda: recruiter_cli.generate_jd("Dev", job_id=-1, mode="mock"),
+])
+def test_bad_input_is_refused_before_anything_is_sent(action, calls, audit_log):
+    result = action()
+    assert result["status"] == "error" and result["result"]["message"]
+    assert calls == [] and read_audit(audit_log) == []
+
+
+def test_the_cli_reports_a_typo_in_ids(calls, capsys):
+    recruiter_cli.main(["--mode", "mock", "find-talents", "--job-ids", "123.."])
+    assert json.loads(capsys.readouterr().out)["result"]["message"] == (
+        "job_ids: ids are positive integers")
+    assert calls == []
+
+
 def test_audit_line_masks_the_request_body(calls, audit_log):
     recruiter_cli.execute("find-talents", "fast_retargeting", {},
                           {"email": "jane@example.com", "job_ids": [1]}, mode="mock")

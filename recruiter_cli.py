@@ -70,6 +70,13 @@ EVENTS_LOG = os.environ.get("EVENTS_LOG", "events.jsonl")
 VIRA_CA_BUNDLE = os.environ.get("VIRA_CA_BUNDLE") or None
 RAW_LIMIT = 500          # characters of a non-JSON reply that reach the caller
 
+# Input limits, checked before anything is sent (vira_tools.py puts the same numbers
+# in the tool schemas).  Scoring and JD generation run LLM work on VIRA per id / per text.
+MAX_IDS = 50             # ids per argument
+MAX_TEXT = 200           # characters per text value
+MAX_ITEMS = 30           # entries per list argument
+LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")    # en, ar, zh-CN, zh-Hans
+
 # Dangerous subcommands require --confirmed (structural gate, not a prompt
 # request).  The four AI endpoints here are read/compute only, so this is
 # empty; add names here the moment a write/notify/irreversible action is added.
@@ -184,7 +191,8 @@ def _emit(result: Dict) -> None:
 
 
 def _csv_int(s: str | None) -> list[int]:
-    return [int(x) for x in s.split(",") if x.strip()] if s else []
+    # A non-number stays a string, so _input_problem() can say what's wrong with it.
+    return [int(x) if x.strip().isdigit() else x.strip() for x in s.split(",") if x.strip()] if s else []
 
 
 def _csv_str(s: str | None) -> list[str]:
@@ -247,6 +255,27 @@ def _call(path: str, query: Dict[str, Any], body: Dict[str, Any], mode: str) -> 
                 "result": {"raw": resp.text[:RAW_LIMIT]}}
 
 
+def _input_problem(*, ids: Dict[str, list] | None = None, texts: Dict[str, str] | None = None,
+                   lists: Dict[str, list] | None = None, lang: str | None = None) -> str | None:
+    """Why these arguments must not be sent to VIRA, or None."""
+    for name, values in (ids or {}).items():
+        if len(values) > MAX_IDS:
+            return f"{name}: at most {MAX_IDS} ids per call"
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in values):
+            return f"{name}: ids are positive integers"
+    for name, value in (texts or {}).items():
+        if len(value) > MAX_TEXT:
+            return f"{name}: at most {MAX_TEXT} characters"
+    for name, values in (lists or {}).items():
+        if len(values) > MAX_ITEMS:
+            return f"{name}: at most {MAX_ITEMS} entries"
+        if any(len(v) > MAX_TEXT for v in values):
+            return f"{name}: at most {MAX_TEXT} characters per entry"
+    if lang is not None and not LANG_RE.match(lang):
+        return "lang: a language code such as en, ar or zh-CN"
+    return None
+
+
 def execute(cmd: str, path: str, query: Dict, body: Dict, *, mode: str,
             confirmed: bool = False) -> Dict:
     """The one guarded path to VIRA: confirm-gate -> call -> audit -> PII mask.
@@ -272,6 +301,9 @@ def execute(cmd: str, path: str, query: Dict, body: Dict, *, mode: str,
 def find_talents(job_ids: list[int], profile_ids: list[int] | None = None, *,
                  mode: str, confirmed: bool = False) -> Dict:
     # #1 fast_retargeting — params all in BODY
+    problem = _input_problem(ids={"job_ids": job_ids, "profile_ids": profile_ids or []})
+    if problem:
+        return _error(problem)
     return execute("find-talents", "fast_retargeting",
                    query={},
                    body={"job_ids": job_ids,
@@ -285,6 +317,14 @@ def generate_jd(job_title: str, skills: list[str] | None = None, lang: str = "en
                 other_requirements: list[str] | None = None, *,
                 mode: str, confirmed: bool = False) -> Dict:
     # #2 JD_generation — lang in QUERY, rest in BODY
+    problem = _input_problem(ids={"job_id": [job_id] if job_id else []},
+                             texts={"job_title": job_title},
+                             lists={"skills": skills or [], "job_function": job_function or [],
+                                    "industry": industry or [],
+                                    "other_requirements": other_requirements or []},
+                             lang=lang)
+    if problem:
+        return _error(problem)
     return execute("generate-jd", "JD_generation/jd_generation",
                    query={"lang": lang},
                    body={"job_id": job_id or 0,
@@ -299,6 +339,9 @@ def generate_jd(job_title: str, skills: list[str] | None = None, lang: str = "en
 def score_candidates(app_ids: list[int] | None = None, match_ids: list[int] | None = None,
                      *, mode: str, confirmed: bool = False) -> Dict:
     # #3 candidate_score_calculation — scoring flags in QUERY, ids in BODY
+    problem = _input_problem(ids={"app_ids": app_ids or [], "match_ids": match_ids or []})
+    if problem:
+        return _error(problem)
     return execute("score-candidates", "candidate_score_calculation",
                    query={"composite_score": "True", "briq": "True", "recal_briq": "True"},
                    body={"app_ids": app_ids or [],
@@ -309,6 +352,9 @@ def score_candidates(app_ids: list[int] | None = None, match_ids: list[int] | No
 def candidate_insights(app_ids: list[int] | None = None, match_ids: list[int] | None = None,
                        *, mode: str, confirmed: bool = False) -> Dict:
     # #4 candidate_score_calculation?version=v3 — SAME path, different query
+    problem = _input_problem(ids={"app_ids": app_ids or [], "match_ids": match_ids or []})
+    if problem:
+        return _error(problem)
     return execute("candidate-insights", "candidate_score_calculation",
                    query={"version": "v3"},
                    body={"app_ids": app_ids or [],

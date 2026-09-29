@@ -33,10 +33,10 @@ confirm gate behave the same everywhere.
 
 | File | Change |
 |---|---|
-| `recruiter_cli.py` | New `execute()`: the single guarded path (gate → call → audit → mask). It returns a dict and never prints. There are four typed, importable actions (`find_talents`, `generate_jd`, `score_candidates`, `candidate_insights`) with a required keyword-only `mode`. CLI subcommands now just parse flags and call those actions, and requests and printed output are unchanged. `_guard` returns a result instead of exiting, and the CLI still exits `2` on `needs_confirmation`. `get-match-id` is commented out. `--mode` is required and argparse abbreviations are off. The confirm message says the agent can't approve instead of asking it to retry with `--confirmed`. Real calls: `https://` only (plain http to loopback), no redirects, no proxy/CA variables from the environment (`VIRA_CA_BUNDLE` for a private CA), no request when a credential is empty, non-JSON replies capped at 500 characters. Failed calls are audited; the CLI prints a JSON error instead of a traceback. The audit log is 0600 and masks `query`. `_mask_pii` matches normalised keys against a module-level `PII_KEYS` plus word patterns, and replaces emails and phone numbers inside every string (a non-JSON `raw` reply included). `.env` is loaded by path, with a warning when other users can read it. |
+| `recruiter_cli.py` | New `execute()`: the single guarded path (gate → call → audit → mask). It returns a dict and never prints. There are four typed, importable actions (`find_talents`, `generate_jd`, `score_candidates`, `candidate_insights`) with a required keyword-only `mode`. CLI subcommands now just parse flags and call those actions, and requests and printed output are unchanged. `_guard` returns a result instead of exiting, and the CLI still exits `2` on `needs_confirmation`. `get-match-id` is commented out. `--mode` is required and argparse abbreviations are off. The confirm message says the agent can't approve instead of asking it to retry with `--confirmed`. Real calls: `https://` only (plain http to loopback), no redirects, no proxy/CA variables from the environment (`VIRA_CA_BUNDLE` for a private CA), no request when a credential is empty, non-JSON replies capped at 500 characters. Failed calls are audited; the CLI prints a JSON error instead of a traceback. The audit log is 0600 and masks `query`. `_mask_pii` matches normalised keys against a module-level `PII_KEYS` plus word patterns, and replaces emails and phone numbers inside every string (a non-JSON `raw` reply included). `.env` is loaded by path, with a warning when other users can read it. Input limits (`MAX_IDS=50`, `MAX_TEXT=200`, `MAX_ITEMS=30`, `LANG_RE`) are checked in the typed actions before anything is sent; a non-numeric CSV id comes back as a clear error rather than a crash. |
 | `run_mini.py` | Prompt rules tightened: echo `Not_Able…` once then finish, never repeat a command, quote the `SUMMARY` echo (an unquoted `\|` is refused). `tool_choice="required"` stops reasoning models from answering in prose and then re-firing the previous command. Default `CHAT_MODEL` is `gpt-5-mini`. The model's bash tool is `mini_env.RecruiterEnvironment`; `JENI_MODE` defaults to `mock` and is set by the host; `.env` is read by `run_mini` itself, with `VIRA_*` passed only to recruiter_cli; `commands.md` is never parsed by Jinja. |
 | `mock_vira.py` | Scores and insights are now deterministic per id instead of constant. For example, applicants 11 / 12 / 13 score 0.78 / 0.95 / 0.71, so "pick the top scorer" tasks can be checked. |
-| `commands.md` | `get-match-id` and the notes pointing to it are removed. |
+| `commands.md` | `get-match-id` and the notes pointing to it are removed. A "Limits" section states the input bounds. |
 | `.env.example` | `CHAT_MODEL=gpt-5-mini`. Notes on `VIRA_BASE_URL` (https unless loopback; proxies ignored) and an optional `VIRA_CA_BUNDLE`. |
 | `requirements.txt` | Adds `langchain==1.4.2`, `langgraph==1.2.12`, `langchain-openai==1.6.4`, `deepagents==0.7.18`, `mcp==1.30.0`. |
 | `requirements.lock.txt` | Gains the new transitive pins. Every pin mini-swe-agent already used is unchanged. |
@@ -48,7 +48,7 @@ confirm gate behave the same everywhere.
 |---|---|
 | `requirements-dev.txt` | `-r requirements.txt` plus `pytest==9.1.1`. |
 | `pytest.ini` | `pythonpath = .`, `testpaths = tests`. |
-| `vira_tools.py` | The model-facing contract: four typed functions whose `Annotated[…, Field(…)]` signatures and docstrings are the tool schema. `configure(mode)` sets real/mock once per process. Tools always pass `confirmed=False` and turn exceptions into `{"status": "error", …}` with the exception type only. `langchain_tools()` wraps them for LangChain. |
+| `vira_tools.py` | The model-facing contract: four typed functions whose `Annotated[…, Field(…)]` signatures and docstrings are the tool schema, including recruiter_cli's input limits (positive ids, max lengths, a `lang` pattern). `configure(mode)` sets real/mock once per process. Tools always pass `confirmed=False` and turn exceptions into `{"status": "error", …}` with the exception type only. `langchain_tools()` wraps them for LangChain. |
 | `agent_kit.py` | Shared by the LangChain runners: `SYSTEM_PROMPT`; `build_chat_model()`, which maps litellm-style ids such as `openai/gpt-5-mini` and uses Chat Completions for OpenAI; `ToolCallGuard` middleware; `CallLedger`; the model-call cap; `--approve-all` interrupts; usage counting; the REPL; and `--trace-json`. |
 | `run_langgraph.py` | LangGraph agent loop via `langchain.agents.create_agent`, with an `InMemorySaver` checkpointer. |
 | `run_workflow.py` | Explicit `StateGraph`: score → shortlist top-k (in code) → approval interrupt → insights → one-call summary. The model never picks a tool. |
@@ -58,7 +58,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 165 offline tests (section 3). |
+| `tests/` | 184 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -76,7 +76,11 @@ confirm gate behave the same everywhere.
 - `ToolCallGuard` refuses, without calling VIRA:
   - exact repeats of a call (normalised args), across a deepagents main agent and all its
     subagents;
-  - ids passed as a different kind than they came back as.
+  - ids passed as a different kind than they came back as;
+  - ids found in neither the task nor an earlier tool result (a reviewer's edit counts as user
+    input).
+- Inputs outside the limits (50 ids, 200 characters, 30 list entries, a language code) are
+  refused before anything is sent.
 - `ModelCallLimitMiddleware(thread_limit=12)` caps model calls per task. LangSmith tracing is off
   (all four `LANGSMITH_/LANGCHAIN_TRACING[_V2]` variables) unless `--trace` is passed.
 
@@ -158,7 +162,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 165 passed
+# 184 passed
 ```
 
 How the tests stay hermetic:
@@ -177,11 +181,11 @@ How the tests stay hermetic:
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_recruiter_cli.py` | 75 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
-| `tests/test_agents.py` | 22 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
+| `tests/test_recruiter_cli.py` | 84 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
+| `tests/test_agents.py` | 31 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed, invented ids refused before VIRA, ids from earlier results allowed. The schemas reject oversized or malformed input. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
 | `tests/test_deepagent.py` | 8 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval. Virtual files stay in graph state and nothing is written to disk. |
 | `tests/test_mcp.py` | 4 | Tool list, annotations (`readOnlyHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
-| `tests/test_grounding.py` | 12 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind ids the guard refused count as blocked, not as reaching VIRA. |
+| `tests/test_grounding.py` | 13 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind and invented ids the guard refused count as blocked, not as reaching VIRA. |
 | `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 
 Run a subset:
@@ -283,6 +287,7 @@ Try the behaviours the guard and prompt are meant to enforce:
 | `"Generate a job description."` | No tool call. The answer says the job title is missing and doesn't invent one. |
 | `"Find talents for job 123 and score them."` | One `find_talents` call, then a stop saying match ids are missing, since `find_talents` returns profile ids and no tool converts them. If the model does try `score_candidates` with those ids, the tool result is `Refused: 900001 is a profile_id, not a match_id …` and nothing reaches VIRA. |
 | `"Score applicants 11, 12 and 13, then get candidate insights only for the one with the highest composite score."` | `score_candidates({"app_ids": [11, 12, 13]})`, then `candidate_insights({"app_ids": [12]})`, since 12 has the top mock score. |
+| `"Score the applicants."` | No id to use. If the model tries one anyway, the result is `Refused: … isn't in the task or any earlier result …` and nothing reaches VIRA. |
 | The same task twice in one prompt, e.g. `"Find talents for job 123. Then find talents for job 123 again."` | Either the model doesn't repeat the call, or the repeat comes back `Refused: identical to an earlier call in this task`. Either way the audit log has one `find-talents` line. |
 
 **Human approval:**
@@ -404,8 +409,8 @@ Each task's pass condition is written as `check_<task>` in `compare_agents.py`. 
 stdout:
 - a table with one cell per task × runtime: verdict · model calls · tokens · est. cost ·
   seconds;
-- a totals row: passes, cost, ungrounded values, wrong-kind ids that reached VIRA, and wrong-kind
-  ids the guard refused;
+- a totals row: passes, cost, ungrounded values (and invented ids the guard refused), wrong-kind
+  ids that reached VIRA, and wrong-kind ids the guard refused;
 - per-run details for every failure and for run 1 of each cell: tool calls as issued, what
   reached VIRA, and the final answer.
 
@@ -501,7 +506,8 @@ A `misused_as` key marks a real id passed as the wrong kind.
 |---|---|
 | `args` / `args_grounded` / `args_chained` | Tool-argument counts: all, traced, and traced to an earlier result. |
 | `numbers` / `numbers_grounded` | Answer-number counts: all and traced. |
-| `ungrounded` | Values with no source. |
+| `ungrounded` | Values with no source, in calls that ran, plus answer numbers with no source. |
+| `ungrounded_blocked` | Values with no source in calls the guard refused (invented ids). |
 | `misused` | Wrong-kind ids that reached VIRA. |
 | `misused_blocked` | Wrong-kind ids the guard refused. |
 

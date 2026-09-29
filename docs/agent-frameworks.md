@@ -83,7 +83,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 165 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 184 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -98,6 +98,11 @@ Guarantees that hold in every new runtime:
   redirects, ignore proxy and CA variables from the environment (`VIRA_CA_BUNDLE` sets a CA), and
   aren't sent at all when a `VIRA_*` credential is empty.
 - The audit log is owner-only (0600), and its `query` is masked like the body.
+- Inputs are bounded before anything is sent: at most 50 ids per argument (positive integers),
+  200 characters per text value, 30 entries per list, and `lang` must look like a language code.
+  The tool schemas carry the same limits (`recruiter_cli.MAX_*`), so the model sees them.
+- `ToolCallGuard` refuses an id that is in neither the task nor an earlier tool result (a
+  reviewer's `edit` counts as user input), as well as ids of the wrong kind.
 
 How mini's bash-era prompt rules became structure:
 
@@ -107,9 +112,10 @@ How mini's bash-era prompt rules became structure:
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
 | "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents |
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`) |
+| "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither the task nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(thread_limit=12)`, one fresh thread per task |
 | "Tell the user … retry with `--confirmed`" | `--approve-all`: a LangGraph interrupt pauses before the call; approve, edit or reject |
-| Arg validation by argparse (strings) | Pydantic schema: `job_ids` ≥1, `job_title` non-empty, and so on; the model gets the error and retries |
+| Arg validation by argparse (strings) | Pydantic schema: `job_ids` 1–50 positive ids, `job_title` 1–200 characters, `lang` a language code, and so on; the model gets the error and retries. The typed actions check the same limits, so the CLI and mini are covered too |
 
 ## 3. LangGraph
 
@@ -131,7 +137,7 @@ a model node ↔ tools node loop into a LangGraph graph. Behaviour is added as m
 create_agent(build_chat_model(), vira_tools.langchain_tools(),
              system_prompt=SYSTEM_PROMPT,
              middleware=[HumanInTheLoopMiddleware(...),   # only with --approve-all; outermost
-                         ToolCallGuard(),                   # refuse repeats, contain crashes
+                         ToolCallGuard(),                   # refuse repeats and unsourced ids, contain crashes
                          ModelCallLimitMiddleware(thread_limit=12, exit_behavior="end")],
              checkpointer=InMemorySaver())
 ```
@@ -325,22 +331,26 @@ What the runs showed:
 
 1. `recruiter_cli.py`: add a typed action that calls `execute()` (path plus the query/body split),
    and a CLI subcommand that parses flags and calls it.
-2. `commands.md`: document the subcommand for mini.
+2. `commands.md`: document the subcommand for mini. Add it to `mini_policy.SUBCOMMANDS`, and to
+   `mini_policy.SIDE_EFFECTS` unless it is a pure read; a test checks both against the CLI and
+   `vira_tools.READ_ONLY`.
 3. `vira_tools.py`: add a typed function (its signature and docstring are the model's contract)
    and append it to `TOOLS`. Add it to `READ_ONLY` if it is a pure read.
 4. Writes, notifications and anything irreversible: add the CLI name to `NEEDS_CONFIRM`. Today that
    makes the tool unreachable from `vira_tools` and hides it from MCP, so decide the approval
    design first (follow-ups).
-5. New sensitive response fields: extend `PII_KEYS` (or the `_PII_WORD` / `_PII_NAME` patterns
+5. Bounds: check the new arguments with `_input_problem()` in the typed action, and put the same
+   `MAX_*` / `LANG_RE` limits in the `vira_tools` signature.
+6. New sensitive response fields: extend `PII_KEYS` (or the `_PII_WORD` / `_PII_NAME` patterns
    beside it) and add the key to `test_pii_keys_are_masked_by_name_and_pattern`.
-6. `mock_vira.py`: add a mock reply. Tests: add a parity case to `tests/test_recruiter_cli.py`
+7. `mock_vira.py`: add a mock reply. Tests: add a parity case to `tests/test_recruiter_cli.py`
    and the schema expectation to `tests/test_agents.py`.
 
 ## 9. Running it
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 165 tests
+.venv/bin/python -m pytest -q                                   # offline, 184 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -400,4 +410,6 @@ every control sits in code the model can't reach, and each one has a test.
 | Other local users read the audit log or `.env` | The audit log is created 0600 (and tightened if older); recruiter_cli warns on stderr when `.env` is group- or world-readable, checking mode bits only | `test_audit_log_is_owner_only`, `test_a_shared_dotenv_is_reported_by_mode_bits_only` |
 | `.env` from a parent directory gets loaded | recruiter_cli loads the `.env` next to it, by path | — |
 | Candidate PII reaches the model (and the model provider) | `_mask_pii`: normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply. Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
+| Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
+| An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the task nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
