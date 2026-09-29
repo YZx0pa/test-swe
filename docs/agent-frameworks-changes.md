@@ -421,7 +421,7 @@ Each run gets its own audit log, and PASS/FAIL is judged on that log.
 # cheap check: one runtime, two tasks (well under a cent with gpt-5-mini)
 python compare_agents.py --runners langgraph --tasks find,no_title
 
-# full run: 6 tasks × 3 runtimes, markdown report to a file (roughly $0.15 with gpt-5-mini)
+# full run: 6 tasks × 3 runtimes, markdown report to a file (roughly $0.10 with gpt-5-mini)
 python compare_agents.py --out traces/report.md
 
 # repeated runs with another model, plus JSON traces
@@ -568,4 +568,4 @@ These are tracked as follow-ups in
   passes through.
 - **Approvals are in memory only.** `InMemorySaver` means a paused approval doesn't survive a
   restart.
-- **LLM results vary.** The comparison numbers in §7 of the design doc are single runs.
+- **LLM results vary.** The comparison numbers in §7 of the design doc are 3 runs per cell.

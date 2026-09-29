@@ -30,3 +30,5 @@ traces/
 CLAUDE.md
 # pytest
 .pytest_cache/
+
+raw_data/

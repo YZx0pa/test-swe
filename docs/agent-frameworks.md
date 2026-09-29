@@ -212,7 +212,7 @@ Gotchas we hit:
 - **`model=None` is deprecated** and falls back to Claude Sonnet, so always pass a model.
   gpt-5-mini has no deepagents harness profile and isn't in its evaluated-model list.
 - **Planning costs tokens,** and the harness likes to retry and delegate when a result looks
-  incomplete: 27–38k tokens where LangGraph used 3–4k (section 7).
+  incomplete: 3–6× LangGraph's tokens per task (section 7).
 
 Use it when a task needs many steps or several jobs, benefits from delegating per-job work to
 isolated subagents, or should produce a written artifact (a report file in the virtual FS).
@@ -292,53 +292,62 @@ python 3.11, pydantic 2.13.5, openai 2.54.0 (held below 3 by litellm), httpx 0.2
 
 ## 7. Results: the same tasks on three runtimes
 
-`compare_agents.py` on 2026-09-23 with gpt-5-mini against mock VIRA. PASS/FAIL is judged on the
-audit log, i.e. what actually reached VIRA, not on the model's prose. Each cell is one run and
-LLM runs aren't deterministic, so treat this as anecdotal. Cells show model calls · tokens ·
-wall time; costs are litellm price-table estimates.
+`compare_agents.py --repeat 3` on 2026-09-30 with gpt-5-mini against mock VIRA, after the
+security hardening in §11 (at `6d27247`). PASS/FAIL is judged on the audit log, i.e. what actually
+reached VIRA, not on the model's prose. Cells show passes out of 3 · median model calls · median
+tokens · median wall time. Costs are litellm price-table estimates for all 18 runs of a runtime.
 
-Run 2, with the current tool contract. Both runs predate the security hardening in §11 (mini's
-confined environment, and the guards and approvals added after it); re-run before comparing.
+The four endpoints are stand-ins chosen to compare runtimes, not Jeni's production task set.
 
 | task | check | mini | LangGraph | deepagents |
 |---|---|---|---|---|
-| find | one find-talents for job 123 | FAIL · 4 · 8.5k · 48s | PASS · 2 · 2.6k · 10s | PASS · 2 · 9.3k · 11s |
-| jd_ar | one generate-jd: lang=ar, given title + skills | PASS · 2 · 3.5k · 20s | PASS · 2 · 4.1k · 32s | FAIL · 8 · 34.7k · 90s |
-| score_insights | score 11,12, then insights for 11 | PASS · 3 · 5.3k · 29s | PASS · 3 · 3.6k · 9s | PASS · 3 · 14.0k · 14s |
-| id_trap | find, then stop (no match_ids exist) | PASS · 4 · 8.9k · 59s | PASS · 2 · 3.1k · 16s | PASS · 6 · 27.1k · 72s |
-| no_title | no call: title missing, don't invent one | FAIL · 12 · 37.4k · 215s | PASS · 1 · 1.4k · 5s | PASS · 1 · 4.7k · 5s |
-| **total** | | **3/5** · ~$0.069 | **5/5** · ~$0.011 | **4/5** · ~$0.045 |
+| find | one find-talents for job 123 | 3/3 · 2 · 4.0k · 18s | 3/3 · 2 · 2.9k · 7s | 3/3 · 2 · 9.7k · 8s |
+| jd_ar | one generate-jd: lang=ar, given title + skills | 3/3 · 2 · 4.1k · 22s | 3/3 · 2 · 3.5k · 19s | 3/3 · 2 · 10.2k · 17s |
+| score_insights | score 11,12, then insights for 11 | 3/3 · 3 · 5.8k · 22s | 3/3 · 3 · 4.2k · 8s | 3/3 · 3 · 14.8k · 10s |
+| top_pick | score 11,12,13, then insights only for the top scorer (12) | 3/3 · 3 · 4.8k · 18s | 3/3 · 3 · 4.3k · 6s | 3/3 · 3 · 14.9k · 15s |
+| id_trap | find, then stop (no match_ids exist) | 3/3 · 4 · 9.8k · 55s | 3/3 · 2 · 3.6k · 11s | 3/3 · 4 · 21.5k · 36s |
+| no_title | no call: title missing, don't invent one | 1/3 · 12 · 37.8k · 169s | 3/3 · 1 · 1.7k · 5s | 3/3 · 1 · 5.0k · 12s |
+| **total** | | **16/18** · ~$0.167 | **18/18** · ~$0.037 | **18/18** · ~$0.096 |
 
-Run 1, before the contract fix below: mini 5/5 (~$0.033), LangGraph 4/5 (~$0.016),
-deepagents 4/5 (~$0.025). All live runs on this branch together cost about $0.25.
+No wrong-kind id reached VIRA in any run, and the guard had none to refuse. The grounding check
+flagged two values, both in deepagents' `no_title` answer: "5+ years" and "~300 words" in the
+example it offered while asking for the title.
+
+Earlier single runs on 2026-09-23, before the hardening and without `top_pick`: run 1 mini 5/5
+(~$0.033), LangGraph 4/5 (~$0.016), deepagents 4/5 (~$0.025); run 2 mini 3/5 (~$0.069),
+LangGraph 5/5 (~$0.011), deepagents 4/5 (~$0.045).
+
+**Multi-job check** (by hand, not in the harness): "For jobs 101, 102 and 103, find suggested
+talents and write a short report with the top 2 talents for each job and their match scores",
+twice per runtime. Both runtimes made one `find_talents` per job and reported the right profiles
+and scores. LangGraph: 4 model calls, ~6.4k tokens. deepagents: 6 calls, ~31k tokens; it wrote
+todos but delegated nothing. MockVira answers only the first id in `job_ids` and returns the same
+profiles for every job, so this can't catch one job's talents being reported under another.
 
 What the runs showed:
 
-1. **A typed schema is part of the prompt.** In run 1 both typed runtimes failed `jd_ar`. They
-   filled `job_function`, `industry`, `other_requirements` and extra skills nobody asked for,
-   re-called `generate_jd`, and then wrote the Arabic JD themselves. mini didn't, because
-   `commands.md` never documents those flags. The fix: the field descriptions now say "only what
-   the user named; leave empty otherwise", and the prompt says to relay tool results. LangGraph
-   then passed.
-2. **mini's failures are the bash failure modes.** Its code and prompt were identical in both
-   runs, yet run 2 failed twice:
-   - A typo, `--job-ids 123..`, crashed the CLI's int parse, and the model gave up.
-   - Asked for a JD with no title, it had no way to ask the user, since every turn must be a
-     command. It looped through echo, `--help` and `--job-title ""` (which reached VIRA with an
-     empty title), plus one off-policy command, until the 12-call limit. The typed runtimes
-     answered that case in one call.
-3. **deepagents' subagents got past the duplicate guard.** In run 2, after the mock's
-   placeholder JD, the main agent delegated to `jd-writer` twice. Each subagent re-sent the
-   identical call, because each has its own message history. This is now fixed with a
-   thread-scoped `CallLedger` shared by the main agent and every subagent (tested). A targeted
-   re-run sent no exact repeats. The model varied the arguments instead (adding "Include
-   sections…" to `other_requirements`, reordering skills) and made 4 calls. deepagents tends to
-   retry and delegate when a result looks incomplete; the mock's placeholder text triggered it
-   here.
-4. **Cost and speed.** LangGraph was cheapest in almost every cell (1.4–4.1k tokens per task).
-   deepagents starts from about 4.7k tokens for a single call because of its filesystem, todo and
-   task tool schemas, and reaches 27–38k when it plans and delegates. mini needs extra calls just
-   to finish (echo SUMMARY, echo COMPLETE) and was 2–5× slower.
+1. **A typed schema is part of the prompt.** In the first single run both typed runtimes failed
+   `jd_ar`. They filled `job_function`, `industry`, `other_requirements` and extra skills nobody
+   asked for, re-called `generate_jd`, and then wrote the Arabic JD themselves. mini didn't,
+   because `commands.md` never documents those flags. The fix: the field descriptions now say
+   "only what the user named; leave empty otherwise", and the prompt says to relay tool results.
+   Both typed runtimes now pass it 3/3.
+2. **mini's failures are the bash failure modes.** Asked for a JD with no title, it has no way to
+   ask the user, since every turn must be a command. In both failed runs it echoed "please provide
+   the job title" until the 12-call limit. Nothing reached VIRA; before the hardening, one run sent
+   `--job-title ""`. The typed runtimes answer that case in one call. The earlier typo crash
+   (`--job-ids 123..`) now comes back as a clear error (§2), though no run hit it this time.
+3. **deepagents' subagents got past the duplicate guard.** In the second single run, the main
+   agent delegated to `jd-writer` twice after the mock's placeholder JD, and each subagent re-sent
+   the identical call, because each has its own message history. This is fixed with a
+   thread-scoped `CallLedger` shared by the main agent and every subagent (tested). deepagents
+   still tends to retry and delegate when a result looks incomplete, varying the arguments
+   instead of repeating them.
+4. **Cost and speed.** LangGraph was cheapest in every cell and fastest in all but `jd_ar`
+   (19s against deepagents' 17s): 1.7–4.3k tokens and 5–19s per task. deepagents starts at about 5k tokens for a single call because of its
+   filesystem, todo and task tool schemas, and used 3–6× LangGraph's tokens per task (about 2.6×
+   the cost overall). mini needs extra calls just to finish (echo SUMMARY, echo COMPLETE), cost
+   about 4.5× LangGraph, and was the slowest in every cell.
 
 ## 8. Adding a VIRA endpoint
 
