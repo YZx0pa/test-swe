@@ -55,6 +55,34 @@ def test_results_are_masked_on_both_paths(argv, typed, calls, capsys):
     assert json.loads(capsys.readouterr().out) == result
 
 
+@pytest.mark.parametrize("key", [
+    "email", "Email", "emails", "email_address", "candidate_email", "name", "first_name",
+    "lastName", "full-name", "username", "candidate_name", "phone", "phone_number", "mobile",
+    "candidate_phone", "address", "home_address", "linkedin_url", "cv", "cv_url", "resume_text",
+    "dob", "date_of_birth", "nric", "passport_no", "photo", "gender", "nationality"])
+def test_pii_keys_are_masked_by_name_and_pattern(key):
+    assert recruiter_cli._mask_pii({"scores": [{key: "x", "app_id": 11}]}) == {
+        "scores": [{key: "<redacted>", "app_id": 11}]}
+
+
+@pytest.mark.parametrize("key", [
+    "job_name_similarity", "job_name", "job_title", "jobTitle", "job_description", "profile_id",
+    "match_ids", "app_id", "overall_score", "skill_score", "composite_score", "briq",
+    "summary", "skills", "industry", "lang", "status", "hotel", "result"])
+def test_other_keys_are_kept(key):
+    assert recruiter_cli._mask_pii({key: 7}) == {key: 7}
+
+
+def test_emails_and_phones_inside_text_are_masked():
+    text = ("Jane (jane.doe@example.com; +65 9123 4567; (555) 123-4567; 9123 4567) fits job "
+            "123456, noted 2026-09-30, score 0.91 for applicants 11, 12 and 13.")
+    out = recruiter_cli._mask_pii({"insights": [{"summary": text}]})["insights"][0]["summary"]
+    assert out.count("<redacted-email>") == 1 and out.count("<redacted-phone>") == 3
+    assert "jane.doe" not in out and "4567" not in out
+    for kept in ("fits job 123456", "2026-09-30", "0.91", "11, 12 and 13"):
+        assert kept in out
+
+
 def test_audit_line_masks_the_request_body(calls, audit_log):
     recruiter_cli.execute("find-talents", "fast_retargeting", {},
                           {"email": "jane@example.com", "job_ids": [1]}, mode="mock")
@@ -219,3 +247,9 @@ def test_non_json_replies_are_capped(session):
     session.response = FakeResponse(502, None, "x" * 10_000)
     result = recruiter_cli.find_talents([123], mode="real")
     assert result["status"] == "error" and len(result["result"]["raw"]) == recruiter_cli.RAW_LIMIT
+
+
+def test_non_json_reply_text_is_scrubbed(session):
+    session.response = FakeResponse(500, None, "no profile for jane@example.com, +65 9123 4567")
+    raw = recruiter_cli.find_talents([123], mode="real")["result"]["raw"]
+    assert raw == "no profile for <redacted-email>, <redacted-phone>"

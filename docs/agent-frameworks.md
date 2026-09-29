@@ -55,7 +55,11 @@ tool itself. Each problem below and how it is closed now (§11 lists the tests):
   variables, so a `{{ VIRA_API_KEY }}` typed into `commands.md` would have put the key in the
   prompt. **Now:** the system prompt is passed as a template variable, so `commands.md` is never
   parsed, and the environment's template variables no longer include `os.environ`.
-- Masking is by key name, so a non-JSON real-mode reply (`{"raw": text}`) passes through unmasked.
+- **Masking was by exact key name,** so `first_name`, `phone_number`, an email inside an insight
+  summary, or a non-JSON real-mode reply (`{"raw": text}`) passed through. **Now:** keys are
+  normalised (camelCase, `-`) and matched against `PII_KEYS` plus word patterns, and every string
+  value has emails and grouped or `+`-prefixed phone numbers replaced. Names inside free text
+  still aren't detected.
 
 ## 2. One tool contract, many runtimes
 
@@ -79,10 +83,11 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 116 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 165 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
-- Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer.
+- Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
+  sensitive keys by name and pattern, and emails and phone numbers inside any string.
 - Every VIRA call lands in the audit log in the same format.
 - The host sets real/mock once (`vira_tools.configure`); the model never sees a mode parameter.
 - Tools pass `confirmed=False`, so a confirm-gated command can't run from them (see follow-ups).
@@ -326,7 +331,8 @@ What the runs showed:
 4. Writes, notifications and anything irreversible: add the CLI name to `NEEDS_CONFIRM`. Today that
    makes the tool unreachable from `vira_tools` and hides it from MCP, so decide the approval
    design first (follow-ups).
-5. New sensitive response fields: extend `PII_KEYS`.
+5. New sensitive response fields: extend `PII_KEYS` (or the `_PII_WORD` / `_PII_NAME` patterns
+   beside it) and add the key to `test_pii_keys_are_masked_by_name_and_pattern`.
 6. `mock_vira.py`: add a mock reply. Tests: add a parity case to `tests/test_recruiter_cli.py`
    and the schema expectation to `tests/test_agents.py`.
 
@@ -334,7 +340,7 @@ What the runs showed:
 
 ```bash
 uv pip install -r requirements-dev.txt
-.venv/bin/python -m pytest -q                                   # offline, 116 tests
+.venv/bin/python -m pytest -q                                   # offline, 165 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -365,7 +371,6 @@ Traces would carry prompts and (masked) tool results off the machine.
 - **Per-task tool budgets shared across subagents** (e.g. one `generate_jd` per task). Exact-repeat
   refusal doesn't stop retries with tweaked arguments, and `ToolCallLimitMiddleware` counts per
   agent context, so the budget needs the ledger approach.
-- **Mask non-JSON replies** (`{"raw": text}`), since masking is by key name.
 - **Model choice for deepagents:** gpt-5-mini works, but a stronger model is what deepagents is
   tuned and evaluated on.
 - **Trace UI:** LangGraph Studio / LangSmith, if the team wants it and accepts data leaving the
@@ -394,4 +399,5 @@ every control sits in code the model can't reach, and each one has a test.
 | Failed calls leave no trace | `execute()` audits the exception type, then re-raises | `test_failed_calls_are_audited_and_the_cli_prints_one_json_line` |
 | Other local users read the audit log or `.env` | The audit log is created 0600 (and tightened if older); recruiter_cli warns on stderr when `.env` is group- or world-readable, checking mode bits only | `test_audit_log_is_owner_only`, `test_a_shared_dotenv_is_reported_by_mode_bits_only` |
 | `.env` from a parent directory gets loaded | recruiter_cli loads the `.env` next to it, by path | — |
+| Candidate PII reaches the model (and the model provider) | `_mask_pii`: normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply. Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |

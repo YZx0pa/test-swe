@@ -32,6 +32,7 @@ import datetime
 import ipaddress
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -85,19 +86,54 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# --- PII masking --------------------------------------------------------------
+# A value is masked when its key (normalised: camelCase and "-" become "_", lower case)
+# is in PII_KEYS or matches one of the patterns.  Extend them when VIRA returns a new
+# sensitive field.  Whole "_"-separated words only, so job_name_similarity stays.
+PII_KEYS = {"email", "emails", "name", "names", "candidate_name", "candidate_email",
+            "phone", "phones", "resume", "cv", "address", "dob", "date_of_birth",
+            "birth_date", "birthday", "nationality", "gender"}
+_PII_WORD = re.compile(r"(^|_)(e?mails?|phones?|mobile|tel|telephone|address(es)?|resume|cv|"
+                       r"dob|nric|ssn|passport|linkedin|photo|avatar)(_|$)")
+_PII_NAME = re.compile(r"^(first|last|full|middle|given|family|sur|user|candidate|applicant|"
+                       r"contact|display|person|legal)_?names?$")
+# Inside any string value (free-text summaries, a non-JSON reply): emails, and phone
+# numbers written in groups or with a "+" (8+ digits; bare digit runs, like ids, stay).
+_EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
+_PHONE = re.compile(r"(?<![\w+.])(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?"
+                    r"\d{2,4}(?:[ .-]\d{2,5}){1,4}(?![\w.])")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
+
+
+def _is_pii_key(key: Any) -> bool:
+    k = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key)).lower().replace("-", "_").replace(" ", "_")
+    return k in PII_KEYS or bool(_PII_WORD.search(k) or _PII_NAME.match(k))
+
+
+def _redact_phone(m: re.Match) -> str:
+    text = m.group(0)
+    if sum(c.isdigit() for c in text) < 8 or _DATE.match(text):
+        return text
+    return "<redacted-phone>"
+
+
+def _scrub_text(text: str) -> str:
+    return _PHONE.sub(_redact_phone, _EMAIL.sub("<redacted-email>", text))
+
+
 def _mask_pii(obj: Any) -> Any:
-    """Very small PII masker for anything that flows back into model context.
+    """Small PII masker for anything that flows back into model context.
 
     Real deployment: swap this for your existing vault mask.  Here it redacts
-    common candidate fields by key name.
+    candidate fields by key name and pattern, and emails and phone numbers
+    inside any string.  Names inside free text are not detected.
     """
-    PII_KEYS = {"email", "emails", "name", "candidate_name", "candidate_email",
-                "phone", "resume", "cv"}
     if isinstance(obj, dict):
-        return {k: ("<redacted>" if k.lower() in PII_KEYS else _mask_pii(v))
-                for k, v in obj.items()}
+        return {k: ("<redacted>" if _is_pii_key(k) else _mask_pii(v)) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_mask_pii(x) for x in obj]
+    if isinstance(obj, str):
+        return _scrub_text(obj)
     return obj
 # def cmd_get_match_id(ns):
 #     # "assume this endpoint exists" — synthesize a real-shaped response locally,
