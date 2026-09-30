@@ -36,15 +36,20 @@ if [ ! -f demo/ui/.next/BUILD_ID ] || [ -n "$(find demo/ui/src demo/ui/package.j
 fi
 
 # --- start both, stop both -------------------------------------------------------------
-pids=()
-cleanup() { for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done; wait 2>/dev/null || true; }
+# Each server runs in its own session, and stopping kills the whole group: `next start`
+# leaves a next-server child that outlives its parent otherwise.
+groups=()
+cleanup() {
+  for pgid in "${groups[@]}"; do kill -TERM -- "-$pgid" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
-LANGGRAPH_CLI_NO_ANALYTICS=1 .venv/bin/langgraph dev --no-browser --no-reload --host 127.0.0.1 --port 2024 \
-  > "$RUN/server.log" 2>&1 &
-pids+=($!)
-(cd demo/ui && exec pnpm start -H 127.0.0.1 -p 3000) > "$RUN/ui.log" 2>&1 &
-pids+=($!)
+LANGGRAPH_CLI_NO_ANALYTICS=1 setsid .venv/bin/langgraph dev --no-browser --no-reload \
+  --host 127.0.0.1 --port 2024 > "$RUN/server.log" 2>&1 &
+groups+=($!)
+(cd demo/ui && exec setsid pnpm start -H 127.0.0.1 -p 3000) > "$RUN/ui.log" 2>&1 &
+groups+=($!)
 
 echo "starting ..."
 for _ in $(seq 60); do curl -sf "$API/ok" >/dev/null 2>&1 && break; sleep 0.5; done
