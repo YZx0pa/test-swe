@@ -358,7 +358,17 @@ def test_deepagents_gets_the_jeni_tasks_behind_the_guard(audit_log):
 def test_the_cli_picks_the_toolset():
     args = agent_kit.parser("x").parse_args(["--tools", "jeni"])
     assert agent_kit.cli_toolset(args) is agent_kit.toolset("jeni")
-    assert agent_kit.parser("x").parse_args([]).tools == "vira"
+    assert agent_kit.parser("x").parse_args([]).tools == "jeni_db"
+
+
+def test_deepagents_defaults_to_jeni_and_does_not_offer_the_async_db_tools(monkeypatch):
+    built = {}
+    monkeypatch.setattr(run_deepagent, "build_agent", lambda **kw: built.update(kw))
+    monkeypatch.setattr(agent_kit, "repl", lambda *a, **kw: None)
+    run_deepagent.main([])
+    assert built["toolset"] is agent_kit.toolset("jeni")
+    with pytest.raises(SystemExit):
+        run_deepagent.main(["--tools", "jeni_db"])
 
 
 def test_camel_case_result_keys_count_as_id_kinds():

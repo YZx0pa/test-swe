@@ -26,8 +26,8 @@ import agent_kit
 ASYNC_TOOLSETS = {"db", "jeni_db"}
 
 
-def build_agent(toolset: agent_kit.Toolset, *, approve_all: bool = False,
-                step_limit: int = 12, model=None):
+def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
+                toolset: agent_kit.Toolset = agent_kit.VIRA):
     gated = agent_kit.interrupt_on(approve_all, toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
     return create_agent(
@@ -93,7 +93,8 @@ async def amain(args):
         query_tools = _fake_query_tools(args.company_id)
     try:
         toolset = agent_kit.cli_toolset(args, query_tools=query_tools, context=context)
-        agent = build_agent(toolset, approve_all=args.approve_all, step_limit=args.step_limit)
+        agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
+                            toolset=toolset)
         await agent_kit.arepl("LangGraph", agent, args, toolset)
     finally:
         if pool is not None:
@@ -106,8 +107,8 @@ def main(argv=None):
         asyncio.run(amain(args))            # db tools are async: everything on one loop
         return
     agent_kit.setup(args)
-    toolset = agent_kit.cli_toolset(args)
-    agent = build_agent(toolset, approve_all=args.approve_all, step_limit=args.step_limit)
+    agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
+                        toolset=agent_kit.cli_toolset(args))
     agent_kit.repl("LangGraph", agent, args)
 
 

@@ -85,7 +85,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
-| `tests/` | 262 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 263 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -423,21 +423,21 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 262 tests
+.venv/bin/python -m pytest -q                                   # offline, 263 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
-python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
-python run_langgraph.py --approve-all                                     # approve/edit/reject each call
+python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
+python run_langgraph.py --tools vira --approve-all                        # approve/edit/reject each call
 python run_langgraph.py --tools jeni                                      # one conversation: answer its questions; 'new' starts over
 python run_workflow.py --app-ids 11,12,13 --top 2
-python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
+python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents and write /report.md"
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
 python jeni_tools.py                                                      # list them: read or write, and their fields
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
 python compare_agents.py --model gpt-4o-mini --repeat 3 --json traces/runs.json   # traces for the page
-python run_langgraph.py --mode real --task "…" --trace-json traces/real.json      # one real run, local file
+python run_langgraph.py --tools vira --mode real --task "…" --trace-json traces/real.json   # one real run, local file
 ```
 
 LangSmith tracing is forced off in the new runners: `set_tracing(False)` sets all four of

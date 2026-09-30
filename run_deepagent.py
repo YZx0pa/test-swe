@@ -115,7 +115,9 @@ def show_files(result: dict) -> None:
 
 
 def main(argv=None):
-    args = agent_kit.parser("VIRA agent on deepagents.").parse_args(argv)
+    # no jeni_db: its db tools are async, and this runner drives the graph synchronously
+    args = agent_kit.parser("VIRA agent on deepagents.", toolsets=("jeni", "vira"),
+                            default_tools="jeni").parse_args(argv)
     agent_kit.setup(args)
     agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
                         toolset=agent_kit.cli_toolset(args))

@@ -666,21 +666,29 @@ def final_text(result: dict) -> str:
 
 
 # --- CLI ---------------------------------------------------------------------
-def parser(description: str) -> argparse.ArgumentParser:
+TOOLS_HELP = {"jeni": "Jeni's own tasks (needs config/jeni_tasks.json)",
+              "jeni_db": "jeni plus read-only db lookups, so ids are resolved and checked "
+                         "before acting",
+              "vira": "the four sample AI endpoints"}
+
+
+def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
+           default_tools: str = "jeni_db") -> argparse.ArgumentParser:
+    """The runners' shared flags.  A runner without async tools passes toolsets without jeni_db."""
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--mode", choices=["real", "mock"], default="mock",
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
-    p.add_argument("--tools", choices=TOOLSET_NAMES, default="jeni_db",
-                   help="vira (default): the sample AI endpoints; jeni: Jeni's own tasks "
-                        "(needs config/jeni_tasks.json); jeni_db: jeni PLUS the read-only db "
-                        "lookup/validation tools, so ids can be resolved/checked before acting")
-    p.add_argument("--dsn", default=os.environ.get("TRON_POSTGRES_DSN"),
-                   help="Postgres DSN for jeni_db/db (default: $TRON_POSTGRES_DSN). If unset, "
-                        "jeni_db uses in-memory fake db queries so it runs offline.")
-    p.add_argument("--company-id", type=int, default=5143,
-                   help="authenticated company_id injected into db queries (tenant scope); "
-                        "never taken from the model")
+    p.add_argument("--tools", choices=toolsets, default=default_tools,
+                   help="; ".join(f"{name}{' (default)' if name == default_tools else ''}: "
+                                  f"{TOOLS_HELP[name]}" for name in toolsets))
+    if "jeni_db" in toolsets:
+        p.add_argument("--dsn", default=os.environ.get("TRON_POSTGRES_DSN"),
+                       help="Postgres DSN for jeni_db (default: $TRON_POSTGRES_DSN). If unset, "
+                            "jeni_db uses in-memory fake db queries so it runs offline.")
+        p.add_argument("--company-id", type=int, default=5143,
+                       help="authenticated company_id injected into db queries (tenant scope); "
+                            "never taken from the model")
     p.add_argument("--approve-all", action="store_true",
                    help="pause for human approval before every VIRA tool call "
                         "(in real mode, score/insights always pause)")
