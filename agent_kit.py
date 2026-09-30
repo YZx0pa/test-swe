@@ -194,6 +194,16 @@ def _normalise(args: dict) -> str:
                       sort_keys=True, ensure_ascii=False)
 
 
+def _failed(message) -> bool:
+    """A tool result that reports a failure: an error status, in the message or its JSON."""
+    if getattr(message, "status", None) == "error":
+        return True
+    try:
+        return json.loads(message.text).get("status") == "error"
+    except (ValueError, AttributeError):
+        return False
+
+
 class CallLedger:
     """VIRA calls already made, per task thread, shared by an agent and all its subagents.
 
@@ -227,18 +237,23 @@ class ToolCallGuard(AgentMiddleware):
         self.read_only = set(read_only)
 
     def _repeat_of_earlier_call(self, request) -> bool:
-        """An identical call earlier in the conversation.  A read counts as new again once a
-        write ran after it: the write may have changed what it reads."""
+        """An identical call earlier in the conversation.  It counts as new again once a
+        write ran after it, if it is a read (the write may have changed what it reads) or if
+        it failed (the write may have fixed why): "publish" fails on a closed job, "reopen
+        it, then publish" retries it.  A write that succeeded is never repeated."""
         call = request.tool_call
         key = _normalise(call["args"])
-        repeat = False
-        for msg in request.state.get("messages", []):
+        messages = request.state.get("messages", [])
+        failed = {m.tool_call_id for m in messages if m.type == "tool" and _failed(m)}
+        repeat = retry_ok = False
+        for msg in messages:
             for earlier in getattr(msg, "tool_calls", None) or []:
                 if earlier.get("id") == call.get("id"):
                     return repeat         # everything after this is not earlier
                 if earlier["name"] == call["name"] and _normalise(earlier["args"]) == key:
                     repeat = True
-                elif repeat and call["name"] in self.read_only and earlier["name"] not in self.read_only:
+                    retry_ok = call["name"] in self.read_only or earlier.get("id") in failed
+                elif repeat and retry_ok and earlier["name"] not in self.read_only:
                     repeat = False
         return repeat
 

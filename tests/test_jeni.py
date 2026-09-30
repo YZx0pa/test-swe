@@ -336,6 +336,23 @@ def test_a_read_runs_again_after_a_write_but_not_twice_in_a_row(audit_log):
         "get-single-job-details", "add-job-skills", "get-single-job-details"]
 
 
+def test_a_failed_write_runs_again_once_another_write_ran(audit_log, kept):
+    result = run(scripted(
+        calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c1")),    # private: fails
+        calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c2")),    # nothing since: refused
+        calls(call("make_job_public", {"job_id": 7001}, "c3")),
+        calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c4")),    # a write since: runs
+        calls(call("make_job_public", {"job_id": 7001}, "c5")),            # it succeeded: refused
+        say("Published.")), "Make job 7001 public if it has to be, and publish it to LinkedIn.")
+    replies = tool_messages(result)
+    assert "must be open and public" in replies["c1"].text
+    assert "identical to an earlier call" in replies["c2"].text
+    assert json.loads(replies["c4"].text)["status"] == "ok"
+    assert "identical to an earlier call" in replies["c5"].text
+    assert [a["command"] for a in read_audit(audit_log)] == [
+        "publish-job-to-linkedin", "make-job-public", "publish-job-to-linkedin"]
+
+
 def test_a_user_found_by_search_is_added_by_their_id(audit_log):
     result = run(scripted(
         calls(call("search_users", {"search_key": "Bob"}, "c1")),
