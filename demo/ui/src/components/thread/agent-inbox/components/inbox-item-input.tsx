@@ -406,6 +406,8 @@ export function InboxItemInput({
           name: response.edited_action.name,
           args: newArgs,
         },
+        // Jeni demo: keep the proposed args' types for restoreArgTypes.
+        originalArgs: response.originalArgs,
       };
 
       return prev.map((existing) => {

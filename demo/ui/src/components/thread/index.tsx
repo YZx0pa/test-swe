@@ -12,16 +12,16 @@ import {
   DO_NOT_RENDER_ID_PREFIX,
   ensureToolCallsHaveResponses,
 } from "@/lib/ensure-tool-responses";
-import { LangGraphLogoSVG } from "../icons/langgraph";
+import { JeniMark } from "../icons/jeni";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import {
   ArrowDown,
+  Database,
   LoaderCircle,
   PanelRightOpen,
   PanelRightClose,
   SquarePen,
   XIcon,
-  Plus,
 } from "lucide-react";
 import { useQueryState, parseAsBoolean } from "nuqs";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
@@ -30,7 +30,6 @@ import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
-import { GitHubSVG } from "../icons/github";
 import {
   Tooltip,
   TooltipContent,
@@ -87,27 +86,68 @@ function ScrollToBottom(props: { className?: string }) {
   );
 }
 
-function OpenGitHubRepo() {
+// Jeni demo: shows or hides the data panel (the server's /demo page) beside the chat.
+function DataToggle({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <a
-            href="https://github.com/langchain-ai/agent-chat-ui"
-            target="_blank"
-            className="flex items-center justify-center"
-          >
-            <GitHubSVG
-              width="24"
-              height="24"
-            />
-          </a>
-        </TooltipTrigger>
-        <TooltipContent side="left">
-          <p>Open GitHub repo</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Button
+      variant={open ? "secondary" : "outline"}
+      size="sm"
+      onClick={onToggle}
+    >
+      <Database className="size-4" />
+      {open ? "Hide data" : "Show data"}
+    </Button>
+  );
+}
+
+type StarterPrompt = { key: string; title: string; prompt: string };
+
+// Jeni demo: each act's first prompt from the server (demo/script.py via /demo/prompts).
+// A click puts it in the input box; the presenter sends it.
+function StarterPrompts({
+  apiUrl,
+  onPick,
+}: {
+  apiUrl: string;
+  onPick: (prompt: string) => void;
+}) {
+  const [prompts, setPrompts] = useState<StarterPrompt[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${apiUrl.replace(/\/$/, "")}/demo/prompts`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((list: StarterPrompt[]) => {
+        if (!cancelled && Array.isArray(list)) setPrompts(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [apiUrl]);
+
+  if (!prompts.length) return null;
+  return (
+    <div className="mx-auto mb-8 grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2">
+      {prompts.map((p, i) => (
+        <button
+          key={p.key}
+          type="button"
+          onClick={() => onPick(p.prompt)}
+          className="cursor-pointer rounded-xl border bg-white p-3 text-left text-sm transition-colors hover:bg-gray-50"
+        >
+          <span className="block text-xs font-medium text-gray-500">
+            {i + 1}. {p.title}
+          </span>
+          <span className="mt-1 block text-gray-900">{p.prompt}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -148,11 +188,15 @@ export function Thread() {
     "hideToolCalls",
     parseAsBoolean.withDefault(false),
   );
+  const [dataOpen, setDataOpen] = useQueryState(
+    "data",
+    parseAsBoolean.withDefault(true),
+  );
   const [input, setInput] = useState("");
   const {
     contentBlocks,
     setContentBlocks,
-    handleFileUpload,
+    handleFileUpload: _handleFileUpload,
     dropRef,
     removeBlock,
     resetBlocks: _resetBlocks,
@@ -309,7 +353,7 @@ export function Thread() {
       <div
         className={cn(
           "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
-          artifactOpen && "grid-cols-[3fr_2fr]",
+          (artifactOpen || dataOpen) && "grid-cols-[3fr_2fr]",
         )}
       >
         <motion.div
@@ -350,7 +394,10 @@ export function Thread() {
                 )}
               </div>
               <div className="absolute top-2 right-4 flex items-center">
-                <OpenGitHubRepo />
+                <DataToggle
+                  open={dataOpen}
+                  onToggle={() => setDataOpen((p) => !p)}
+                />
               </div>
             </div>
           )}
@@ -384,25 +431,29 @@ export function Thread() {
                     damping: 30,
                   }}
                 >
-                  <LangGraphLogoSVG
+                  <JeniMark
                     width={32}
                     height={32}
                   />
                   <span className="text-xl font-semibold tracking-tight">
-                    Agent Chat
+                    Jeni
+                  </span>
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                    v2 demo · mock data
                   </span>
                 </motion.button>
                 <ConnectedHost apiUrl={stream.apiUrl} />
               </div>
 
               <div className="flex items-center gap-4">
-                <div className="flex items-center">
-                  <OpenGitHubRepo />
-                </div>
+                <DataToggle
+                  open={dataOpen}
+                  onToggle={() => setDataOpen((p) => !p)}
+                />
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
-                  tooltip="New thread"
+                  tooltip="New chat"
                   variant="ghost"
                   onClick={() => setThreadId(null)}
                 >
@@ -418,7 +469,7 @@ export function Thread() {
             <StickyToBottomContent
               className={cn(
                 "absolute inset-0 overflow-y-scroll px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent",
-                !chatStarted && "mt-[25vh] flex flex-col items-stretch",
+                !chatStarted && "mt-[12vh] flex flex-col items-stretch",
                 chatStarted && "grid grid-rows-[1fr_auto]",
               )}
               contentClassName="pt-8 pb-16 max-w-3xl mx-auto flex flex-col gap-4 w-full"
@@ -460,11 +511,17 @@ export function Thread() {
               footer={
                 <div className="sticky bottom-0 flex flex-col items-center gap-8 bg-white">
                   {!chatStarted && (
-                    <div className="flex items-center gap-3">
-                      <LangGraphLogoSVG className="h-8 flex-shrink-0" />
-                      <h1 className="text-2xl font-semibold tracking-tight">
-                        Agent Chat
-                      </h1>
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="flex items-center gap-3">
+                        <JeniMark className="h-8 flex-shrink-0" />
+                        <h1 className="text-2xl font-semibold tracking-tight">
+                          Jeni
+                        </h1>
+                      </div>
+                      <p className="text-sm text-gray-500">
+                        Your recruiting assistant. It asks before it changes
+                        anything. Demo data only.
+                      </p>
                     </div>
                   )}
 
@@ -504,7 +561,7 @@ export function Thread() {
                             form?.requestSubmit();
                           }
                         }}
-                        placeholder="Type your message..."
+                        placeholder="Ask Jeni to do something…"
                         className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
                       />
 
@@ -524,23 +581,6 @@ export function Thread() {
                             </Label>
                           </div>
                         </div>
-                        <Label
-                          htmlFor="file-input"
-                          className="flex cursor-pointer items-center gap-2"
-                        >
-                          <Plus className="size-5 text-gray-600" />
-                          <span className="text-sm text-gray-600">
-                            Upload PDF or Image
-                          </span>
-                        </Label>
-                        <input
-                          id="file-input"
-                          type="file"
-                          onChange={handleFileUpload}
-                          multiple
-                          accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
-                          className="hidden"
-                        />
                         {stream.isLoading ? (
                           <Button
                             key="stop"
@@ -565,6 +605,12 @@ export function Thread() {
                       </div>
                     </form>
                   </div>
+                  {!chatStarted && (
+                    <StarterPrompts
+                      apiUrl={stream.apiUrl}
+                      onPick={setInput}
+                    />
+                  )}
                 </div>
               }
             />
@@ -572,16 +618,28 @@ export function Thread() {
         </motion.div>
         <div className="relative flex flex-col border-l">
           <div className="absolute inset-0 flex min-w-[30vw] flex-col">
-            <div className="grid grid-cols-[1fr_auto] border-b p-4">
-              <ArtifactTitle className="truncate overflow-hidden" />
-              <button
-                onClick={closeArtifact}
-                className="cursor-pointer"
-              >
-                <XIcon className="size-5" />
-              </button>
-            </div>
-            <ArtifactContent className="relative flex-grow" />
+            {artifactOpen ? (
+              <>
+                <div className="grid grid-cols-[1fr_auto] border-b p-4">
+                  <ArtifactTitle className="truncate overflow-hidden" />
+                  <button
+                    onClick={closeArtifact}
+                    className="cursor-pointer"
+                  >
+                    <XIcon className="size-5" />
+                  </button>
+                </div>
+                <ArtifactContent className="relative flex-grow" />
+              </>
+            ) : (
+              dataOpen && (
+                <iframe
+                  src={`${stream.apiUrl.replace(/\/$/, "")}/demo?theme=light`}
+                  title="Jeni data"
+                  className="h-full w-full border-0"
+                />
+              )
+            )}
           </div>
         </div>
       </div>

@@ -38,6 +38,8 @@ export type DecisionWithEdits =
       edited_action: Action;
       acceptAllowed?: boolean;
       editsMade?: boolean;
+      // The proposed args as the agent sent them, with their types (Jeni demo).
+      originalArgs?: Record<string, unknown>;
     };
 
 export type Email = {

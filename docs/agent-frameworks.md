@@ -745,6 +745,23 @@ What differs from `run_langgraph.py`, and why:
   functions, so Starlette runs them on its thread pool and the State's lock is never waited on
   in the loop. Tools are sync and already run on worker threads.
 
+The chat UI (`demo/ui/`) is LangChain's [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui)
+(MIT) at upstream commit `cf72cb0`, vendored. It talks to the server with `@langchain/langgraph-sdk`,
+streams the thread, renders tool calls and results, and turns each HITL interrupt into an
+approval card (approve, edit the args, or reject with a reason). Local changes, all in one commit
+after the import:
+- Jeni's name, mark and page title; no GitHub links; no file upload (Jeni doesn't read files).
+- **Show data** / **Hide data**: the server's `/demo` panel in the right-hand column, open by
+  default.
+- **Edited arguments keep their types.** Upstream resumes with each edited value as the text of
+  its box, so a reviewer who edited `app_ids` to `[5102]` sent the string `"[5102]"`, which the
+  tool's schema refuses. The card now keeps the proposed args, and `restoreArgTypes()` parses an
+  edited value back to JSON wherever the proposed one wasn't a string; a value that doesn't parse
+  is an error on the card. Found by driving the real UI in a headless browser; the API-level
+  rehearsal couldn't see it, since it sends JSON.
+- `pnpm.overrides` for two low-severity advisories in build tooling (`@babel/core`,
+  `postcss-selector-parser`); `pnpm audit`: no known vulnerabilities on 2026-10-01.
+
 Security, beyond §11 (each has a test in `tests/test_demo.py` unless noted):
 
 | Threat | Control |

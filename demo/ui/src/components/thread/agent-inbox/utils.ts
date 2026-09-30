@@ -131,6 +131,7 @@ export function createDefaultHumanResponse(
       edited_action: editedAction,
       acceptAllowed: allowedDecisions.includes("approve"),
       editsMade: false,
+      originalArgs: { ...actionRequest.args },
     });
   }
 
@@ -191,15 +192,53 @@ export function buildDecisionFromState(
       return { decision: { type: "approve" } };
     }
 
+    const { args, error } = restoreArgTypes(
+      selectedDecision.edited_action.args,
+      selectedDecision.originalArgs,
+    );
+    if (error) {
+      return { error };
+    }
     return {
       decision: {
         type: "edit",
-        edited_action: selectedDecision.edited_action,
+        edited_action: { ...selectedDecision.edited_action, args },
       },
     };
   }
 
   return { error: "Unsupported response type." };
+}
+
+/**
+ * An edited value comes back from its text box as a string. Where the proposed value was
+ * not a string (a list of ids, a number, a flag), parse it back, so the tool gets the type
+ * its schema expects: "[5102]" becomes [5102], not the string "[5102]" (Jeni demo).
+ */
+export function restoreArgTypes(
+  edited: Record<string, unknown>,
+  original: Record<string, unknown> | undefined,
+): { args: Record<string, unknown>; error?: string } {
+  const args = { ...edited };
+  for (const [key, value] of Object.entries(edited)) {
+    const was = original?.[key];
+    if (
+      typeof value !== "string" ||
+      was === undefined ||
+      typeof was === "string"
+    ) {
+      continue;
+    }
+    try {
+      args[key] = JSON.parse(value);
+    } catch {
+      return {
+        args,
+        error: `${key} must be written like ${JSON.stringify(was)}`,
+      };
+    }
+  }
+  return { args };
 }
 
 export function constructOpenInStudioURL(
