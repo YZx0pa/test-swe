@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jeni data</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --ink: #1c1d1f; --muted: #6b6f76; --line: #e4e4e0;
+    --accent: #3b5bdb; --ok: #2b8a3e; --ok-bg: #e6f4ea; --bad: #c92a2a; --bad-bg: #fdecec;
+    --warn: #8a5a00; --warn-bg: #fff4d6; --chip: #eef0f3; --flash: #fff1b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141517; --card: #1d1f22; --ink: #e8e9eb; --muted: #9aa0a8; --line: #2c2f33;
+      --accent: #7c95f5; --ok: #69db7c; --ok-bg: #1e3325; --bad: #ff8787; --bad-bg: #3a1f1f;
+      --warn: #ffd43b; --warn-bg: #3a3017; --chip: #2a2d31; --flash: #4a4118;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141517; --card: #1d1f22; --ink: #e8e9eb; --muted: #9aa0a8; --line: #2c2f33;
+    --accent: #7c95f5; --ok: #69db7c; --ok-bg: #1e3325; --bad: #ff8787; --bad-bg: #3a1f1f;
+    --warn: #ffd43b; --warn-bg: #3a3017; --chip: #2a2d31; --flash: #4a4118;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 12px;
+           padding: 12px 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 15px; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .live { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+  header .live.off { background: var(--bad); }
+  header button { margin-left: auto; font: inherit; font-size: 12px; color: var(--muted);
+                  background: none; border: 1px solid var(--line); border-radius: 6px;
+                  padding: 4px 10px; cursor: pointer; }
+  header button:hover { color: var(--ink); border-color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px; }
+  @media (min-width: 860px) { main { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); } }
+  h2 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+       text-transform: uppercase; color: var(--muted); }
+  .jobs { display: grid; gap: 12px; }
+  .job { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .job .top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .job .name { font-weight: 650; font-size: 15px; }
+  .job .id { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }
+  .pill { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.accent { background: var(--accent); color: #fff; }
+  .row { display: flex; gap: 8px; margin-top: 8px; align-items: baseline; }
+  .row .label { flex: none; width: 88px; color: var(--muted); font-size: 12px; }
+  .row .value { min-width: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { font-size: 12px; padding: 1px 7px; border-radius: 5px; background: var(--chip); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+  td.score { color: var(--muted); text-align: right; padding-right: 12px; }
+  td.stage { text-align: right; width: 1%; white-space: nowrap; }
+  .none { color: var(--muted); font-size: 12px; }
+  .feed { display: grid; gap: 6px; }
+  .event { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--line);
+           border-radius: 8px; padding: 7px 10px; }
+  .event.write { border-left-color: var(--accent); }
+  .event.failed { border-left-color: var(--bad); }
+  .event .top { display: flex; gap: 8px; align-items: baseline; }
+  .event .task { font-weight: 600; }
+  .event .at { margin-left: auto; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .event .detail { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .event .reason { color: var(--bad); font-size: 12.5px; margin-top: 2px; }
+  .flash { animation: flash 2.4s ease-out; }
+  @keyframes flash { from { background: var(--flash); } to { background: var(--card); } }
+  .empty { color: var(--muted); font-size: 13px; padding: 14px; border: 1px dashed var(--line); border-radius: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="live" id="live" title="live"></span>
+  <div>
+    <h1>Jeni data</h1>
+    <div class="sub">Mock VIRA · synthetic data · updates live</div>
+  </div>
+  <button id="reset" type="button" title="Back to the starting data">Reset data</button>
+</header>
+<main>
+  <section>
+    <h2>Jobs</h2>
+    <div class="jobs" id="jobs"></div>
+  </section>
+  <section>
+    <h2>What reached VIRA</h2>
+    <div class="feed" id="feed"></div>
+  </section>
+</main>
+<script>
+"use strict";
+// Every value is set with textContent: job titles and skills come from what people type.
+const theme = new URLSearchParams(location.search).get("theme");
+if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+
+const STAGE = { shortlisted: "ok", rejected: "bad", applied: "" };
+const ROLE = { 1: "administrator", 5: "team member" };
+let previous = null;
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function pill(text, kind) { return el("span", "pill" + (kind ? " " + kind : ""), text); }
+
+function row(label, children) {
+  const r = el("div", "row");
+  r.append(el("span", "label", label));
+  const v = el("span", "value");
+  v.append(...children);
+  r.append(v);
+  return r;
+}
+
+function human(task) {
+  const words = task.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function detail(fields) {
+  const parts = [];
+  if (fields.job_title) parts.push("“" + fields.job_title + "”");
+  if (fields.job_id) parts.push("job " + fields.job_id);
+  if (fields.app_id) parts.push("application " + fields.app_id);
+  if (fields.app_ids) parts.push((fields.app_ids.length > 1 ? "applications " : "application ") + fields.app_ids.join(", "));
+  if (fields.user_ids) parts.push((fields.user_ids.length > 1 ? "users " : "user ") + fields.user_ids.join(", "));
+  if (fields.role_id) parts.push(ROLE[fields.role_id] || "role " + fields.role_id);
+  if (fields.skills) parts.push(fields.skills.join(", "));
+  if (fields.is_private !== undefined) parts.push(fields.is_private ? "private" : "public");
+  if (fields.min_exp !== undefined || fields.max_exp !== undefined)
+    parts.push((fields.min_exp ?? "?") + "–" + (fields.max_exp ?? "?") + " yrs");
+  if (fields.country_name) parts.push(fields.country_name);
+  if (fields.recipients) parts.push(fields.recipients + (fields.recipients > 1 ? " recipients" : " recipient"));
+  if (fields.reason_for_closure) parts.push("reason: " + fields.reason_for_closure);
+  return parts.join(" · ");
+}
+
+function jobCard(job, before) {
+  const card = el("article", "job");
+  const top = el("div", "top");
+  top.append(el("span", "name", job.jobName), el("span", "id", "#" + job.jobId));
+  card.append(top);
+
+  const pills = el("div", "pills");
+  pills.append(pill(job.status === "open" ? "Open" : "Closed", job.status === "open" ? "ok" : "bad"));
+  pills.append(pill(job.isPrivate ? "Private" : "Public", job.isPrivate ? "warn" : "ok"));
+  if (job.linkedIn) pills.append(pill("On LinkedIn", "accent"));
+  card.append(pills);
+
+  card.append(row("Skills", job.skills.length ? job.skills.map(s => el("span", "chip", s)) : [el("span", "none", "none")]));
+  const team = job.team.map(t => el("span", "chip", t.name + " · " + t.role));
+  if (job.owner) team.unshift(el("span", "chip", job.owner + " · owner"));
+  card.append(row("Team", team.length ? team : [el("span", "none", "no collaborators")]));
+
+  if (job.applications.length) {
+    const table = el("table");
+    const old = new Map((before ? before.applications : []).map(a => [a.appId, a]));
+    for (const a of job.applications) {
+      const tr = el("tr");
+      tr.append(el("td", "", "Application " + a.appId),
+                el("td", "score", a.matchScore === null ? "new" : "match " + a.matchScore.toFixed(2)));
+      const stage = el("td", "stage");
+      stage.append(pill(a.stage, STAGE[a.stage] || ""));
+      tr.append(stage);
+      const was = old.get(a.appId);
+      if (before && (!was || was.stage !== a.stage)) tr.classList.add("flash");
+      table.append(tr);
+    }
+    card.append(row("Applicants", [table]));
+  } else {
+    card.append(row("Applicants", [el("span", "none", "none yet")]));
+  }
+  return card;
+}
+
+function render(snap) {
+  const beforeJobs = new Map((previous ? previous.jobs : []).map(j => [j.jobId, j]));
+  const jobs = document.getElementById("jobs");
+  jobs.replaceChildren(...snap.jobs.map(job => {
+    const before = beforeJobs.get(job.jobId);
+    const card = jobCard(job, before);
+    const same = before && JSON.stringify({ ...before, applications: 0 }) === JSON.stringify({ ...job, applications: 0 });
+    if (previous && !same) card.classList.add("flash");
+    return card;
+  }));
+
+  const feed = document.getElementById("feed");
+  const seen = previous ? previous.activity.length : snap.activity.length;
+  const events = snap.activity.map((e, i) => {
+    const box = el("div", "event " + e.kind + (e.status === "failed" ? " failed" : ""));
+    const top = el("div", "top");
+    top.append(el("span", "task", human(e.task)), pill(e.kind));
+    if (e.status === "completed") top.append(pill("done", "ok"));
+    else top.append(pill("failed", "bad"));
+    top.append(el("span", "at", e.at));
+    box.append(top);
+    let text = detail(e.fields);
+    if (e.created) text += (text ? " → " : "→ ") + (e.task === "create_application_to_job" ? "application " : "job ") + e.created;
+    if (text) box.append(el("div", "detail", text));
+    if (e.reason) box.append(el("div", "reason", e.reason));
+    if (i >= seen) box.classList.add("flash");
+    return box;
+  }).reverse();
+  feed.replaceChildren(...(events.length ? events : [el("div", "empty", "Nothing yet. Every task Jeni sends shows up here, reads and writes.")]));
+  previous = snap;
+}
+
+async function poll() {
+  const live = document.getElementById("live");
+  try {
+    const res = await fetch("/demo/state", { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status);
+    const snap = await res.json();
+    if (!previous || JSON.stringify(snap) !== JSON.stringify(previous)) render(snap);
+    live.classList.remove("off");
+  } catch (err) {
+    live.classList.add("off");
+  }
+  setTimeout(poll, 1000);
+}
+
+document.getElementById("reset").addEventListener("click", async () => {
+  if (!confirm("Reset the mock data to where the demo starts?")) return;
+  await fetch("/demo/reset", { method: "POST" });
+  previous = null;
+});
+
+poll();
+</script>
+</body>
+</html>

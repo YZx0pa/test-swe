@@ -27,8 +27,13 @@ ASYNC_TOOLSETS = {"db", "jeni_db"}
 
 
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
-                toolset: agent_kit.Toolset = agent_kit.VIRA):
-    gated = agent_kit.interrupt_on(approve_all, toolset=toolset)
+                toolset: agent_kit.Toolset = agent_kit.VIRA, gate_writes: bool = False,
+                own_checkpointer: bool = True):
+    """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
+    demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
+    refuses a graph that brings its own checkpointer."""
+    gated = agent_kit.interrupt_on(approve_all, mode="real" if gate_writes else None,
+                                   toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
     return create_agent(
         model or agent_kit.build_chat_model(),
@@ -36,7 +41,8 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
         system_prompt=toolset.prompt,
         # HITL first = outermost, so the guard sees a reviewer's edited args
         middleware=[*approval, *agent_kit.middleware(step_limit, toolset=toolset)],
-        checkpointer=InMemorySaver(),   # needed to pause at an interrupt and resume
+        # needed to pause at an interrupt and resume
+        checkpointer=InMemorySaver() if own_checkpointer else None,
         name="vira-langgraph",
     )
 

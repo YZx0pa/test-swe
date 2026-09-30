@@ -86,7 +86,8 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
-| `tests/` | 290 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
+| `tests/` | 298 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -433,7 +434,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 290 tests
+.venv/bin/python -m pytest -q                                   # offline, 298 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -444,6 +445,7 @@ python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents 
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
 python jeni_tools.py                                                      # list them: read or write, and their fields
 python run_langgraph.py --task "Add Kubernetes to the backend engineer job"      # jeni_db: looks the job up first (§13)
+LANGGRAPH_CLI_NO_ANALYTICS=1 .venv/bin/langgraph dev --no-browser --no-reload    # the demo (§14): graph "jeni", panel at /demo
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
@@ -602,8 +604,8 @@ every task group starts from those fixtures, a created job's id comes from its t
 agree (tests, `compare_agents`). It enforces one VIRA rule the catalog states in prose:
 publishing to LinkedIn needs an open, public job.
 
-`mock_jeni.remember_changes()` switches it to one `State` that lives across calls, for the demo:
-skills, visibility, status, teams, owners, stages and LinkedIn postings stick, a created
+`mock_jeni.remember_changes()` switches it to one `State` that lives across calls, for the demo
+(§14): skills, visibility, status, teams, owners, stages and LinkedIn postings stick, a created
 job or application gets an id of its own and is found by the db lookups
 (`State.db_fixtures()` lists are refilled in place), and `reset()` goes back to the fixtures.
 The kept State also logs every sub-task it ran (`activity`) with ids, skills, titles and flags
@@ -684,3 +686,58 @@ also asked the catalog's open-and-public question.
 Open points:
 - **Jeni's real-mode path doesn't exist yet.** VIRA answers `POST agent_task_group` with 404, so
   in real mode the lookups work and every Jeni task fails.
+
+## 14. The demo: `demo/` on `langgraph dev`
+
+A demo of Jeni v2 needs three things the terminal runners don't give it: a chat window with
+approval cards, a way to see that a change really happened, and data that keeps the change. The
+agent is the same `create_agent` graph as `run_langgraph.py`; LangGraph's own API server
+(`langgraph dev`, from `requirements-demo.txt`) serves it, with threads, streaming and resume.
+
+```
+browser ─ chat UI ───────────── langgraph dev (127.0.0.1:2024) ─ graph "jeni" = demo/jeni_graph.make_graph
+        └ data panel (/demo) ─┘        │                           jeni_db tools → recruiter_cli.execute (mock)
+                                       └─ demo/app.py: /demo, /demo/state, /demo/reset ─ mock_jeni's kept State
+```
+
+| File | Role |
+|---|---|
+| `langgraph.json` | Graph `jeni` from `demo/jeni_graph.py:make_graph`, the panel's routes from `demo/app.py:app`, env from `.env` (the model key; nothing reaches VIRA). |
+| `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=True, own_checkpointer=False)`. `make_graph()` is the async factory: it builds once, on a worker thread. |
+| `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. |
+| `requirements-demo.txt`, `requirements-demo.lock.txt` | `requirements.txt` plus `langgraph-cli[inmem]==0.4.32`. The lock keeps every pin of `requirements.lock.txt` and adds 27 packages (langgraph-api 0.15.1, the in-memory runtime, uvicorn extras, OpenTelemetry), all with hashes; no known vulnerabilities on 2026-10-01. |
+
+What differs from `run_langgraph.py`, and why:
+- **Mock only, with memory.** The mode is set before any tool exists, and the db lookups answer
+  from the mock's own data, so their ids agree with the tasks (§13). `remember_changes()` makes
+  "make it public", then "publish it" work, and puts a created job where `find_job_by_title`
+  finds it (§12).
+- **Every write pauses, reads don't**, as in real mode: `build_agent(gate_writes=True)` passes
+  `mode="real"` to `interrupt_on()`. The audience sees 16 of the 22 tasks as approval cards and
+  the lookups run straight through.
+- **No checkpointer of its own.** `langgraph dev` refuses a graph that brings one ("persistence is
+  handled automatically by the platform") and keeps threads itself, in memory, flushed to
+  `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
+- **The closing rule is written for a chat window.** `SYSTEM_PROMPT` ends with the grading format
+  `SUMMARY: <what succeeded> | <what failed> | <why>`. The demo replaces only that rule with "a
+  few short sentences … say what succeeded, what failed or is missing, and why", and fails at
+  build time if the rule it replaces has changed.
+- **Built off the event loop.** The server calls the factory inside its event loop, and runs
+  there under blockbuster, which raises on blocking I/O (reading the catalog, for one). The
+  factory is `async` and builds with `asyncio.to_thread` once; the panel's endpoints are plain
+  functions, so Starlette runs them on its thread pool and the State's lock is never waited on
+  in the loop. Tools are sync and already run on worker threads.
+
+Security, beyond §11 (each has a test in `tests/test_demo.py` unless noted):
+
+| Threat | Control |
+|---|---|
+| The demo reaches VIRA or a real database | `build()` fixes mock mode before the tools are built, whatever the process had, and the db tools are `fake_db_queries` over the mock's own data |
+| Anyone on the network drives the agent or reads its threads (`langgraph dev` has no auth) | It binds `127.0.0.1` by default; don't pass `--host 0.0.0.0` or `--tunnel`. Show it by sharing your screen (not tested) |
+| A job title typed into the chat runs as HTML in the panel | Every value is set with `textContent`; the page has no `innerHTML` |
+| Demo conversations stay on disk | `.langgraph_api/` holds the threads (what people typed, masked tool results); it is gitignored. Delete it after a demo (not tested) |
+| Prompts and results go to LangSmith | Tracing is forced off in `build()`. Studio (the link `langgraph dev` prints) is a LangSmith page that talks to the local server from your browser; use it with demo data only |
+
+Open points:
+- `langgraph dev` is a development server (in-memory, one process). A hosted pilot would run the
+  same graph on a licensed LangGraph deployment or behind our own API with auth.

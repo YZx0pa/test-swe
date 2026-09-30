@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 290 offline tests (section 3). |
+| `tests/` | 298 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -189,7 +189,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 287 passed
+# 295 passed
 ```
 
 How the tests stay hermetic:
@@ -216,6 +216,7 @@ How the tests stay hermetic:
 | `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 | `tests/test_jeni.py` | 54 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a read runs again after a write but not twice in a row, a failed write runs again once another write ran but a successful one never repeats, a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). The mock forgets changes by default; a kept State remembers them (a job made public can be published, stages and teams stick, the fixtures stay untouched), a created job and candidate are found by the db lookups until `reset()`, and the activity log keeps ids, never names or emails. |
 | `tests/test_db.py` | 18 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
+| `tests/test_demo.py` | 8 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt differs only in the closing rule; writes pause and reads don't, and approved changes show on the panel; a rejected write never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. |
 
 Run a subset:
 
@@ -655,3 +656,41 @@ python compare_agents.py --suite jeni --repeat 3 --out traces/jeni.md    # 7 req
 `cat "$EVENTS_LOG"` shows each call as a one-task group, with candidate names and emails
 redacted. Real mode sends the same payload to `$VIRA_BASE_URL/agent_task_group`, an assumed path
 that VIRA doesn't serve yet.
+
+---
+
+## 9. The demo: `demo/` on `langgraph dev`
+
+The Jeni agent (`jeni_db`) served by LangGraph's dev server, on the mock with its changes kept
+and every write gated, plus a live data panel. Design and security notes are in
+[agent-frameworks.md §14](agent-frameworks.md#14-the-demo-demo-on-langgraph-dev).
+
+### New files
+
+| File | What it is |
+|---|---|
+| `langgraph.json` | The server's config: graph `jeni` (`demo/jeni_graph.py:make_graph`), the panel's routes (`demo/app.py:app`), `.env`, Python 3.11. |
+| `demo/jeni_graph.py` | `build()`: mock mode, tracing off, the mock's kept State, `jeni_db` on its fixtures, writes gated, no checkpointer, and a closing rule for a chat window instead of `SUMMARY: a \| b \| c`. `make_graph()`: the async factory, building once on a worker thread. |
+| `demo/app.py`, `demo/panel.html` | `GET /demo` (the panel), `GET /demo/state`, `POST /demo/reset`. The panel shows jobs, teams and applicants, and every sub-task that reached the mock; it polls every second and highlights changes. |
+| `requirements-demo.txt`, `requirements-demo.lock.txt` | `langgraph-cli[inmem]==0.4.32` on top of `requirements.txt`; the hashed lock keeps every pin of `requirements.lock.txt` (147 packages). |
+| `tests/test_demo.py` | 8 offline tests (section 3). |
+
+### Modified files
+
+| File | Change |
+|---|---|
+| `run_langgraph.py` | `build_agent(gate_writes=…, own_checkpointer=…)`: pause before every write whatever the mode, and leave the checkpointer to a server. Both default to the old behaviour. |
+| `.gitignore` | `.langgraph_api/` (the dev server's saved threads) and the UI's installs and builds under `demo/ui/`. |
+
+### Run it
+
+```bash
+uv pip install --require-hashes -r requirements-demo.lock.txt
+.venv/bin/pip-audit -r requirements-demo.lock.txt --disable-pip        # "No known vulnerabilities found" on 2026-10-01
+LANGGRAPH_CLI_NO_ANALYTICS=1 .venv/bin/langgraph dev --no-browser --no-reload
+# API on http://127.0.0.1:2024 (graph "jeni"), the data panel on http://127.0.0.1:2024/demo
+curl -X POST http://127.0.0.1:2024/demo/reset                           # back to the starting data
+```
+
+It needs `OPENAI_API_KEY` (or the key for `CHAT_MODEL`) and the catalog at `config/jeni_tasks.json`,
+as the runners do. Nothing reaches VIRA or a database.

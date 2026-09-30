@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "jeni": "./demo/jeni_graph.py:make_graph"
+  },
+  "http": {
+    "app": "./demo/app.py:app"
+  },
+  "env": ".env",
+  "python_version": "3.11"
+}

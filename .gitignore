@@ -35,3 +35,10 @@ raw_data/
 # Jeni's task catalog: internal, shared outside git (config/README.md)
 config/*
 !config/README.md
+
+# the demo (demo/, langgraph.json): langgraph dev's saved threads, the UI's installs and builds
+.langgraph_api/
+demo/ui/node_modules/
+demo/ui/.next/
+demo/ui/next-env.d.ts
+demo/ui/.env.local

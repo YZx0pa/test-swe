@@ -1,0 +1,10 @@
+# The demo server (demo/, langgraph.json): requirements.txt plus LangGraph's dev server
+#
+#   uv pip install -r requirements-demo.txt
+#   uv pip install --require-hashes -r requirements-demo.lock.txt     # exact pins with hashes
+#   .venv/bin/pip-audit -r requirements-demo.lock.txt --disable-pip
+# requirements-demo.lock.txt keeps every pin of requirements.lock.txt; its header has the
+# command that regenerates it.
+
+-r requirements.txt
+langgraph-cli[inmem]==0.4.32   # `langgraph dev`: LangGraph's API server with in-memory threads, and the Studio link
