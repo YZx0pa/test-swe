@@ -17,6 +17,7 @@ search_key / job_id).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping
 
@@ -72,6 +73,17 @@ def _job_label(row: Mapping[str, Any]) -> str:
 
 def _user_label(row: Mapping[str, Any]) -> str:
     return row.get("email", "")
+
+
+# "the data scientist job": models often search with the word "job" left on.
+_GENERIC_TAIL = re.compile(r"\s+(jobs?|roles?|positions?|openings?|vacanc(y|ies)|postings?)$", re.I)
+
+
+def _title_searches(title: str) -> List[str]:
+    """The title as given, then without a trailing "job"/"role"/... if the first finds nothing."""
+    text = " ".join(str(title).split())
+    bare = _GENERIC_TAIL.sub("", text)
+    return [text, bare] if bare and bare != text else [text]
 
 
 def _like_literal(text: str) -> str:
@@ -150,8 +162,11 @@ def build_db_queries(pool) -> Dict[str, QueryTool]:
     async def _find_job_by_title(inputs, context):
         cid = _company_id(context)
         async with pool.acquire() as conn:
-            rows = await db_lookup.handle_search_jobs(
-                conn, cid, search_keys=[_like_literal(inputs["title"])], limit=SEARCH_LIMIT + 1)
+            for title in _title_searches(inputs["title"]):
+                rows = await db_lookup.handle_search_jobs(
+                    conn, cid, search_keys=[_like_literal(title)], limit=SEARCH_LIMIT + 1)
+                if rows:
+                    break
         return _resolve_one(rows, "jobId", "job_id", _job_label, "job")
 
     async def _find_user(inputs, context):
@@ -222,9 +237,12 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
 
     async def _find_job_by_title(inputs, context):
         cid = _company_id(context)
-        kw = str(inputs["title"]).lower()
-        rows = sorted((r for r in _tenant(jobs, cid) if kw in r["jobName"].lower()),
-                      key=lambda r: r["jobId"], reverse=True)[:SEARCH_LIMIT + 1]
+        for title in _title_searches(inputs["title"]):
+            kw = title.lower()
+            rows = sorted((r for r in _tenant(jobs, cid) if kw in r["jobName"].lower()),
+                          key=lambda r: r["jobId"], reverse=True)[:SEARCH_LIMIT + 1]
+            if rows:
+                break
         return _resolve_one(rows, "jobId", "job_id", _job_label, "job")
 
     async def _find_user(inputs, context):
@@ -266,7 +284,8 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
 def _registry(find_job, find_user, list_apps, validate_jobs, validate_apps, validate_emails) -> Dict[str, QueryTool]:
     return {
         "find_job_by_title": QueryTool(
-            "Find jobs by (partial) title.",
+            "Find jobs whose title contains this text. Search the title words only, e.g. "
+            "'data scientist' for 'the data scientist job'.",
             {"title": "str"}, {"job_id": "int"}, _guard(find_job)),
         "find_user": QueryTool(
             "Find an active recruiter user by name or email.",

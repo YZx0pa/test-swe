@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 283 offline tests (section 3). |
+| `tests/` | 284 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -187,7 +187,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 280 passed
+# 281 passed
 ```
 
 How the tests stay hermetic:
@@ -213,7 +213,7 @@ How the tests stay hermetic:
 | `tests/test_grounding.py` | 13 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind and invented ids the guard refused count as blocked, not as reaching VIRA. |
 | `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 | `tests/test_jeni.py` | 48 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). |
-| `tests/test_db.py` | 17 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
+| `tests/test_db.py` | 18 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
 
 Run a subset:
 
@@ -613,7 +613,7 @@ the proposals for engineering are in
 | `jeni_eval.py` | Seven Jeni requests for `compare_agents.py --suite jeni`, each with a check over the audit log: writes must match exactly, reads are free. |
 | `tests/test_jeni.py` | 48 offline tests (section 3). |
 | `db_lookup.py`, `db_queries.py`, `db_tools.py` | Read-only lookups in Jeni's database ([agent-frameworks.md §13](agent-frameworks.md#13-database-lookups---tools-jeni_db)): v1's Node job and user searches on asyncpg; each lookup as a `QueryTool` (resolved / ambiguous / not_found / validated) on a pool or on fixtures; and the adapter to LangChain tools, with the company bound at build time and results masked. |
-| `tests/test_db.py` | 17 offline tests (section 3). |
+| `tests/test_db.py` | 18 offline tests (section 3). |
 
 ### Modified files
 

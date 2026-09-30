@@ -105,6 +105,30 @@ def test_one_match_resolves_and_several_are_ambiguous_with_their_open_dates():
         {"job_id": 501, "label": "Data Scientist (opened 2026-08-21)"}]
 
 
+class SearchConn(FakeConn):
+    """Answers a job search only when its ILIKE pattern is `pattern`."""
+
+    def __init__(self, pattern, rows):
+        super().__init__(rows)
+        self.pattern = pattern
+
+    async def fetch(self, sql, *params):
+        self.seen.append((" ".join(sql.split()), params))
+        return self.rows if params[1] == self.pattern else []
+
+
+def test_a_title_with_job_left_on_still_finds_the_job():
+    assert tool("find_job_by_title", {"title": "senior data scientist job"}) == {
+        "status": "resolved", "job_id": 502}
+    conn = SearchConn("%Senior Data Scientist%",
+                      [{"job_id": 502, "job_name": "Senior Data Scientist", "open_date": None}])
+    result = asyncio.run(db_queries.build_db_queries(FakePool(conn))["find_job_by_title"].handler(
+        {"title": "Senior Data Scientist  Role"}, CTX))
+    assert [params[1] for _, params in conn.seen] == ["%Senior Data Scientist Role%",
+                                                      "%Senior Data Scientist%"]
+    assert result == {"status": "resolved", "resolved_fields": {"job_id": 502}}
+
+
 def test_a_long_list_says_it_is_cut_short():
     jobs = [{"jobId": n, "jobName": "Data Scientist", "company_id": CID} for n in range(1, 13)]
     found = tool("find_job_by_title", {"title": "data"}, fixtures={**FIXTURES, "jobs": jobs})

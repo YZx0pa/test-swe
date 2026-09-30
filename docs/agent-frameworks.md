@@ -86,7 +86,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
-| `tests/` | 283 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 284 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -429,7 +429,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 283 tests
+.venv/bin/python -m pytest -q                                   # offline, 284 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -563,6 +563,9 @@ How a call works:
   `failedArr` (one of two collaborators not found), and the prompt says to read it.
 - **Approvals.** Real mode and `--approve-all` pause all 16 writes, never the 6 reads.
   Shortlist, reject, share and transfer ownership pause in mock mode too.
+- **Asking.** `RULES` tells the model to ask only for what no tool can give it, not to have the
+  user confirm values they already gave, to do each step once it has what that step needs, and,
+  after a failure, to report the reason rather than offer a retry or another tool's workaround.
 - **Ids and personal values.** Ids must come from the user or an earlier result and keep their
   kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails, a
   new owner's email and share recipients must be exactly what the user wrote. Results carry them
@@ -577,6 +580,10 @@ What v1's catalog shows, and what v2 changes (proposals for engineering):
   and the model asks when the user didn't say.
 - `make_job_private` and `make_job_public` both take `is_private`, so v1's model could send "make
   public" with `is_private: true`. v2 sets it from the task.
+- `publish_job_to_linkedin`'s description tells the model to ask whether the job is already open
+  and public before publishing. VIRA checks that itself (the mock returns "Job must be open and
+  public before publishing to LinkedIn"), so the question could go: the agent would publish and
+  report the refusal. v2 keeps the question for now, as the catalog asks.
 - Kept as v1 has them, but worth fixing in the catalog: `create_job`'s description names title,
   skills and experience as the minimum while only the title is mandatory; `get_applications`
   calls `job_id` mandatory but marks it optional; `task_get_jobs` is commented out, so no task
@@ -641,13 +648,25 @@ How a call works:
 - **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates,
   and the prompt says to ask the user rather than pick. A search with more than 10 matches says
   so and asks for the id or a narrower title. Results go through `_mask_pii`. `%` and `_` in a
-  search term match literally.
+  search term match literally. A title that finds nothing is tried once more without a trailing
+  "job", "role" or "position" (models often search for "data scientist job").
+- **What the prompt adds.** Look names up instead of asking for ids; validate ids the user typed
+  (ids a tool returned are valid already); "the applicants" of a job means all of them, from
+  `list_job_applications`; on `ambiguous`, ask which one and nothing else.
 - **Guarded like the tasks.** The db tools are in the toolset's names, so `ToolCallGuard` refuses
   invented ids and exact repeats and turns a query exception into an error result. They are
   reads, so real mode doesn't pause for them.
 
 On TRON staging (company 5143), "data scientist" matches 27 jobs, nine of the first ten titled
 exactly "Data Scientist"; the open date is what tells them apart.
+
+Live, on staging with gpt-5-mini ("add python, sql to data scientist job, shortlist the
+applicants for it and publish the job to linkedin", then the job id): before the prompt rules,
+the agent answered the id with the same two questions again ("all or specific applicants?", "is
+the job public?") and changed nothing. With them, it adds the skills, lists the 11 applicants and
+shortlists them in that turn, and holds only the LinkedIn step for the catalog's question. Over
+four samples of the first turn, all four listed the candidates; three asked only which job, one
+also asked the catalog's open-and-public question.
 
 Open points:
 - **Jeni's real-mode path doesn't exist yet.** VIRA answers `POST agent_task_group` with 404, so

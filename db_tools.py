@@ -44,9 +44,11 @@ Database lookup rules:
   for an id you can look up.
 - Before any action that changes data, validate every user-supplied id or email with the
   matching validate_* tool (validate_job_id(s), validate_app_ids, validate_email(s)).
-  Proceed only when the status is "resolved".
+  Proceed only when the status is "resolved". Ids a tool returned are valid already.
+- "The applicants" of a job means all of them: get their ids with list_job_applications.
+  Ask which ones only if the user said "some" without saying which.
 - On status "ambiguous", show the candidates and ask the user which one. Never choose
-  for them.
+  for them, and ask nothing else then: the rest of the request stands as they gave it.
 - On status "not_found" or "error", tell the user plainly and do not attempt the action.
 - You supply only search terms and ids; the company is set by the system, never as a
   tool argument.

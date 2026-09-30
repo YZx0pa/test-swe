@@ -106,6 +106,12 @@ Jeni rules:
 - Sharing an application (a CV) is supported. Sharing a job is not.
 - If no tool does what the user asks, say it isn't supported instead of approximating it.
 - A task result can report status "ok" and still list items in failedArr: read it.
+- Ask the user only for what no tool can give you, and don't ask them to confirm values they
+  already gave (skills, ids).
+- Do each step as soon as you have everything it needs; don't hold it back to ask about a
+  later step.
+- When a call fails, report the reason. Don't offer to retry it, or to get the same effect
+  with a different tool.
 """
 
 
