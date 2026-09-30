@@ -10,6 +10,7 @@ import agent_kit
 import db_queries
 import db_tools
 import jeni_tools
+import mock_jeni
 import run_langgraph
 import vira_tools
 from conftest import read_audit
@@ -66,6 +67,9 @@ class FakePool:
     @contextlib.asynccontextmanager
     async def acquire(self):
         yield self.conn
+
+    async def close(self):
+        pass
 
 
 def real(name, inputs, rows):
@@ -202,3 +206,65 @@ def test_a_failing_query_is_an_error_result_not_a_crash():
                   "Validate job 501.", ts)
     [failed] = [m for m in result["messages"] if m.type == "tool"]
     assert json.loads(failed.text) == {"status": "error", "message": "tool failed (RuntimeError)"}
+
+
+# --- the runner: the db follows --mode, like VIRA --------------------------------------
+def test_mock_mode_looks_up_only_ids_the_task_mock_knows(audit_log):
+    result = arun(scripted(
+        calls(call("find_job_by_title", {"title": "backend"}, "c1")),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kubernetes"]}, "c2")),
+        calls(call("list_job_applications", {"job_id": 7001}, "c3")),
+        calls(call("shortlist_multiple_application", {"app_ids": [5101, 5102]}, "c4")),
+        say("done")),
+        "Add Kubernetes to the backend engineer job and shortlist two of its applicants.",
+        jeni_db(mock_jeni.db_fixtures(CID)))
+    replies = {m.name: json.loads(m.text) for m in result["messages"] if m.type == "tool"}
+    assert replies["find_job_by_title"] == {"status": "resolved", "job_id": 7001}
+    assert replies["add_job_skills"]["result"]["skills"][-1] == "Kubernetes"
+    assert replies["list_job_applications"]["applications"] == [5101, 5102, 5103, 5104]
+    assert replies["shortlist_multiple_application"]["result"]["failedArr"] == []
+    assert [a["command"] for a in read_audit(audit_log)] == [
+        "add-job-skills", "shortlist-multiple-application"]
+
+
+def runner_args(*argv):
+    return agent_kit.parser("x").parse_args(["--task", "hi", *argv])
+
+
+@pytest.fixture
+def runner(monkeypatch):
+    """run_langgraph.amain up to the REPL: records the toolset it built and any pool it opened."""
+    monkeypatch.setattr(vira_tools, "_MODE", "mock")      # amain configures the mode; restore it
+    seen = {"opened": []}
+
+    async def open_pool(dsn):
+        seen["opened"].append(dsn)
+        return FakePool(FakeConn([{"job_id": 686441}]))
+
+    async def repl(label, agent, args, names):
+        seen["names"] = names
+
+    monkeypatch.setattr(run_langgraph, "_open_pool", open_pool)
+    monkeypatch.setattr(run_langgraph, "build_agent", lambda **kw: seen.update(kw))
+    monkeypatch.setattr(agent_kit, "arepl", repl)
+    return seen
+
+
+def validate_job(toolset, job_id):
+    [validate] = [t for t in toolset.tools() if t.name == "validate_job_id"]
+    return json.loads(asyncio.run(validate.ainvoke({"job_id": job_id})))["status"]
+
+
+def test_mock_mode_ignores_a_dsn_and_answers_from_mock_vira(runner, capsys):
+    asyncio.run(run_langgraph.amain(runner_args("--dsn", "postgres://staging")))
+    assert runner["opened"] == []
+    assert validate_job(runner["toolset"], 7001) == "resolved"
+    assert "used with --mode real only" in capsys.readouterr().out
+
+
+def test_real_mode_opens_the_dsn_and_needs_one(runner):
+    asyncio.run(run_langgraph.amain(runner_args("--mode", "real", "--dsn", "postgres://staging")))
+    assert runner["opened"] == ["postgres://staging"]
+    assert validate_job(runner["toolset"], 686441) == "resolved"
+    with pytest.raises(SystemExit, match="needs a Postgres DSN"):
+        asyncio.run(run_langgraph.amain(runner_args("--mode", "real")))

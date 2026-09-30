@@ -6,13 +6,13 @@ compiled to a LangGraph graph: model node <-> tools node, state in a checkpointe
     python run_langgraph.py --task "Find talents for job 123"
     python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"
 
-  jeni_db = jeni tools PLUS read-only db lookup/validation tools, so the agent can
-  resolve a job by title and validate ids before acting.  A Postgres DSN
-  ($TRON_POSTGRES_DSN or --dsn) uses the real db; with none it falls back to offline
-  fake db queries so the toolset still runs:
+  jeni_db (the default) = jeni tools PLUS read-only db lookup/validation tools, so the
+  agent can resolve a job by title and validate ids before acting.  The db follows
+  --mode, like VIRA: mock answers from mock VIRA's synthetic data, so the ids agree;
+  real uses Postgres at $TRON_POSTGRES_DSN (or --dsn):
 
-    TRON_POSTGRES_DSN=postgres://... python run_langgraph.py --tools jeni_db
-    python run_langgraph.py --tools jeni_db --task "add python, sql to data scientist job"
+    python run_langgraph.py --task "add Kubernetes to the backend engineer job"
+    python run_langgraph.py --mode real        # every write pauses for approval
 """
 import asyncio
 
@@ -41,19 +41,14 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
     )
 
 
-def _fake_query_tools(company_id):
-    """Offline db: in-memory fixtures so find_/validate_ tools return something sensible."""
+def _mock_query_tools(company_id, dsn_ignored: bool):
+    """Mock mode: the lookups answer from mock VIRA's own data.  A real database's ids would
+    all be "not found" by the Jeni task mock, so a DSN is used in real mode only."""
+    import mock_jeni
     from db_queries import fake_db_queries
-    fixtures = {
-        "company_id": company_id,
-        "jobs": [{"jobId": 501, "jobName": "Data Scientist", "company_id": company_id},
-                 {"jobId": 502, "jobName": "Senior Data Scientist", "company_id": company_id}],
-        "users": [{"userId": 9, "firstname": "Bob", "lastname": "Lee",
-                   "email": "bob@example.com", "company_id": company_id}],
-        "applications": [{"app_id": 11, "job_id": 501}, {"app_id": 12, "job_id": 501}],
-    }
-    print("(no DSN: using offline fake db queries)")
-    return fake_db_queries(fixtures)
+    note = "; the DSN is used with --mode real only" if dsn_ignored else ""
+    print(f"(mock mode: db lookups use mock VIRA's synthetic jobs, users and applications{note})")
+    return fake_db_queries(mock_jeni.db_fixtures(company_id))
 
 
 async def _open_pool(dsn):
@@ -83,14 +78,17 @@ async def amain(args):
     agent_kit.setup(args)
     context = {"auth_profile": {"company_id": args.company_id}}
     pool = None
-    if args.dsn:
+    if args.mode == "real":
+        if not args.dsn:
+            raise SystemExit(f"--mode real --tools {args.tools} needs a Postgres DSN: set "
+                             f"TRON_POSTGRES_DSN in .env or pass --dsn.")
         from db_queries import build_db_queries
         print(f"(connecting to Postgres for --tools {args.tools} ...)")
         pool = await _open_pool(args.dsn)
         print("(db connected)")
         query_tools = build_db_queries(pool)
     else:
-        query_tools = _fake_query_tools(args.company_id)
+        query_tools = _mock_query_tools(args.company_id, dsn_ignored=bool(args.dsn))
     try:
         toolset = agent_kit.cli_toolset(args, query_tools=query_tools, context=context)
         agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,

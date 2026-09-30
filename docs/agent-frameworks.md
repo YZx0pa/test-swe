@@ -86,7 +86,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
-| `tests/` | 280 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 283 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -429,7 +429,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 280 tests
+.venv/bin/python -m pytest -q                                   # offline, 283 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -439,6 +439,7 @@ python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents and write /report.md"
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
 python jeni_tools.py                                                      # list them: read or write, and their fields
+python run_langgraph.py --task "Add Kubernetes to the backend engineer job"      # jeni_db: looks the job up first (§13)
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
@@ -632,8 +633,11 @@ How a call works:
   it with `SELECT 1`, builds the agent and drives every turn with `ainvoke`
   (`agent_kit.arun_task`, `arepl`). The deepagents runner is synchronous and doesn't offer
   `jeni_db`.
-- **Where the data comes from.** `--dsn` (default `$TRON_POSTGRES_DSN`) connects to Postgres;
-  without one, a few in-memory fixtures stand in.
+- **The database follows `--mode`, like VIRA.** Mock mode answers the lookups from mock VIRA's
+  own jobs, users and applications (`mock_jeni.db_fixtures`), so every id they return is one the
+  Jeni task mock knows; a DSN is ignored, with a note. Real mode connects to `--dsn` (default
+  `$TRON_POSTGRES_DSN`) and stops with a message without one. Mixing them fails every write: a
+  staging job the database confirms is "not found" by the mock.
 - **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates,
   and the prompt says to ask the user rather than pick. A search with more than 10 matches says
   so and asks for the id or a narrower title. Results go through `_mask_pii`. `%` and `_` in a

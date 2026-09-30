@@ -684,8 +684,9 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
                                   f"{TOOLS_HELP[name]}" for name in toolsets))
     if "jeni_db" in toolsets:
         p.add_argument("--dsn", default=os.environ.get("TRON_POSTGRES_DSN"),
-                       help="Postgres DSN for jeni_db (default: $TRON_POSTGRES_DSN). If unset, "
-                            "jeni_db uses in-memory fake db queries so it runs offline.")
+                       help="Postgres DSN for jeni_db in --mode real (default: "
+                            "$TRON_POSTGRES_DSN). In mock mode the lookups answer from mock "
+                            "VIRA's synthetic data instead, so their ids match its tasks.")
         p.add_argument("--company-id", type=int, default=5143,
                        help="authenticated company_id injected into db queries (tenant scope); "
                             "never taken from the model")

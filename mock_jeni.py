@@ -52,6 +52,19 @@ SUGGESTED = {7001: [(910001, 0.93), (910002, 0.89), (910003, 0.81)],
 SELF_SOURCED = {7001: [(930001, 0.77), (930002, 0.70)], 7002: [(940001, 0.74)]}
 
 
+def db_fixtures(company_id: int) -> Dict:
+    """These jobs, users and applications as db_queries.fake_db_queries fixtures, so in mock
+    mode the db lookups (--tools jeni_db) return only ids this mock knows."""
+    return {"company_id": company_id,
+            "jobs": [{"jobId": j["jobId"], "jobName": j["jobName"], "company_id": company_id}
+                     for j in JOBS.values()],
+            "users": [{"userId": u["userId"], "firstname": u["firstName"],
+                       "lastname": u["lastName"], "email": u["email"], "company_id": company_id}
+                      for u in USERS],
+            "applications": [{"app_id": app_id, "job_id": job_id}
+                             for app_id, (job_id, _, _) in APPLICATIONS.items()]}
+
+
 def created_job_id(title: str) -> int:
     """The id create_job gives a job with this title (7100-7999)."""
     return 7100 + zlib.crc32(title.strip().lower().encode()) % 900
