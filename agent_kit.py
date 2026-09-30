@@ -219,22 +219,28 @@ class ToolCallGuard(AgentMiddleware):
     """For the VIRA tools only: refuse repeats and ids the model can't have, never crash the run."""
 
     def __init__(self, names=frozenset(vira_tools.NAMES), ledger: CallLedger | None = None,
-                 user_only=frozenset()):
+                 user_only=frozenset(), read_only=frozenset()):
         super().__init__()
         self.names = set(names)
         self.ledger = ledger
         self.user_only = set(user_only)
+        self.read_only = set(read_only)
 
     def _repeat_of_earlier_call(self, request) -> bool:
+        """An identical call earlier in the conversation.  A read counts as new again once a
+        write ran after it: the write may have changed what it reads."""
         call = request.tool_call
         key = _normalise(call["args"])
+        repeat = False
         for msg in request.state.get("messages", []):
             for earlier in getattr(msg, "tool_calls", None) or []:
                 if earlier.get("id") == call.get("id"):
-                    return False          # everything after this is not earlier
+                    return repeat         # everything after this is not earlier
                 if earlier["name"] == call["name"] and _normalise(earlier["args"]) == key:
-                    return True
-        return False
+                    repeat = True
+                elif repeat and call["name"] in self.read_only and earlier["name"] not in self.read_only:
+                    repeat = False
+        return repeat
 
     @staticmethod
     def _result(request, message: str) -> ToolMessage:
@@ -352,7 +358,8 @@ def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
     A per-thread cap would end a conversation after `step_limit` calls in total.  Pass one
     shared ledger to an agent and all its subagents.
     """
-    return [ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only),
+    return [ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only,
+                          read_only=toolset.read_only),
             ModelCallLimitMiddleware(run_limit=step_limit, exit_behavior="end")]
 
 

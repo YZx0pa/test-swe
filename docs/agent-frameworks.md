@@ -86,7 +86,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
-| `tests/` | 288 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 289 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -116,7 +116,7 @@ How mini's bash-era prompt rules became structure:
 |---|---|
 | "Use `--mode mock`" (model-written) | Mode is fixed by the host; no tool parameter for it |
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
-| "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents |
+| "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents. A read may run again once a write ran after it |
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`), and points at `get_match_id_from_profile_id`, the one tool that turns profile ids into match ids |
 | "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither anything the user wrote (any turn) nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(run_limit=12)`: 12 model calls per user turn (and per resume after an approval), so a conversation can go on |
@@ -154,8 +154,10 @@ create_agent(build_chat_model(), vira_tools.langchain_tools(),
   continues the same task. `new` starts a fresh conversation. Every user turn counts as user input
   for `ToolCallGuard`. The call cap is per run, i.e. one turn or one resume after an approval, each
   started by a person; a per-thread cap would end the conversation after 12 calls in total. A
-  repeat of an earlier call in the same conversation is still refused. `--task`,
-  `compare_agents.py` and mini run every task on a fresh thread.
+  repeat of an earlier call in the same conversation is still refused, unless it is a read and
+  a write ran since: "show job 7001", "add Kafka to it", "show it again" reads it twice, since
+  the write may have changed it. deepagents' shared `CallLedger` still refuses that second read.
+  `--task`, `compare_agents.py` and mini run every task on a fresh thread.
 - A string model is built with no kwargs; pass an instance to control options.
   `build_chat_model()` maps litellm-style `CHAT_MODEL` ids (`openai/…` → `openai:…`) and uses Chat
   Completions for OpenAI, like mini's litellm path. The Responses API stores responses server-side
@@ -429,7 +431,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 288 tests
+.venv/bin/python -m pytest -q                                   # offline, 289 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default

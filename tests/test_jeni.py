@@ -320,6 +320,22 @@ def test_the_activity_log_keeps_ids_not_names_or_emails(kept):
 
 
 # --- the agent -----------------------------------------------------------------
+def test_a_read_runs_again_after_a_write_but_not_twice_in_a_row(audit_log):
+    result = run(scripted(
+        calls(call("get_single_job_details", {"job_id": 7001}, "c1")),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]}, "c2")),
+        calls(call("get_single_job_details", {"job_id": 7001}, "c3")),     # a write since: runs
+        calls(call("get_single_job_details", {"job_id": 7001}, "c4")),     # nothing since: refused
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]}, "c5")),   # a write: refused
+        say("done")), "Show job 7001, add Kafka to it, then show it again.")
+    replies = tool_messages(result)
+    assert "Refused" not in replies["c3"].text
+    assert "identical to an earlier call" in replies["c4"].text
+    assert "identical to an earlier call" in replies["c5"].text
+    assert [a["command"] for a in read_audit(audit_log)] == [
+        "get-single-job-details", "add-job-skills", "get-single-job-details"]
+
+
 def test_a_user_found_by_search_is_added_by_their_id(audit_log):
     result = run(scripted(
         calls(call("search_users", {"search_key": "Bob"}, "c1")),
