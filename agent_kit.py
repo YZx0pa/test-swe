@@ -100,7 +100,7 @@ class Toolset:
 # The four sample AI endpoints (and the assumed match-id lookup), used to compare runtimes.
 VIRA = Toolset("vira", vira_tools.langchain_tools, frozenset(vira_tools.NAMES),
                frozenset(vira_tools.READ_ONLY))
-TOOLSET_NAMES = ("jeni", "vira")
+TOOLSET_NAMES = ("jeni", "jeni_db", "vira")
 
 
 @functools.lru_cache(maxsize=None)
@@ -110,20 +110,60 @@ def _jeni() -> Toolset:
                    jeni_tools.USER_ONLY, SYSTEM_PROMPT + jeni_tools.RULES)
 
 
-def toolset(name: str) -> Toolset:
-    """VIRA (the sample endpoints), or Jeni's own tasks: one task per call, from the
-    internal catalog (config/README.md), which is read here on first use."""
+def _db(query_tools, context) -> Toolset:
+    """The read-only db lookup/validation tools (db_queries.py), context bound at build time."""
+    import db_tools
+    names = db_tools.names(query_tools)
+    return Toolset("db", lambda: db_tools.langchain_tools(query_tools, context),
+                   names, names, db_tools.USER_ONLY, SYSTEM_PROMPT + db_tools.RULES)
+
+
+def _jeni_db(query_tools, context) -> Toolset:
+    """jeni (act) + db (resolve/validate) in ONE agent: db tools feed ids to jeni tools.
+
+    A flat union of both tool lists; names are disjoint (verified) so no collision.
+    """
+    import db_tools
+    jt = _jeni()
+    dbt = _db(query_tools, context)
+    clash = jt.names & dbt.names
+    if clash:
+        raise ValueError(f"jeni/db tool name collision: {sorted(clash)}")
+    return Toolset(
+        "jeni_db",
+        lambda: jt.tools() + dbt.tools(),
+        jt.names | dbt.names,
+        jt.read_only | dbt.read_only,
+        jt.user_only | dbt.user_only,
+        SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES,
+    )
+
+
+def toolset(name: str, *, query_tools=None, context=None) -> Toolset:
+    """VIRA (the sample endpoints), Jeni's own tasks, or jeni+db combined.
+
+    jeni / jeni_db read the internal catalog (config/README.md) on first use.
+    db and jeni_db also need `query_tools` (db_queries.build_db_queries(pool) or
+    fake_db_queries(fixtures)) and `context` ({"auth_profile": {"company_id": ...}}),
+    supplied by the runner's main() -- never by the model.
+    """
     if name == "vira":
         return VIRA
     if name == "jeni":
         return _jeni()
+    if name in ("db", "jeni_db"):
+        if query_tools is None or context is None:
+            raise SystemExit(f"toolset {name!r} needs a db pool/context; the runner must "
+                             f"pass query_tools and context (see run_langgraph.py).")
+        return _db(query_tools, context) if name == "db" else _jeni_db(query_tools, context)
     raise ValueError(f"unknown toolset {name!r}")
 
 
-def cli_toolset(args: argparse.Namespace) -> Toolset:
+def cli_toolset(args: argparse.Namespace, *, query_tools=None, context=None) -> Toolset:
     """toolset(args.tools) for a runner's main(): a missing catalog is a message, not a traceback."""
     try:
-        return toolset(getattr(args, "tools", "vira"))
+        return toolset(getattr(args, "tools", "vira"),
+                       query_tools=query_tools, context=context)
     except jeni_tools.CatalogMissing as exc:
         raise SystemExit(str(exc)) from None
 
@@ -438,9 +478,16 @@ def parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["real", "mock"], default="mock",
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
-    p.add_argument("--tools", choices=TOOLSET_NAMES, default="jeni",
-                   help="vira (default): the sample AI endpoints; jeni: Jeni's own tasks, "
-                        "one per call (needs config/jeni_tasks.json, see config/README.md)")
+    p.add_argument("--tools", choices=TOOLSET_NAMES, default="jeni_db",
+                   help="vira (default): the sample AI endpoints; jeni: Jeni's own tasks "
+                        "(needs config/jeni_tasks.json); jeni_db: jeni PLUS the read-only db "
+                        "lookup/validation tools, so ids can be resolved/checked before acting")
+    p.add_argument("--dsn", default=os.environ.get("TRON_POSTGRES_DSN"),
+                   help="Postgres DSN for jeni_db/db (default: $TRON_POSTGRES_DSN). If unset, "
+                        "jeni_db uses in-memory fake db queries so it runs offline.")
+    p.add_argument("--company-id", type=int, default=5143,
+                   help="authenticated company_id injected into db queries (tenant scope); "
+                        "never taken from the model")
     p.add_argument("--approve-all", action="store_true",
                    help="pause for human approval before every VIRA tool call "
                         "(in real mode, score/insights always pause)")
@@ -471,12 +518,9 @@ def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
             "final": final_text(result)}
 
 
-def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
-                 trace: dict | None = None, label: str = "",
-                 tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
-    counter = UsageCounter()
-    t0 = time.monotonic()
-    result = run_task(agent, task, callbacks=[counter], thread_id=thread_id)
+def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
+            after, trace, label, tools) -> dict:
+    """Shared post-run output for the sync and async runners."""
     messages = result["messages"]
     turn = max((i for i, m in enumerate(messages) if m.type == "human"), default=0)
     print("\n=== trajectory ===")
@@ -493,6 +537,47 @@ def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                                                 ensure_ascii=False, indent=1))
         print(f"(trace written to {trace['path']})")
     return result
+
+
+def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
+                 trace: dict | None = None, label: str = "",
+                 tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
+    counter = UsageCounter()
+    t0 = time.monotonic()
+    result = run_task(agent, task, callbacks=[counter], thread_id=thread_id)
+    return _report(result, counter, t0, task=task, after=after, trace=trace,
+                   label=label, tools=tools)
+
+
+# --- async runners: needed when the toolset has async tools (db_tools) --------
+async def arun_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_human,
+                    callbacks: list | None = None, thread_id: str | None = None) -> dict:
+    """Async twin of run_task: drives the graph with ainvoke so coroutine tools (db) run.
+
+    Must be called on the SAME event loop that created the asyncpg pool, or asyncpg
+    raises 'attached to a different loop'.  run_langgraph.py's async main() ensures this.
+    """
+    config = {"configurable": {"thread_id": thread_id or uuid.uuid4().hex},
+              "callbacks": callbacks or []}
+    out = await agent.ainvoke({"messages": [{"role": "user", "content": task}]}, config,
+                              version="v2")
+    while out.interrupts:
+        if len(out.interrupts) == 1:
+            resume: Any = {"decisions": decide(out.interrupts[0].value)}
+        else:
+            resume = {i.id: {"decisions": decide(i.value)} for i in out.interrupts}
+        out = await agent.ainvoke(Command(resume=resume), config, version="v2")
+    return out.value
+
+
+async def arun_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
+                        trace: dict | None = None, label: str = "",
+                        tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
+    counter = UsageCounter()
+    t0 = time.monotonic()
+    result = await arun_task(agent, task, callbacks=[counter], thread_id=thread_id)
+    return _report(result, counter, t0, task=task, after=after, trace=trace,
+                   label=label, tools=tools)
 
 
 def repl(label: str, agent, args: argparse.Namespace,
@@ -524,5 +609,42 @@ def repl(label: str, agent, args: argparse.Namespace,
             continue
         try:
             run_and_show(agent, task, after, trace, label, tools, thread_id)
+        except Exception as exc:
+            print(printable(f"[error] {type(exc).__name__}: {exc}"))
+
+
+async def arepl(label: str, agent, args: argparse.Namespace, tools,
+                after: Callable[[dict], None] | None = None) -> None:
+    """Async twin of repl for toolsets with async tools (db/jeni_db).
+
+    `tools` is the toolset's names (as repl derives via cli_toolset); the caller passes
+    it, because a db toolset can't be re-resolved without the pool/context.
+    """
+    trace = None
+    if getattr(args, "trace_json", None):
+        trace = {"path": args.trace_json, "model": os.environ.get("CHAT_MODEL", "gpt-5-mini"),
+                 "mode": args.mode, "repeat": 1, "tasks": {}, "runs": [],
+                 "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if args.task:
+        await arun_and_show(agent, args.task, after, trace, label, tools)
+        return
+    print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, 'new' to start a new "
+          f"conversation, or 'quit'.")
+    thread_id = uuid.uuid4().hex
+    while True:
+        try:
+            task = input("\ninput task> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nbye")
+            return
+        if not task or task.lower() in {"quit", "exit"}:
+            print("bye")
+            return
+        if task.lower() == "new":
+            thread_id = uuid.uuid4().hex
+            print("(new conversation)")
+            continue
+        try:
+            await arun_and_show(agent, task, after, trace, label, tools, thread_id)
         except Exception as exc:
             print(printable(f"[error] {type(exc).__name__}: {exc}"))
