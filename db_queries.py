@@ -38,19 +38,45 @@ class QueryTool:
 
 
 # --- shared 0/1/many -> contract shaping ------------------------------------
-def _resolve_one(rows: List[Mapping[str, Any]], id_key: str, out_field: str, label_key: str,
-                 what: str) -> Dict[str, Any]:
-    """0 rows -> not_found; 1 -> resolved; many -> ambiguous + candidates."""
+# Candidates shown per search.  A search asks for one more row, to know whether there are more.
+SEARCH_LIMIT = 10
+
+
+def _resolve_one(rows: List[Mapping[str, Any]], id_key: str, out_field: str,
+                 label: Callable[[Mapping[str, Any]], str], what: str) -> Dict[str, Any]:
+    """0 rows -> not_found; 1 -> resolved; many -> ambiguous + candidates.
+
+    Up to SEARCH_LIMIT + 1 rows come in; the extra one only says the list is cut short.
+    """
     if not rows:
         return {"status": "not_found", "message": f"no {what} matched"}
     if len(rows) == 1:
         return {"status": "resolved", "resolved_fields": {out_field: rows[0][id_key]}}
+    shown = rows[:SEARCH_LIMIT]
+    message = (f"more than {SEARCH_LIMIT} {what}s match; showing {SEARCH_LIMIT}. Ask the user "
+               f"for the id or a more specific search" if len(rows) > SEARCH_LIMIT
+               else f"{len(rows)} {what}s match")
     return {
         "status": "ambiguous",
-        "message": f"{len(rows)} {what} match",
-        "candidates": [{out_field: r[id_key], "label": r.get(label_key, "")} for r in rows],
+        "message": message,
+        "candidates": [{out_field: r[id_key], "label": label(r)} for r in shown],
         "requires_semantic_review": True,
     }
+
+
+def _job_label(row: Mapping[str, Any]) -> str:
+    """'Data Scientist (opened 2026-08-21)': jobs often share a title, their open dates differ."""
+    opened = row.get("openDate")
+    return f"{row['jobName']} (opened {opened:%Y-%m-%d})" if opened else row["jobName"]
+
+
+def _user_label(row: Mapping[str, Any]) -> str:
+    return row.get("email", "")
+
+
+def _like_literal(text: str) -> str:
+    """A search term matched literally by ILIKE: its % and _ are not wildcards."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _company_id(context: Mapping[str, Any]) -> int:
@@ -124,22 +150,27 @@ def build_db_queries(pool) -> Dict[str, QueryTool]:
     async def _find_job_by_title(inputs, context):
         cid = _company_id(context)
         async with pool.acquire() as conn:
-            rows = await db_lookup.handle_search_jobs(conn, cid, search_keys=[inputs["title"]])
-        return _resolve_one(rows, "jobId", "job_id", "jobName", "job")
+            rows = await db_lookup.handle_search_jobs(
+                conn, cid, search_keys=[_like_literal(inputs["title"])], limit=SEARCH_LIMIT + 1)
+        return _resolve_one(rows, "jobId", "job_id", _job_label, "job")
 
     async def _find_user(inputs, context):
         cid = _company_id(context)
         async with pool.acquire() as conn:
-            rows = await db_lookup.handle_search_users(conn, cid, search_keys=[inputs["search_key"]])
-        return _resolve_one(rows, "userId", "user_id", "email", "user")
+            rows = await db_lookup.handle_search_users(
+                conn, cid, search_keys=[_like_literal(inputs["search_key"])],
+                limit=SEARCH_LIMIT + 1)
+        return _resolve_one(rows, "userId", "user_id", _user_label, "user")
 
     async def _list_job_applications(inputs, context):
         cid = _company_id(context)
         async with pool.acquire() as conn:
-            # parameterized by job_id; NOT a full-table scan
+            # parameterized by job_id and scoped to the tenant, like the validate_* queries:
+            # a job of another company lists nothing
             rows = await conn.fetch(
-                "SELECT app_id FROM hris.application WHERE job_id = $1 LIMIT 200;",
-                int(inputs["job_id"]),
+                "SELECT a.app_id FROM hris.application a JOIN hris.job j ON j.job_id = a.job_id "
+                "WHERE j.recuiter_company_id = $1 AND a.job_id = $2 LIMIT 200;",
+                cid, int(inputs["job_id"]),
             )
         ids = [r["app_id"] for r in rows]
         return _select_many(target_field="app_ids", candidate_field="app_id", values=ids,
@@ -177,7 +208,8 @@ def build_db_queries(pool) -> Dict[str, QueryTool]:
 def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
     """QueryTools for tests. ``fixtures`` = {
         "company_id": 1,
-        "jobs":  [{"jobId":501,"jobName":"Data Scientist","company_id":1}, ...],
+        "jobs":  [{"jobId":501,"jobName":"Data Scientist","company_id":1,
+                   "openDate": datetime(...) (optional)}, ...],
         "users": [{"userId":9,"firstname":"A","lastname":"B","email":"a@x.com","company_id":1}, ...],
         "applications": [{"app_id":11,"job_id":501}, ...],
     }  All rows are filtered by the fixture company_id, mirroring the real WHERE."""
@@ -191,20 +223,22 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
     async def _find_job_by_title(inputs, context):
         cid = _company_id(context)
         kw = str(inputs["title"]).lower()
-        rows = [r for r in _tenant(jobs, cid) if kw in r["jobName"].lower()]
-        return _resolve_one(rows, "jobId", "job_id", "jobName", "job")
+        rows = sorted((r for r in _tenant(jobs, cid) if kw in r["jobName"].lower()),
+                      key=lambda r: r["jobId"], reverse=True)[:SEARCH_LIMIT + 1]
+        return _resolve_one(rows, "jobId", "job_id", _job_label, "job")
 
     async def _find_user(inputs, context):
         cid = _company_id(context)
         kw = str(inputs["search_key"]).lower()
         rows = [r for r in _tenant(users, cid)
                 if kw in r["email"].lower()
-                or kw in f"{r['firstname']} {r['lastname']}".lower()]
-        return _resolve_one(rows, "userId", "user_id", "email", "user")
+                or kw in f"{r['firstname']} {r['lastname']}".lower()][:SEARCH_LIMIT + 1]
+        return _resolve_one(rows, "userId", "user_id", _user_label, "user")
 
     async def _list_job_applications(inputs, context):
-        _company_id(context)
-        ids = [a["app_id"] for a in apps if a["job_id"] == int(inputs["job_id"])]
+        job_ids = {r["jobId"] for r in _tenant(jobs, _company_id(context))}
+        ids = [a["app_id"] for a in apps
+               if a["job_id"] == int(inputs["job_id"]) and a["job_id"] in job_ids]
         return _select_many(target_field="app_ids", candidate_field="app_id", values=ids,
                             message=f"{len(ids)} applications for job {inputs['job_id']}")
 

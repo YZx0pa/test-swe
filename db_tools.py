@@ -8,17 +8,19 @@ resolved / ambiguous / not_found / validated contracts.
 
 This module lets the SAME query tools run inside run_langgraph.py's LangChain
 create_agent loop, next to the jeni tools, so one agent can resolve an id (db) and
-then act on it (jeni).  Three things it takes care of:
+then act on it (jeni).  Four things it takes care of:
 
   * async -> the tools are registered as coroutines (StructuredTool coroutine=...),
-    so run_task must drive the graph with ``ainvoke`` (see agent_kit.run_task).
+    so the graph must be driven with ``ainvoke`` (agent_kit.arun_task).
   * context injection -> ``context`` (the AuthProfile's company_id) is CLOSED OVER at
     build time and never exposed as a tool argument.  The model supplies only search
     terms / ids (title, search_key, job_id, ...), exactly as db_queries.py requires.
     A model-supplied company_id would be a cross-tenant hole; this prevents it.
   * contract translation -> the LLM (not a Coordinator) reads the result here, so a
     "resolved" result is flattened to its resolved_fields and an "ambiguous" result
-    keeps its candidates for the model to ask about (see DB_RULES in agent_kit.py).
+    keeps its candidates for the model to ask about (see RULES below).
+  * masking -> results go through recruiter_cli._mask_pii before the model sees them, so a
+    user search's email labels arrive redacted, as people do in the Jeni tools' results.
 
 Only the read-only query tools are exposed; nothing here changes data.  QueryTool is
 defined in db_queries.py, so there is no dependency on the other project's agent_loop_v2.
@@ -29,6 +31,8 @@ import json
 from typing import Any, Callable, Mapping
 
 from pydantic import Field, create_model
+
+import recruiter_cli
 
 # Rules appended to the prompt when these tools are present, so the model resolves and
 # checks ids with reads BEFORE calling an action tool.  Lives here, next to the tools it
@@ -85,7 +89,7 @@ def _translate(result: Any) -> Any:
     """Shape a QueryTool contract for an LLM reader (no Coordinator here).
 
     resolved  -> the resolved_fields (e.g. {"job_id": 501}), so the next call is obvious.
-    ambiguous -> keep candidates; DB_RULES tells the model to ask the user which one.
+    ambiguous -> keep candidates; RULES tells the model to ask the user which one.
     other     -> pass through (not_found / error / validated / selection).
     """
     if not isinstance(result, Mapping):
@@ -110,10 +114,12 @@ def langchain_tools(query_tools: Mapping[str, Any], context: Mapping[str, Any]) 
             continue
         description, inputs, handler = _qt_parts(qt)
 
-        # Bind name/handler per-iteration; context is shared and closed over.
+        # Bind name/handler per-iteration; context is shared and closed over.  The result is
+        # masked like every VIRA result: a user search's labels are emails.
         async def _call(_handler=handler, **kwargs):
             result = await _handler(kwargs, context)   # context NOT a model arg
-            return json.dumps(_translate(result), ensure_ascii=False, default=str)
+            return json.dumps(recruiter_cli._mask_pii(_translate(result)), ensure_ascii=False,
+                              default=str)
 
         tools.append(StructuredTool.from_function(
             coroutine=_call, name=name, description=description,

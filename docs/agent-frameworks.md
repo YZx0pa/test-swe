@@ -85,7 +85,8 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
-| `tests/` | 266 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
+| `tests/` | 280 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -428,7 +429,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 266 tests
+.venv/bin/python -m pytest -q                                   # offline, 280 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -515,6 +516,10 @@ every control sits in code the model can't reach, and each one has a test.
 | Jeni: a collaborator silently added as administrator | `role_id` has no default and takes only 1 (administrator) or 5 (team member); `is_private` is set by the task | `test_role_has_no_default_and_visibility_is_set_by_the_task` |
 | Jeni's internal task catalog published with the code | `config/*` is gitignored (only its README is tracked); `jeni_tools` reads the catalog from there or `JENI_TASKS_FILE`; the tests use a synthetic fixture and pass without the real file | `test_the_catalog_is_read_from_the_configured_file`, `test_a_missing_catalog_is_a_clear_error_and_only_for_jeni` |
 | Jeni: a user id used as an application id, or an invented user id | `ID_KINDS` covers `user_ids` and `app_id`, and VIRA's camelCase keys (`userId`, `appId`, `jobId`) | `test_a_user_id_is_not_an_application_id`, `test_an_invented_user_id_is_refused`, `test_camel_case_result_keys_count_as_id_kinds` |
+| jeni_db: the model reads another company's data | The company comes from the runner and is bound when the tools are built; no tool takes it as an argument, and a query without it is an error. Every query filters by it, `list_job_applications` included (staging holds 169 companies) | `test_the_model_supplies_search_terms_and_ids_but_never_the_company`, `test_a_query_without_a_tenant_is_an_error_not_a_guess`, `test_another_companys_job_lists_no_applications_and_fails_validation`, `test_the_real_application_list_is_scoped_to_the_tenant` |
+| jeni_db: people's emails from the database reach the model | db results go through `_mask_pii` like VIRA's; a user search's email labels arrive redacted | `test_user_search_results_reach_the_model_masked` |
+| jeni_db: a search term widens the query (`%`, `_`) | Terms are escaped before `ILIKE`, and every value is a bound parameter | `test_the_real_title_search_is_literal_and_asks_for_one_more_row`, `test_the_real_user_search_is_literal_and_tenant_scoped` |
+| jeni_db: a database error crashes the run or puts a host into context | `ToolCallGuard` covers the db tools: an exception becomes `tool failed (<type>)` | `test_a_failing_query_is_an_error_result_not_a_crash` |
 
 ## 12. Jeni's own tasks: `jeni_tools.py`
 
@@ -592,3 +597,54 @@ Open points:
   then continuing isn't exercised yet.
 - **22 tool schemas cost tokens:** a live "assign job 7001 to Bob as a team member" took 3 model
   calls and about 10.5k tokens on LangGraph.
+
+## 13. Database lookups: `--tools jeni_db`
+
+Jeni's tasks take ids, but people name things: "the data scientist job", "Bob". v1 looks names
+up in Jeni's database before it plans (`handleSearchJobs`, `handleSearchUsers`). `jeni_db` gives
+the agent the same lookups as read-only tools next to the 22 tasks, so it turns a name into an
+id, checks the ids the user typed, and only then acts. It is the default toolset of
+`run_langgraph.py`.
+
+| Tool | Does | Returns |
+|---|---|---|
+| `find_job_by_title` | Jobs whose title contains the text, newest first | one: `{"status": "resolved", "job_id"}`; several: `ambiguous`, up to 10 candidates labelled with their open date; none: `not_found` |
+| `find_user` | Active recruiters (role 4) by name or email | the same, with `user_id`; the labels are emails, so they arrive masked |
+| `list_job_applications` | A job's applications (up to 200) | the app ids, in `applications` and `selection.candidates` |
+| `validate_job_id(s)`, `validate_app_ids`, `validate_email(s)` | Checks ids or emails the user gave | `resolved`, or `not_found` with `invalid_values` |
+
+Files:
+- `db_lookup.py`: v1's Node queries on asyncpg (`handle_search_jobs`, `handle_search_users`),
+  with bound parameters and a `limit`.
+- `db_queries.py`: each lookup as a `QueryTool` returning the resolved / ambiguous / not_found /
+  validated contract, backed by an asyncpg pool (`build_db_queries`) or by in-memory fixtures
+  (`fake_db_queries`) with the same 0 / 1 / many mapping.
+- `db_tools.py`: the `QueryTool`s as LangChain tools, and the prompt's `RULES`.
+
+How a call works:
+- **The company comes from the runner.** `context = {"auth_profile": {"company_id": …}}` is
+  bound when the tools are built (`--company-id` here, the authenticated profile in
+  production). The tool schemas hold only search terms and ids. A query without a company
+  returns an error, and every query filters by it: a production DSN holds one company, but
+  staging holds 169.
+- **Async tools on one event loop.** asyncpg ties a pool to the loop that created it, so
+  `run_langgraph.py` runs `jeni_db` inside one `asyncio.run(amain())`: it opens the pool, checks
+  it with `SELECT 1`, builds the agent and drives every turn with `ainvoke`
+  (`agent_kit.arun_task`, `arepl`). The deepagents runner is synchronous and doesn't offer
+  `jeni_db`.
+- **Where the data comes from.** `--dsn` (default `$TRON_POSTGRES_DSN`) connects to Postgres;
+  without one, a few in-memory fixtures stand in.
+- **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates,
+  and the prompt says to ask the user rather than pick. A search with more than 10 matches says
+  so and asks for the id or a narrower title. Results go through `_mask_pii`. `%` and `_` in a
+  search term match literally.
+- **Guarded like the tasks.** The db tools are in the toolset's names, so `ToolCallGuard` refuses
+  invented ids and exact repeats and turns a query exception into an error result. They are
+  reads, so real mode doesn't pause for them.
+
+On TRON staging (company 5143), "data scientist" matches 27 jobs, nine of the first ten titled
+exactly "Data Scientist"; the open date is what tells them apart.
+
+Open points:
+- **Jeni's real-mode path doesn't exist yet.** VIRA answers `POST agent_task_group` with 404, so
+  in real mode the lookups work and every Jeni task fails.

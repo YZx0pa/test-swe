@@ -1,12 +1,17 @@
 # db_lookup.py
-import asyncpg
-from typing import List, Dict, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Dict, Optional
+
+if TYPE_CHECKING:          # only for the annotations: the caller's pool brings the driver
+    import asyncpg
 
 
 async def handle_search_users(
     conn: asyncpg.Connection,
     company_id: int,
-    search_keys: List[str]
+    search_keys: List[str],
+    limit: int = 10,
 ) -> List[Dict]:
     """
     Equivalent to Node handleSearchUsers
@@ -35,7 +40,8 @@ async def handle_search_users(
         or_parts.append(frag.strip())
     if or_parts:
         base_sql += f" AND ({' OR '.join(or_parts)})"
-    base_sql += " ORDER BY ui.email ASC LIMIT 10;"
+    params.append(limit)
+    base_sql += f" ORDER BY ui.email ASC LIMIT ${len(params)};"
 
     rows = await conn.fetch(base_sql, *params)
     return [
@@ -54,17 +60,18 @@ async def handle_search_jobs(
     company_id: int,
     search_keys: Optional[List[str]] = None,
     xjob_ids: Optional[List[int]] = None,
+    limit: int = 10,
 ) -> List[Dict]:
     """
     Equivalent Node handleSearchJobs
     Search jobs: filter by company_id, from_resume=false.
     Can filter by partial job-name keywords OR list of job_ids.
-    returns list: [{"jobId":int, "jobName":str}]
+    returns list: [{"jobId":int, "jobName":str, "openDate":datetime|None}], newest first
     """
     search_keys = search_keys or []
     xjob_ids = xjob_ids or []
     base_sql = """
-        SELECT j.job_id, jn.name_name AS job_name
+        SELECT j.job_id, jn.name_name AS job_name, j.open_date
         FROM hris.job j
         INNER JOIN hris.jobname jn ON jn.name_id = j.name_id
         WHERE j.recuiter_company_id = $1
@@ -90,13 +97,15 @@ async def handle_search_jobs(
 
     if cond_parts:
         base_sql += f" AND ({' OR '.join(cond_parts)})"
-    base_sql += " ORDER BY j.job_id DESC LIMIT 10;"
+    params.append(limit)
+    base_sql += f" ORDER BY j.job_id DESC LIMIT ${len(params)};"
 
     rows = await conn.fetch(base_sql, *params)
     return [
         {
             "jobId": r["job_id"],
             "jobName": r["job_name"],
+            "openDate": r["open_date"],
         }
         for r in rows
     ]
