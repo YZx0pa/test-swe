@@ -84,7 +84,8 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `tests/` | 193 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
+| `tests/` | 244 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -383,13 +384,15 @@ What the runs showed:
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 210 tests
+.venv/bin/python -m pytest -q                                   # offline, 244 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
 python run_langgraph.py --approve-all                                     # approve/edit/reject each call
 python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
+python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
+python jeni_tools.py                                                      # list them: read or write, and their fields
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
@@ -461,3 +464,85 @@ every control sits in code the model can't reach, and each one has a test.
 | A mistyped edit at the approval prompt crashes the task | `ask_human` asks again until it gets a JSON object | `test_a_bad_edit_is_asked_again_not_a_crash` |
 | A tampered or vulnerable dependency | `requirements.lock.txt` pins all 138 packages with hashes (`--require-hashes` installs); `pip-audit` is in the dev requirements. No known vulnerabilities on 2026-09-30 | `pip-audit -r requirements.lock.txt --disable-pip` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
+| Jeni: a guessed candidate email or share recipient reaches VIRA (a CV sent to the wrong person) | `ToolCallGuard` refuses a `USER_ONLY` value (candidate name and email, new owner's email, share recipients) that isn't in the user's words, without echoing it; masked values from results fail the email pattern | `test_an_email_the_user_never_gave_is_refused`, `test_an_email_the_user_gave_is_used`, `test_invalid_input_never_reaches_vira` |
+| Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
+| Jeni: candidate names in task payloads reach the audit log, or the creator's name reaches the model | `_mask_pii` masks a `field_value` whose `field_name` is sensitive, and creator/owner names; the model gets only the sub-task result | `test_candidate_details_are_masked_in_the_audit_log`, `test_creator_and_owner_names_are_masked`, `test_the_model_sees_only_the_sub_task_result` |
+| Jeni: a collaborator silently added as administrator | `role_id` has no default and takes only 1 (administrator) or 5 (team member); `is_private` is set by the task | `test_role_has_no_default_and_visibility_is_set_by_the_task` |
+| Jeni's internal task catalog published with the code | `config/*` is gitignored (only its README is tracked); `jeni_tools` reads the catalog from there or `JENI_TASKS_FILE`; the tests use a synthetic fixture and pass without the real file | `test_the_catalog_is_read_from_the_configured_file`, `test_a_missing_catalog_is_a_clear_error_and_only_for_jeni` |
+| Jeni: a user id used as an application id, or an invented user id | `ID_KINDS` covers `user_ids` and `app_id`, and VIRA's camelCase keys (`userId`, `appId`, `jobId`) | `test_a_user_id_is_not_an_application_id`, `test_an_invented_user_id_is_refused`, `test_camel_case_result_keys_count_as_id_kinds` |
+
+## 12. Jeni's own tasks: `jeni_tools.py`
+
+Sections 1–11 use four sample AI endpoints, chosen to compare runtimes. Jeni v1, the prototype,
+runs a different set: the 22 recruiter tasks in its `XAGENT_SUBTASK_API_CONFIG_SCHEMA`.
+`jeni_tools.py` turns each task into a typed tool, and `--tools jeni` gives them to the LangGraph
+and deepagents runners.
+
+The catalog is internal, so it isn't in the repository. It is shared as a file, read from
+`config/jeni_tasks.json` (gitignored) or wherever `JENI_TASKS_FILE` points, and only when a Jeni
+tool is first needed: nothing else depends on it, and without it `--tools jeni` stops with a
+message saying where to put it. `python jeni_tools.py --from-js tasks.js` builds it from v1's
+file, and `python jeni_tools.py` checks it. The offline tests use a synthetic 15-task catalog in
+v1's format (`tests/fixtures/jeni_tasks.json`).
+
+```
+v1  request → one LLM call plans every task as JSON ({{output_from:…}} for later values) → VIRA runs the group
+v2  request → agent loop: one tool call = one task → VIRA runs a one-task group → sub-task result → next step
+```
+
+| Area | Read only (6) | Changes data (16) |
+|---|---|---|
+| Jobs | `get_single_job_details` | `create_job`, `edit_job`, `add_job_skills`, `remove_job_skills`, `clone_job`, `make_job_private`, `make_job_public`, `make_job_closed`, `make_job_open`, `publish_job_to_linkedin` |
+| People on a job | `search_users` | `add_job_collaborators`, `transfer_job_ownership` |
+| Applications | `get_applications`, `get_single_application_details` | `create_application_to_job`, `shortlist_multiple_application`, `reject_multiple_application`, `share_application` |
+| Candidates | `get_suggested_candidates_for_a_job`, `get_self_sourcing_candidates_for_a_job` | |
+
+How a call works:
+- **Schema from the catalog.** Mandatory fields are required, and types follow tasks.js
+  (`NUMBER_FIELDS`, `STRING_ARRAY_FIELDS`, …) with v2's limits: positive ids, at most 50 per list,
+  200 characters per value (2,000 for descriptions and messages), email patterns, `role_id` 1 or 5,
+  and no unknown fields. `run()` validates again, so a bad call never reaches VIRA whoever makes it.
+- **One task per group.** A call sends a task group holding only that task, in v1's payload
+  format (`handleGenerateViraPayload`), through `recruiter_cli.execute()`: audit log, PII mask,
+  mode set by the host. The path `agent_task_group` is **assumed**: v1 creates groups in-process
+  (`XagentTaskEngine.handleCreateTaskGroup`), so VIRA's HTTP path for it isn't known yet.
+  `mock_jeni.py` answers it in the shape of a real VIRA reply.
+- **Only the sub-task result reaches the model**: `{status, task_status, failed_reason, result}`.
+  The group's uuids, timestamps and creator name stay out. A task can be `completed` with items in
+  `failedArr` (one of two collaborators not found), and the prompt says to read it.
+- **Approvals.** Real mode pauses all 16 writes; `--approve-all` pauses all 22.
+- **Ids and personal values.** Ids must come from the user or an earlier result and keep their
+  kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails, a
+  new owner's email and share recipients must be exactly what the user wrote. Results carry them
+  masked, so copying one from a result isn't possible anyway.
+
+What v1's catalog shows, and what v2 changes (proposals for engineering):
+- Every task has one sub-task, `level: 1` and `task_output: []`, so v1's rule for chaining a
+  later task onto an earlier one's output never applies, and v1 strips the `{{output_from:…}}`
+  placeholders before sending. "Create a job and add Spark to it" can't be one request in v1. In
+  v2 the agent reads the new job's id from `create_job`'s result and passes it on.
+- `add_job_collaborators.role_id` defaults to 1 (administrator) in v1. v2 gives it no default,
+  and the model asks when the user didn't say.
+- `make_job_private` and `make_job_public` both take `is_private`, so v1's model could send "make
+  public" with `is_private: true`. v2 sets it from the task.
+- Kept as v1 has them, but worth fixing in the catalog: `create_job`'s description names title,
+  skills and experience as the minimum while only the title is mandatory; `get_applications`
+  calls `job_id` mandatory but marks it optional; `task_get_jobs` is commented out, so no task
+  finds a job by name.
+- v1's response schema accepts any `task_name` and any field in any task. v2's tools are exactly
+  the 22 tasks with their own fields.
+
+The mock (`mock_jeni.py`) holds synthetic jobs (7001–7003), users (801–803), applications
+(5101–5104, 5201–5202) and suggested and self-sourcing candidates. It is stateless: a created
+job's id comes from its title (`created_job_id`), and changes are reported but not remembered.
+It enforces one VIRA rule the catalog states in prose: publishing to LinkedIn needs an open,
+public job.
+
+Open points:
+- **People are masked in results,** so after `search_users` the agent picks a person by id. With
+  two matches it can't tell them apart by name. Colleague directory data may deserve a different
+  policy from candidate data.
+- **Clarifying answers start a new thread** in the runners (one thread per task), so asking and
+  then continuing isn't exercised yet.
+- **22 tool schemas cost tokens:** a live "assign job 7001 to Bob as a team member" took 3 model
+  calls and about 10.5k tokens on LangGraph.

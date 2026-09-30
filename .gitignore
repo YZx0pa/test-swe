@@ -32,3 +32,6 @@ CLAUDE.md
 .pytest_cache/
 
 raw_data/
+# Jeni's task catalog: internal, shared outside git (config/README.md)
+config/*
+!config/README.md

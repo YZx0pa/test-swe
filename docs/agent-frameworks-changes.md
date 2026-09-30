@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 210 offline tests (section 3). |
+| `tests/` | 244 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -185,7 +185,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 210 passed
+# 244 passed
 ```
 
 How the tests stay hermetic:
@@ -210,6 +210,7 @@ How the tests stay hermetic:
 | `tests/test_mcp.py` | 6 | Tool list, annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. Real mode lists only the reads unless side effects are allowed. The call budget stops VIRA calls. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
 | `tests/test_grounding.py` | 13 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind and invented ids the guard refused count as blocked, not as reaching VIRA. |
 | `tests/test_mini_env.py` | 44 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
+| `tests/test_jeni.py` | 34 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset; camelCase result keys count as id kinds. |
 
 Run a subset:
 
@@ -571,3 +572,49 @@ These are tracked as follow-ups in
 - **Approvals are in memory only.** `InMemorySaver` means a paused approval doesn't survive a
   restart.
 - **LLM results vary.** The comparison numbers in §7 of the design doc are 3 runs per cell.
+
+---
+
+## 8. `feat/jeni-v2-tasks`: Jeni's own tasks
+
+Branched from `feat/agent-frameworks`. The agent keeps the same runtimes and guarded path, and
+gets Jeni v1's real task catalog instead of the four sample endpoints. Design, the task table and
+the proposals for engineering are in
+[agent-frameworks.md §12](agent-frameworks.md#12-jenis-own-tasks-jeni_toolspy).
+
+### New files
+
+| File | What it is |
+|---|---|
+| `config/README.md` | Where Jeni's task catalog goes (`config/jeni_tasks.json`, or `JENI_TASKS_FILE`) and how to build or check it. The catalog, v1's `XAGENT_SUBTASK_API_CONFIG_SCHEMA` with 22 tasks, is internal and shared outside git; the rest of `config/` is gitignored. |
+| `tests/fixtures/jeni_tasks.json` | A synthetic 15-task catalog in v1's format for the offline tests, with v1's field names but not its descriptions. |
+| `jeni_tools.py` | Reads the catalog on first use (`CatalogMissing` if it isn't there) and builds one typed tool per task from it (pydantic models: types, limits, descriptions), sends a call as a one-task group in v1's payload format through `recruiter_cli.execute()`, and hands the model only the sub-task result. `READ_ONLY` (6 tasks), `USER_ONLY` fields, `FIXED_VALUES` (`is_private`), `NO_DEFAULT` (`role_id`), `RULES` for the prompt. `python jeni_tools.py` lists the tasks and flags any the mock can't answer; `--from-js tasks.js` builds the catalog. |
+| `mock_jeni.py` | Mock of VIRA's task-group API: one handler per task over synthetic jobs, users and applications, answering in the shape of a real reply (group → task → sub-task, `agentSubTaskResponse`, `failedReason`). Stateless and deterministic. |
+| `tests/test_jeni.py` | 34 offline tests (section 3). |
+
+### Modified files
+
+| File | Change |
+|---|---|
+| `agent_kit.py` | `Toolset` (tools, names, read-only names, user-only fields, prompt): `VIRA`, and `toolset("jeni")`, built on first use. `ToolCallGuard` takes `user_only` and refuses a value the user never wrote. `middleware()` and `interrupt_on()` take a toolset; `--tools vira\|jeni` picks one. |
+| `run_langgraph.py`, `run_deepagent.py` | `build_agent(toolset=…)`. deepagents with Jeni's tasks has just the guarded general-purpose subagent, and its own working-style prompt. |
+| `recruiter_cli.py` | `_mask_pii` masks a `field_value` whose `field_name` is sensitive, and creator/owner names (`creatorName` is in VIRA's task-group reply). |
+| `grounding.py` | `ID_KINDS` adds `user_ids` and `app_id`; result keys are compared in snake case, so `userId`/`appId`/`jobId` count; traces take the toolset's names. |
+| `mock_vira.py` | Routes the `agent_task_group` path to `mock_jeni`. |
+| `.gitignore`, `.env.example` | `config/*` is ignored except its README; `JENI_TASKS_FILE` is listed with its default. |
+
+### Run it
+
+Put the shared catalog at `config/jeni_tasks.json` first (or set `JENI_TASKS_FILE`).
+
+```bash
+python jeni_tools.py                                                       # check it: the tasks, read/write and fields
+python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"
+python run_langgraph.py --tools jeni --task "Create a Data Engineer job needing Python and SQL with 3 to 5 years of experience, then add Spark to it"
+python run_langgraph.py --tools jeni --approve-all --task "Shortlist the two applicants with the highest match scores for job 7001"
+python run_deepagent.py --tools jeni --task "Show me the details of jobs 7001 and 7003"
+```
+
+`cat "$EVENTS_LOG"` shows each call as a one-task group, with candidate names and emails
+redacted. Real mode sends the same payload to `$VIRA_BASE_URL/agent_task_group`, an assumed path
+that VIRA doesn't serve yet.

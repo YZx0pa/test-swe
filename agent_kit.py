@@ -8,17 +8,21 @@ What run_mini.py spells out as bash-era prompt rules becomes structure here:
     call run_mini.py works around) and turns crashes into error results.
   * ModelCallLimitMiddleware caps model calls per task (mini's step_limit).
   * --approve-all puts a human in front of every VIRA call (LangGraph interrupt);
-    in real mode, calls that change data on VIRA (score, insights) always pause.
+    in real mode, calls that change data on VIRA (score, insights, and every Jeni
+    task that isn't a read) always pause.
+  * A Toolset picks the tools: VIRA (the sample endpoints) or toolset("jeni") (Jeni's tasks).
 
 Never import run_mini from here: it reads .env and pulls in minisweagent and
 litellm on import.
 """
 import argparse
+import functools
 import json
 import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +33,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 import grounding
+import jeni_tools
 import recruiter_cli
 import vira_tools
 from terminal import printable
@@ -78,6 +83,51 @@ Rules:
 """
 
 
+@dataclass(frozen=True)
+class Toolset:
+    """What an agent can call: the tools, which of them only read, and its prompt.
+
+    user_only: arguments whose values must be exactly what the user wrote (ToolCallGuard).
+    """
+    name: str
+    tools: Callable[[], list]
+    names: frozenset
+    read_only: frozenset
+    user_only: frozenset = frozenset()
+    prompt: str = SYSTEM_PROMPT
+
+
+# The four sample AI endpoints (and the assumed match-id lookup), used to compare runtimes.
+VIRA = Toolset("vira", vira_tools.langchain_tools, frozenset(vira_tools.NAMES),
+               frozenset(vira_tools.READ_ONLY))
+TOOLSET_NAMES = ("jeni", "vira")
+
+
+@functools.lru_cache(maxsize=None)
+def _jeni() -> Toolset:
+    names = jeni_tools.names()          # reads the catalog; CatalogMissing without it
+    return Toolset("jeni", jeni_tools.langchain_tools, names, jeni_tools.READ_ONLY & names,
+                   jeni_tools.USER_ONLY, SYSTEM_PROMPT + jeni_tools.RULES)
+
+
+def toolset(name: str) -> Toolset:
+    """VIRA (the sample endpoints), or Jeni's own tasks: one task per call, from the
+    internal catalog (config/README.md), which is read here on first use."""
+    if name == "vira":
+        return VIRA
+    if name == "jeni":
+        return _jeni()
+    raise ValueError(f"unknown toolset {name!r}")
+
+
+def cli_toolset(args: argparse.Namespace) -> Toolset:
+    """toolset(args.tools) for a runner's main(): a missing catalog is a message, not a traceback."""
+    try:
+        return toolset(getattr(args, "tools", "vira"))
+    except jeni_tools.CatalogMissing as exc:
+        raise SystemExit(str(exc)) from None
+
+
 # --- model -------------------------------------------------------------------
 def build_chat_model(model_id: str | None = None):
     """CHAT_MODEL (litellm style, as in run_mini.py) -> a LangChain chat model."""
@@ -122,10 +172,12 @@ class CallLedger:
 class ToolCallGuard(AgentMiddleware):
     """For the VIRA tools only: refuse repeats and ids the model can't have, never crash the run."""
 
-    def __init__(self, names=frozenset(vira_tools.NAMES), ledger: CallLedger | None = None):
+    def __init__(self, names=frozenset(vira_tools.NAMES), ledger: CallLedger | None = None,
+                 user_only=frozenset()):
         super().__init__()
         self.names = set(names)
         self.ledger = ledger
+        self.user_only = set(user_only)
 
     def _repeat_of_earlier_call(self, request) -> bool:
         call = request.tool_call
@@ -170,6 +222,29 @@ class ToolCallGuard(AgentMiddleware):
                     invented.append(f"{p['value']}")
         return misused, invented
 
+    def _not_from_user(self, request) -> list[str]:
+        """User-only arguments (e.g. a candidate's email) with a value the user never wrote.
+
+        A reviewer's edited args count as the user's words, as for ids.
+        """
+        args = request.tool_call["args"] or {}
+        fields = sorted(self.user_only & set(args))
+        if not fields:
+            return []
+        messages = request.state.get("messages", [])
+        said = " ".join(m.text for m in messages if m.type == "human")
+        edited = (request.state.get("hitl_edited_tool_calls") or {}).get(request.tool_call.get("id"))
+        if edited:
+            said += " " + json.dumps(edited.get("args", {}), ensure_ascii=False)
+        said = said.lower()
+        bad = []
+        for field in fields:
+            values = args[field] if isinstance(args[field], list) else [args[field]]
+            if any(not isinstance(v, str) or v.strip().lower() not in said
+                   for v in values if v not in (None, "")):
+                bad.append(field)
+        return bad
+
     def _refusal(self, request) -> ToolMessage | None:
         misused, invented = self._bad_ids(request)
         if misused:
@@ -180,6 +255,11 @@ class ToolCallGuard(AgentMiddleware):
         if invented:
             return self._result(request, f"Refused: {', '.join(invented)} isn't in the task or any "
                                 "earlier result. Never invent ids: finish and say which id is missing.")
+        not_said = self._not_from_user(request)
+        if not_said:     # names only: the value may be personal data
+            return self._result(request, f"Refused: {', '.join(not_said)} must be exactly what the "
+                                "user wrote, and it isn't. Ask the user for it; never take it from a "
+                                "tool result or make it up.")
         repeat = self._repeat_of_earlier_call(request)   # also orders parallel duplicates
         if not repeat and self.ledger is not None:
             info = request.runtime.execution_info
@@ -218,27 +298,28 @@ class ToolCallGuard(AgentMiddleware):
             return self._result(request, f"tool failed ({type(exc).__name__})")
 
 
-def middleware(step_limit: int = 12, ledger: CallLedger | None = None) -> list:
+def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
+               toolset: Toolset = VIRA) -> list:
     """Guard + a per-thread cap on model calls (each task runs on a fresh thread).
 
     Pass one shared ledger to an agent and all its subagents.
     """
-    return [ToolCallGuard(ledger=ledger),
+    return [ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only),
             ModelCallLimitMiddleware(thread_limit=step_limit, exit_behavior="end")]
 
 
 DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
 
 
-def interrupt_on(approve_all: bool, mode: str | None = None) -> dict:
+def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = VIRA) -> dict:
     """Which tools pause for a human: every one with --approve-all; in real mode, always
-    the ones that trigger calculations on VIRA (not in READ_ONLY).  `mode` defaults to
+    the ones that change data on VIRA (not in the toolset's read_only).  `mode` defaults to
     the configured one (vira_tools.configure), so a real-mode agent can't be built
     without them."""
     if approve_all:
-        names = vira_tools.NAMES
+        names = toolset.names
     elif (mode or vira_tools.current_mode()) == "real":
-        names = vira_tools.NAMES - vira_tools.READ_ONLY
+        names = toolset.names - toolset.read_only
     else:
         names = set()
     return {name: DECISIONS for name in sorted(names)}
@@ -347,6 +428,9 @@ def parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["real", "mock"], default="mock",
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
+    p.add_argument("--tools", choices=TOOLSET_NAMES, default="vira",
+                   help="vira (default): the sample AI endpoints; jeni: Jeni's own tasks, "
+                        "one per call (needs config/jeni_tasks.json, see config/README.md)")
     p.add_argument("--approve-all", action="store_true",
                    help="pause for human approval before every VIRA tool call "
                         "(in real mode, score/insights always pause)")
@@ -367,9 +451,9 @@ def setup(args: argparse.Namespace) -> None:
 
 
 def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
-               seconds: float) -> dict:
+               seconds: float, tools=grounding.VIRA_TOOLS) -> dict:
     """One run in compare_agents.py's --json format, so the page reads both."""
-    steps = grounding.trace_from_messages(result["messages"], task)
+    steps = grounding.trace_from_messages(result["messages"], task, tools)
     return {"runner": label, "task": task, "repeat": 1, "passed": None, "error": "",
             "model_calls": counter.calls, "input_tokens": counter.input_tokens,
             "output_tokens": counter.output_tokens, "seconds": round(seconds, 1), "cost": None,
@@ -378,7 +462,8 @@ def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
 
 
 def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
-                 trace: dict | None = None, label: str = "") -> dict:
+                 trace: dict | None = None, label: str = "",
+                 tools=grounding.VIRA_TOOLS) -> dict:
     counter = UsageCounter()
     t0 = time.monotonic()
     result = run_task(agent, task, callbacks=[counter])
@@ -389,7 +474,8 @@ def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
           f"{counter.input_tokens}/{counter.output_tokens})")
     if trace is not None:
-        trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0))
+        trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0,
+                                        tools))
         trace["tasks"][task] = {"text": task, "check": ""}
         write_private(trace["path"], json.dumps({k: v for k, v in trace.items() if k != "path"},
                                                 ensure_ascii=False, indent=1))
@@ -399,13 +485,14 @@ def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
 
 def repl(label: str, agent, args: argparse.Namespace,
          after: Callable[[dict], None] | None = None) -> None:
+    tools = cli_toolset(args).names
     trace = None
     if getattr(args, "trace_json", None):
         trace = {"path": args.trace_json, "model": os.environ.get("CHAT_MODEL", "gpt-5-mini"),
                  "mode": args.mode, "repeat": 1, "tasks": {}, "runs": [],
                  "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if args.task:
-        run_and_show(agent, args.task, after, trace, label)
+        run_and_show(agent, args.task, after, trace, label, tools)
         return
     print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, or 'quit'.")
     while True:
@@ -418,6 +505,6 @@ def repl(label: str, agent, args: argparse.Namespace,
             print("bye")
             return
         try:
-            run_and_show(agent, task, after, trace, label)
+            run_and_show(agent, task, after, trace, label, tools)
         except Exception as exc:
             print(printable(f"[error] {type(exc).__name__}: {exc}"))

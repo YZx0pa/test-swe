@@ -1,0 +1,386 @@
+{
+  "source": "Synthetic catalog for the offline tests, in Jeni v1's format. Not Jeni's real catalog, which is internal (config/README.md).",
+  "tasks": [
+    {
+      "task_name": "task_create_job",
+      "description": "Create a job.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_create_job",
+          "description": "Create a job.",
+          "fields": [
+            {
+              "field_name": "job_title",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "skills",
+              "mandatory": false
+            },
+            {
+              "field_name": "job_description",
+              "mandatory": false
+            },
+            {
+              "field_name": "country_name",
+              "mandatory": false
+            },
+            {
+              "field_name": "min_exp",
+              "mandatory": false
+            },
+            {
+              "field_name": "max_exp",
+              "mandatory": false
+            },
+            {
+              "field_name": "min_salary",
+              "mandatory": false
+            },
+            {
+              "field_name": "max_salary",
+              "mandatory": false
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_add_job_skills",
+      "description": "Add skills to a job.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_add_job_skills",
+          "description": "Add skills to a job.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "skills",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_clone_job",
+      "description": "Clone a job.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_clone_job",
+          "description": "Clone a job.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_transfer_job_ownership",
+      "description": "Transfer a job to a new owner.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_transfer_job_ownership",
+          "description": "Transfer a job to a new owner.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "new_owner_user_email",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_add_job_collaborators",
+      "description": "Add users to a job as collaborators.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_add_job_collaborators",
+          "description": "Add users to a job as collaborators.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "user_ids",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "role_id",
+              "mandatory": true,
+              "field_value": 1
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_publish_job_to_linkedin",
+      "description": "Publish a job to LinkedIn.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_publish_job_to_linkedin",
+          "description": "Publish a job to LinkedIn.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_make_job_private",
+      "description": "Make a job private.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_make_job_private",
+          "description": "Make a job private.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "is_private",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_make_job_public",
+      "description": "Make a job public.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_make_job_public",
+          "description": "Make a job public.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "is_private",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_shortlist_multiple_application",
+      "description": "Shortlist applications.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_shortlist_multiple_application",
+          "description": "Shortlist applications.",
+          "fields": [
+            {
+              "field_name": "app_ids",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_share_application",
+      "description": "Share applications with people by email.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_share_application",
+          "description": "Share applications with people by email.",
+          "fields": [
+            {
+              "field_name": "app_ids",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "emails",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "message",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_get_applications",
+      "description": "List a job's applications.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_get_applications",
+          "description": "List a job's applications.",
+          "fields": [
+            {
+              "field_name": "search_key",
+              "mandatory": false
+            },
+            {
+              "field_name": "job_id",
+              "mandatory": false
+            },
+            {
+              "field_name": "limit",
+              "mandatory": false
+            },
+            {
+              "field_name": "skip",
+              "mandatory": false
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_get_single_application_details",
+      "description": "Get one application.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_get_single_application_details",
+          "description": "Get one application.",
+          "fields": [
+            {
+              "field_name": "app_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_create_application_to_job",
+      "description": "Add a candidate to a job.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_create_application_to_job",
+          "description": "Add a candidate to a job.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "candidate_name",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            },
+            {
+              "field_name": "candidate_email",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_get_single_job_details",
+      "description": "Get one job.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_get_single_job_details",
+          "description": "Get one job.",
+          "fields": [
+            {
+              "field_name": "job_id",
+              "mandatory": true,
+              "field_value": "{{to_be_filled}}"
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    },
+    {
+      "task_name": "task_search_users",
+      "description": "Search the company's users.",
+      "level": 1,
+      "sub_tasks": [
+        {
+          "sub_task_name": "sub_task_search_users",
+          "description": "Search the company's users.",
+          "fields": [
+            {
+              "field_name": "search_key",
+              "mandatory": false
+            },
+            {
+              "field_name": "limit",
+              "mandatory": false
+            },
+            {
+              "field_name": "skip",
+              "mandatory": false
+            }
+          ]
+        }
+      ],
+      "task_output": []
+    }
+  ]
+}

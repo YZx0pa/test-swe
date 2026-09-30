@@ -21,7 +21,6 @@ from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
 import agent_kit
-import vira_tools
 from terminal import printable
 
 WORKING_STYLE = """
@@ -34,6 +33,16 @@ Working style:
 - Files (write_file etc.) live in a scratch space inside this conversation, not on a real
   disk. Write one only when the user asks for a file or report, and give its path in your
   final answer.
+"""
+
+JENI_WORKING_STYLE = """
+Working style:
+- For a request with several steps or several jobs, plan it first with write_todos and keep
+  the list up to date.
+- Independent per-job work can be delegated with the task tool (general-purpose). Pass every
+  id and value it needs: it cannot see this conversation.
+- Files (write_file etc.) live in a scratch space inside this conversation, not on a real
+  disk. Write one only when the user asks for a file or report.
 """
 
 SOURCING_PROMPT = """You source and score talent through the VIRA tools, for exactly the job and
@@ -64,24 +73,35 @@ def subagents(tools: dict, step_limit: int, ledger: agent_kit.CallLedger) -> lis
          "system_prompt": JD_PROMPT + agent_kit.SYSTEM_PROMPT,
          "tools": [tools["generate_jd"]],
          "middleware": agent_kit.middleware(step_limit, ledger)},
-        # Replaces the auto-added general-purpose subagent, which would otherwise run
-        # the VIRA tools without our guard, call cap or domain rules.
-        {**GENERAL_PURPOSE_SUBAGENT,
-         "system_prompt": GENERAL_PURPOSE_SUBAGENT["system_prompt"] + "\n\n" + agent_kit.SYSTEM_PROMPT,
-         "middleware": agent_kit.middleware(step_limit, ledger)},
+        general_purpose(step_limit, ledger, agent_kit.VIRA),
     ]
 
 
-def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None):
-    tools = vira_tools.langchain_tools()
+def general_purpose(step_limit: int, ledger: agent_kit.CallLedger,
+                    toolset: agent_kit.Toolset) -> dict:
+    """Replaces the auto-added general-purpose subagent, which would otherwise run the
+    tools without our guard, call cap or domain rules.  It gets the main agent's tools."""
+    return {**GENERAL_PURPOSE_SUBAGENT,
+            "system_prompt": GENERAL_PURPOSE_SUBAGENT["system_prompt"] + "\n\n" + toolset.prompt,
+            "middleware": agent_kit.middleware(step_limit, ledger, toolset)}
+
+
+def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
+                toolset: agent_kit.Toolset = agent_kit.VIRA):
+    tools = toolset.tools()
     ledger = agent_kit.CallLedger()
+    if toolset is agent_kit.VIRA:
+        style, helpers = WORKING_STYLE, subagents({t.name: t for t in tools}, step_limit, ledger)
+    else:            # Jeni: no specialists yet, just the guarded general-purpose subagent
+        style, helpers = JENI_WORKING_STYLE, [general_purpose(step_limit, ledger, toolset)]
     return create_deep_agent(
         model=model or agent_kit.build_chat_model(),
         tools=tools,
-        system_prompt=agent_kit.SYSTEM_PROMPT + WORKING_STYLE,
-        subagents=subagents({t.name: t for t in tools}, step_limit, ledger),
-        middleware=[TodoListMiddleware(), *agent_kit.middleware(step_limit, ledger)],
-        interrupt_on=agent_kit.interrupt_on(approve_all) or None,   # subagents inherit it
+        system_prompt=toolset.prompt + style,
+        subagents=helpers,
+        middleware=[TodoListMiddleware(), *agent_kit.middleware(step_limit, ledger, toolset)],
+        # subagents inherit it
+        interrupt_on=agent_kit.interrupt_on(approve_all, toolset=toolset) or None,
         checkpointer=InMemorySaver(),
         name="vira-deepagent",
     )
@@ -97,7 +117,8 @@ def show_files(result: dict) -> None:
 def main(argv=None):
     args = agent_kit.parser("VIRA agent on deepagents.").parse_args(argv)
     agent_kit.setup(args)
-    agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit)
+    agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
+                        toolset=agent_kit.cli_toolset(args))
     agent_kit.repl("deepagents", agent, args, after=show_files)
 
 

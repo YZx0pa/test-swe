@@ -48,6 +48,10 @@ class MockVira:
                 ],
                 "_note": "SYNTHETIC mock response"}}
 
+        if path == "agent_task_group":      # Jeni's tasks (jeni_tools.PATH), assumed endpoint
+            from mock_jeni import run_task_group
+            return run_task_group(body)
+
         if path == "get_match_id_from_profile_id":  # #5, assumed: not on VIRA yet
             job_id, profile_ids = body.get("job_id"), body.get("profile_ids") or []
             if not job_id or not profile_ids:

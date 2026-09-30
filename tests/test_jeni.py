@@ -1,0 +1,352 @@
+"""jeni_tools: Jeni's task catalog as typed tools, on the mock task-group VIRA.
+
+The catalog here is tests/fixtures/jeni_tasks.json (conftest sets JENI_TASKS_FILE): 15 tasks in
+v1's format with v1's field names, but not Jeni's real catalog, which stays out of git.
+"""
+import argparse
+import json
+
+import pytest
+
+import agent_kit
+import grounding
+import jeni_tools
+import mock_jeni
+import recruiter_cli
+import run_deepagent
+import run_langgraph
+import vira_tools
+from conftest import read_audit
+from fakes import call, calls, say, scripted
+from mock_vira import MockVira
+
+vira_tools.configure("mock")
+
+# One valid call per task in the test catalog: every one must complete against the mock.
+VALID = {
+    "create_job": {"job_title": "Data Engineer", "skills": ["Python"], "min_exp": 3, "max_exp": 5},
+    "add_job_skills": {"job_id": 7001, "skills": ["Kafka"]},
+    "clone_job": {"job_id": 7001},
+    "transfer_job_ownership": {"job_id": 7001, "new_owner_user_email": "bob.tan@example.com"},
+    "add_job_collaborators": {"job_id": 7001, "user_ids": [802], "role_id": 5},
+    "publish_job_to_linkedin": {"job_id": 7003},
+    "make_job_private": {"job_id": 7003},
+    "make_job_public": {"job_id": 7001},
+    "shortlist_multiple_application": {"app_ids": [5102, 5103]},
+    "share_application": {"app_ids": [5102], "emails": ["hm@example.com"], "message": "Please review"},
+    "get_applications": {"job_id": 7001},
+    "get_single_application_details": {"app_id": 5102},
+    "create_application_to_job": {"job_id": 7001, "candidate_name": "Maya Lim",
+                                  "candidate_email": "maya.lim@example.com"},
+    "get_single_job_details": {"job_id": 7001},
+    "search_users": {"search_key": "Bob"},
+}
+# The keys of a real VIRA task-group reply (raw_data/response.js), level by level.
+GROUP_KEYS = {"agentTaskGroupUuid", "agentTaskGroupId", "agentTaskGroupKey", "agentTaskGroupName",
+              "agentTaskGroupStatus", "agentSessionUuid", "agentTaskGroupDescription",
+              "agentTaskGroupNo", "createdAt", "updatedAt", "creatorName", "tasks"}
+TASK_KEYS = {"agentTaskId", "agentTaskUuid", "agentTaskGroupId", "agentTaskKey", "agentTaskName",
+             "agentTaskDescription", "agentTaskNo", "agentTaskStatus", "createdAt", "updatedAt",
+             "subTasks"}
+SUB_TASK_KEYS = {"agentSubTaskId", "agentSubTaskUuid", "agentTaskId", "agentSubTaskKey",
+                 "agentSubTaskName", "agentSubTaskDescription", "agentSubTaskNo",
+                 "agentSubTaskStatus", "createdAt", "updatedAt", "agentSubTaskResponse",
+                 "failedReason"}
+
+
+def run(model, task, **build):
+    return agent_kit.run_task(run_langgraph.build_agent(model=model, toolset=agent_kit.toolset("jeni"),
+                                                        **build), task)
+
+
+def tool_messages(result):
+    return {m.tool_call_id: m for m in result["messages"] if m.type == "tool"}
+
+
+def fields_of(entry: dict) -> dict:
+    [task] = entry["body"]["tasks"]
+    [sub] = task["sub_tasks"]
+    return {f["field_name"]: f.get("field_value") for f in sub["fields"]}
+
+
+# --- the catalog -------------------------------------------------------------
+def test_the_catalog_is_read_from_the_configured_file():
+    assert jeni_tools.catalog_path().parts[-2:] == ("fixtures", "jeni_tasks.json")
+    tasks = jeni_tools.load_catalog()
+    assert len(tasks) == 15 and all(len(t["sub_tasks"]) == 1 for t in tasks)
+    assert jeni_tools.names() == set(VALID)
+    fields = {f["field_name"] for t in tasks for f in t["sub_tasks"][0]["fields"]}
+    assert jeni_tools.USER_ONLY <= fields
+
+
+def test_v2s_task_lists_name_real_v1_tasks():
+    # READ_ONLY, FIXED_VALUES and NO_DEFAULT hold tool names; a typo would silently not apply.
+    known = {name.removeprefix("task_") for name in mock_jeni.HANDLERS}
+    assert len(known) == 22 and len(jeni_tools.READ_ONLY) == 6
+    assert jeni_tools.READ_ONLY | set(jeni_tools.FIXED_VALUES) | {t for t, _ in jeni_tools.NO_DEFAULT} <= known
+    assert {t["task_name"] for t in jeni_tools.load_catalog()} <= set(mock_jeni.HANDLERS)
+
+
+def test_a_missing_catalog_is_a_clear_error_and_only_for_jeni(tmp_path, monkeypatch):
+    monkeypatch.setenv("JENI_TASKS_FILE", str(tmp_path / "missing.json"))
+    agent_kit._jeni.cache_clear()
+    with pytest.raises(jeni_tools.CatalogMissing, match="JENI_TASKS_FILE"):
+        jeni_tools.names()
+    with pytest.raises(SystemExit, match="shared internally"):
+        agent_kit.cli_toolset(argparse.Namespace(tools="jeni"))
+    assert agent_kit.cli_toolset(argparse.Namespace(tools="vira")) is agent_kit.VIRA
+    monkeypatch.setenv("JENI_TASKS_FILE", "tests/fixtures/jeni_tasks.json")    # relative: to the repo
+    assert jeni_tools.catalog_path() == jeni_tools.HERE / "tests" / "fixtures" / "jeni_tasks.json"
+    agent_kit._jeni.cache_clear()
+
+
+def test_catalog_from_js_reads_v1s_file_format():
+    js = """const XAGENT_SUBTASK_API_CONFIG_SCHEMA = {
+  "tasks": [
+    {
+      "task_name": "task_a",
+      // "task_name": "task_old",
+      "fields": [1, 2,],
+    },
+  ]
+}
+
+XAGENT_SUBTASK_API_CONFIG_SCHEMA.tasks.forEach(() => {});
+"""
+    assert jeni_tools.catalog_from_js(js) == {"tasks": [{"task_name": "task_a", "fields": [1, 2]}]}
+
+
+def test_every_tool_is_typed_and_described():
+    tools = {t.name: t for t in jeni_tools.langchain_tools()}
+    assert set(tools) == jeni_tools.names()
+    for name, tool in tools.items():
+        schema = tool.tool_call_schema.model_json_schema()
+        task = jeni_tools.catalog()[name]
+        mandatory = {f["field_name"] for f in task["sub_tasks"][0]["fields"] if f["mandatory"]}
+        assert set(schema.get("required", [])) == mandatory - set(jeni_tools.FIXED_VALUES.get(name, {})), name
+        assert all(p.get("description") for p in schema["properties"].values()), name
+        assert ("(read-only)" in tool.description) == (name in jeni_tools.READ_ONLY), name
+
+
+def test_role_has_no_default_and_visibility_is_set_by_the_task(audit_log):
+    role = jeni_tools.models()["add_job_collaborators"].model_json_schema()["properties"]["role_id"]
+    assert role["enum"] == [1, 5] and "default" not in role        # v1 pre-fills 1 (administrator)
+    for name, private in (("make_job_private", True), ("make_job_public", False)):
+        assert "is_private" not in jeni_tools.models()[name].model_fields
+        jeni_tools.run(name, {"job_id": 7001})
+        assert fields_of(read_audit(audit_log)[-1])["is_private"] is private
+
+
+@pytest.mark.parametrize("name,args", [
+    ("share_application", {"app_ids": [5102], "emails": ["not-an-email"], "message": "hi"}),
+    ("share_application", {"app_ids": [5102], "emails": ["<redacted-email>"], "message": "hi"}),
+    ("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 3}),
+    ("add_job_collaborators", {"job_id": 7001, "user_ids": [802]}),
+    ("get_applications", {"job_id": 7001, "limit": 500}),
+    ("get_single_job_details", {"job_id": 0}),
+    ("get_single_job_details", {"job_id": 7001, "extra": 1}),
+    ("add_job_skills", {"job_id": 7001, "skills": [f"s{i}" for i in range(31)]}),
+    ("create_job", {"job_title": "x" * 201}),
+])
+def test_invalid_input_never_reaches_vira(audit_log, name, args):
+    result = jeni_tools.run(name, args)
+    assert result["status"] == "error" and result["message"].startswith("invalid arguments")
+    assert read_audit(audit_log) == []
+
+
+# --- the call and the reply --------------------------------------------------
+def test_a_call_sends_one_task_group_in_v1s_format(audit_log, monkeypatch):
+    paths = []
+    monkeypatch.setattr(recruiter_cli, "_call",
+                        lambda path, query, body, mode: paths.append(path) or MockVira.call(path, query, body))
+    jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
+    [entry] = read_audit(audit_log)
+    assert paths == [jeni_tools.PATH] and entry["command"] == "add-job-collaborators"
+    assert entry["body"]["task_group_name"] == "Jeni v2 - add_job_collaborators"
+    [task] = entry["body"]["tasks"]
+    assert (task["task_name"], task["level"]) == ("task_add_job_collaborators", 1)
+    assert task["sub_tasks"][0]["sub_task_name"] == "sub_task_add_job_collaborators"
+    assert task["sub_tasks"][0]["fields"] == [
+        {"field_name": "job_id", "mandatory": True, "field_value": 7001},
+        {"field_name": "user_ids", "mandatory": True, "field_value": [802]},
+        {"field_name": "role_id", "mandatory": True, "field_value": 5}]
+
+
+def test_the_mock_answers_every_task_in_the_real_reply_shape():
+    for name, args in VALID.items():
+        clean = jeni_tools.models()[name].model_validate(args).model_dump(exclude_none=True)
+        reply = MockVira.call(jeni_tools.PATH, {}, jeni_tools.payload(jeni_tools.catalog()[name], clean))
+        group = reply["result"]
+        assert set(group) == GROUP_KEYS | {"_note"}, name
+        [task] = group["tasks"]
+        [sub] = task["subTasks"]
+        assert set(task) == TASK_KEYS and set(sub) == SUB_TASK_KEYS, name
+        assert (group["agentTaskGroupStatus"], sub["agentSubTaskStatus"]) == ("completed", "completed"), name
+        assert sub["agentSubTaskKey"] == f"sub_{jeni_tools.catalog()[name]['task_name']}"
+
+
+def test_the_model_sees_only_the_sub_task_result():
+    for name, args in VALID.items():
+        result = jeni_tools.run(name, args)
+        assert set(result) == {"status", "task_status", "failed_reason", "result"}, name
+        assert result["status"] == "ok" and result["task_status"] == "completed", name
+        text = json.dumps(result)
+        assert "creatorName" not in text and "agentTaskGroupUuid" not in text, name
+
+
+def test_a_failed_task_says_why():
+    assert jeni_tools.run("get_single_job_details", {"job_id": 4242}) == {
+        "status": "error", "task_status": "failed", "failed_reason": "Job 4242 not found",
+        "result": None}
+    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["failed_reason"] == (
+        "Job must be open and public before publishing to LinkedIn")
+    payload = jeni_tools.payload(jeni_tools.catalog()["clone_job"], {})
+    sub = MockVira.call(jeni_tools.PATH, {}, payload)["result"]["tasks"][0]["subTasks"][0]
+    assert sub["failedReason"] == "Missing mandatory field(s): job_id"
+
+
+def test_partial_success_is_visible():
+    result = jeni_tools.run("add_job_collaborators",
+                            {"job_id": 7001, "user_ids": [802, 999], "role_id": 5})
+    assert result["status"] == "ok"
+    assert [p["userId"] for p in result["result"]["passedArr"]] == [802]
+    assert [f["userId"] for f in result["result"]["failedArr"]] == [999]
+
+
+def test_people_in_results_are_masked_but_their_ids_are_not():
+    apps = json.dumps(jeni_tools.run("get_applications", {"job_id": 7001}))
+    assert "@example.com" not in apps and "Mock Candidate" not in apps and "5102" in apps
+    users = jeni_tools.run("search_users", {"search_key": "Bob"})["result"]["users"]
+    assert users == [{"userId": 802, "firstName": "<redacted>", "lastName": "<redacted>",
+                      "email": "<redacted>"}]
+
+
+def test_candidate_details_are_masked_in_the_audit_log(audit_log):
+    jeni_tools.run("create_application_to_job", VALID["create_application_to_job"])
+    [entry] = read_audit(audit_log)
+    fields = fields_of(entry)
+    assert fields["candidate_name"] == fields["candidate_email"] == "<redacted>"
+    assert fields["job_id"] == 7001 and "Maya" not in json.dumps(entry)
+
+
+def test_creator_and_owner_names_are_masked():
+    masked = recruiter_cli._mask_pii({"creatorName": "A B", "ownerName": "C", "jobName": "Data Analyst",
+                                      "agentTaskGroupName": "Add collaborator"})
+    assert masked == {"creatorName": "<redacted>", "ownerName": "<redacted>",
+                      "jobName": "Data Analyst", "agentTaskGroupName": "Add collaborator"}
+
+
+# --- the agent -----------------------------------------------------------------
+def test_a_user_found_by_search_is_added_by_their_id(audit_log):
+    result = run(scripted(
+        calls(call("search_users", {"search_key": "Bob"}, "c1")),
+        calls(call("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5}, "c2")),
+        say("Bob is now a team member on job 7001.")), "Assign job 7001 to Bob as a team member.")
+    assert all(m.status != "error" for m in tool_messages(result).values())
+    audit = read_audit(audit_log)
+    assert [a["command"] for a in audit] == ["search-users", "add-job-collaborators"]
+    assert fields_of(audit[1])["user_ids"] == [802]
+
+
+def test_a_new_jobs_id_is_used_in_the_next_call(audit_log):
+    new_id = mock_jeni.created_job_id("Data Engineer")
+    result = run(scripted(
+        calls(call("create_job", {"job_title": "Data Engineer"}, "c1")),
+        calls(call("add_job_skills", {"job_id": new_id, "skills": ["Spark"]}, "c2")),
+        say(f"Created job {new_id} and added Spark.")), "Create a Data Engineer job, then add Spark to it.")
+    assert all(m.status != "error" for m in tool_messages(result).values())
+    assert [fields_of(a).get("job_id") for a in read_audit(audit_log)] == [None, new_id]
+
+
+def test_an_invented_user_id_is_refused(audit_log):
+    result = run(scripted(
+        calls(call("add_job_collaborators", {"job_id": 7001, "user_ids": [804], "role_id": 5}, "c1")),
+        say("Stopped.")), "Add Dana to job 7001 as a team member.")
+    refused = tool_messages(result)["c1"]
+    assert refused.status == "error" and "804 isn't in the task or any earlier result" in refused.text
+    assert read_audit(audit_log) == []
+
+
+def test_a_user_id_is_not_an_application_id(audit_log):
+    result = run(scripted(
+        calls(call("search_users", {"search_key": "Bob"}, "c1")),
+        calls(call("shortlist_multiple_application", {"app_ids": [802]}, "c2")),
+        say("Stopped.")), "Shortlist Bob.")
+    refused = tool_messages(result)["c2"]
+    assert refused.status == "error" and "802 is a user_id" in refused.text
+    assert [a["command"] for a in read_audit(audit_log)] == ["search-users"]
+
+
+def test_an_email_the_user_never_gave_is_refused(audit_log):
+    result = run(scripted(
+        calls(call("share_application", {"app_ids": [5102], "emails": ["hiring.manager@example.com"],
+                                         "message": "Please review"}, "c1")),
+        say("Which email should I share it with?")),
+        "Share the CV of applicant 5102 with the hiring manager.")
+    refused = tool_messages(result)["c1"]
+    assert refused.status == "error" and "emails must be exactly what the user wrote" in refused.text
+    assert "hiring.manager" not in refused.text                     # the value isn't echoed
+    assert read_audit(audit_log) == []
+
+
+def test_an_email_the_user_gave_is_used(audit_log):
+    run(scripted(
+        calls(call("share_application", {"app_ids": [5102], "emails": ["HM@example.com"],
+                                         "message": "Please review"}, "c1")),
+        say("Shared.")), "Share applicant 5102's CV with hm@example.com.")
+    [entry] = read_audit(audit_log)
+    assert entry["command"] == "share-application" and fields_of(entry)["emails"] == "<redacted>"
+
+
+def test_real_mode_gates_every_task_that_changes_data(monkeypatch):
+    jeni = agent_kit.toolset("jeni")
+    writes = jeni_tools.names() - jeni_tools.READ_ONLY
+    assert len(writes) == 11                        # of the test catalog's 15 (Jeni's real one: 16 of 22)
+    assert agent_kit.interrupt_on(False, "mock", toolset=jeni) == {}
+    assert set(agent_kit.interrupt_on(False, "real", toolset=jeni)) == writes
+    assert set(agent_kit.interrupt_on(True, "mock", toolset=jeni)) == jeni_tools.names()
+
+
+def test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read(monkeypatch, audit_log):
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    monkeypatch.setattr(recruiter_cli, "_call", lambda path, query, body, mode: MockVira.call(path, query, body))
+    asked = []
+
+    def decide(request):
+        asked.extend(a["name"] for a in request["action_requests"])
+        return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
+
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
+        calls(call("search_users", {"search_key": "Bob"}, "c1")),
+        calls(call("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5}, "c2")),
+        say("Declined.")))
+    agent_kit.run_task(agent, "Assign job 7001 to Bob as a team member.", decide=decide)
+    assert asked == ["add_job_collaborators"]
+    assert [a["command"] for a in read_audit(audit_log)] == ["search-users"]
+
+
+def test_deepagents_gets_the_jeni_tasks_behind_the_guard(audit_log):
+    # main agent -> general-purpose subagent, which has no 802 in its own context
+    model = scripted(
+        calls(call("task", {"description": "Add Bob to job 7001 as a team member.",
+                            "subagent_type": "general-purpose"}, "t1")),
+        calls(call("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5}, "s1")),
+        say("refused: no user id for Bob"),
+        say("I need Bob's user id."))
+    agent = run_deepagent.build_agent(model=model, toolset=agent_kit.toolset("jeni"))
+    agent_kit.run_task(agent, "Add Bob to job 7001 as a team member.")
+    assert jeni_tools.names() | {"write_todos", "task"} <= set(model.offered[0])
+    assert read_audit(audit_log) == []
+
+
+def test_the_cli_picks_the_toolset():
+    args = agent_kit.parser("x").parse_args(["--tools", "jeni"])
+    assert agent_kit.cli_toolset(args) is agent_kit.toolset("jeni")
+    assert agent_kit.parser("x").parse_args([]).tools == "vira"
+
+
+def test_camel_case_result_keys_count_as_id_kinds():
+    result = '{"users": [{"userId": 802}], "jobId": 7001}'
+    assert grounding._id_keys(result) == {802: {"user_id"}, 7001: {"job_id"}}
+    [entry] = grounding.ground_args({"app_ids": [802]}, [("task", "x"), ("step 2", result)])["app_ids"]
+    assert entry["misused_as"] == "user_id"

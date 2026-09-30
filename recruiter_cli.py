@@ -106,7 +106,7 @@ PII_KEYS = {"email", "emails", "name", "names", "candidate_name", "candidate_ema
 _PII_WORD = re.compile(r"(^|_)(e?mails?|phones?|mobile|tel|telephone|address(es)?|resume|cv|"
                        r"dob|nric|ssn|passport|linkedin|photo|avatar)(_|$)")
 _PII_NAME = re.compile(r"^(first|last|full|middle|given|family|sur|user|candidate|applicant|"
-                       r"contact|display|person|legal)_?names?$")
+                       r"contact|display|person|legal|creator|owner)_?names?$")
 # Inside any string value (free-text summaries, a non-JSON reply): emails, and phone
 # numbers written in groups or with a "+" (8+ digits; bare digit runs, like ids, stay).
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -136,10 +136,15 @@ def _mask_pii(obj: Any) -> Any:
 
     Real deployment: swap this for your existing vault mask.  Here it redacts
     candidate fields by key name and pattern, and emails and phone numbers
-    inside any string.  Names inside free text are not detected.
+    inside any string.  Names inside free text are not detected.  A
+    {"field_name": ..., "field_value": ...} pair (Jeni's task payloads) counts
+    as a key and its value.
     """
     if isinstance(obj, dict):
-        return {k: ("<redacted>" if _is_pii_key(k) else _mask_pii(v)) for k, v in obj.items()}
+        pair_is_pii = "field_value" in obj and _is_pii_key(obj.get("field_name", ""))
+        return {k: ("<redacted>" if _is_pii_key(k) or (pair_is_pii and k == "field_value"
+                                                     and v is not None)
+                    else _mask_pii(v)) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_mask_pii(x) for x in obj]
     if isinstance(obj, str):

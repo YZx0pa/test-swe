@@ -22,10 +22,13 @@ import mini_policy
 
 VIRA_TOOLS = {"find_talents", "get_match_id_from_profile_id", "generate_jd",
               "score_candidates", "candidate_insights"}
-# An id argument may only take ids that appeared as the same kind of id.
+# An id argument may only take ids that appeared as the same kind of id.  Result keys are
+# compared in snake case, so VIRA's camelCase jobId / appId / userId count too.
 ID_KINDS = {"job_ids": {"job_id", "job_ids"}, "job_id": {"job_id", "job_ids"},
             "profile_ids": {"profile_id", "profile_ids"},
-            "app_ids": {"app_id", "app_ids"}, "match_ids": {"match_id", "match_ids"}}
+            "app_ids": {"app_id", "app_ids"}, "app_id": {"app_id", "app_ids"},
+            "match_ids": {"match_id", "match_ids"},
+            "user_ids": {"user_id", "user_ids"}}
 _ALL_ID_KEYS = set().union(*ID_KINDS.values())
 LANGUAGES = {"ar": "arabic", "en": "english", "fr": "french", "de": "german",
              "es": "spanish", "hi": "hindi", "zh": "chinese", "ur": "urdu"}
@@ -76,7 +79,7 @@ def _id_keys(text: str) -> dict[int, set[str]]:
     def walk(node, key=None):
         if isinstance(node, dict):
             for k, v in node.items():
-                walk(v, k)
+                walk(v, re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(k)).lower())
         elif isinstance(node, list):
             for v in node:
                 walk(v, key)
@@ -141,8 +144,11 @@ def _answer_step(i: int, text: str, sources) -> dict:
     return {"i": i, "kind": "answer", "text": text, "numbers": ground_answer(text, sources)}
 
 
-def trace_from_messages(messages, task: str) -> list[dict]:
-    """Steps of a LangChain/LangGraph run (create_agent or deepagents main agent)."""
+def trace_from_messages(messages, task: str, tools=VIRA_TOOLS) -> list[dict]:
+    """Steps of a LangChain/LangGraph run (create_agent or deepagents main agent).
+
+    `tools`: the VIRA tool names whose arguments get provenance (jeni_tools.names() for Jeni).
+    """
     steps, sources, answer = [], [("task", task)], ""
     for m in messages:
         if m.type == "ai":
@@ -150,7 +156,7 @@ def trace_from_messages(messages, task: str) -> list[dict]:
                 steps.append({"i": len(steps) + 1, "kind": "note", "text": m.text})
             for tc in m.tool_calls:
                 step = {"i": len(steps) + 1, "kind": "call", "tool": tc["name"], "args": tc["args"]}
-                if tc["name"] in VIRA_TOOLS:
+                if tc["name"] in tools:
                     step["provenance"] = ground_args(tc["args"], sources)
                 steps.append(step)
             if not m.tool_calls:
@@ -266,12 +272,13 @@ def trace_from_mini(messages: list[dict], task: str) -> list[dict]:
     return steps
 
 
-def reground(steps: list[dict], task: str, *, mini: bool = False) -> list[dict]:
+def reground(steps: list[dict], task: str, *, mini: bool = False,
+             tools=VIRA_TOOLS) -> list[dict]:
     """Recompute provenance on a stored trace (e.g. one recorded by an older checker)."""
     sources, out = [("task", task)], []
     for st in steps:
         st = dict(st)
-        if st["kind"] == "call" and st.get("tool") in VIRA_TOOLS:
+        if st["kind"] == "call" and st.get("tool") in tools:
             st["provenance"] = ground_args(st.get("args") or {}, sources)
         elif st["kind"] == "answer":
             st["numbers"] = ground_answer(st.get("text", ""), sources)
