@@ -86,7 +86,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
-| `tests/` | 284 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 288 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -429,7 +429,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 284 tests
+.venv/bin/python -m pytest -q                                   # offline, 288 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -592,10 +592,19 @@ What v1's catalog shows, and what v2 changes (proposals for engineering):
   the 22 tasks with their own fields.
 
 The mock (`mock_jeni.py`) holds synthetic jobs (7001–7003), users (801–803), applications
-(5101–5104, 5201–5202) and suggested and self-sourcing candidates. It is stateless: a created
-job's id comes from its title (`created_job_id`), and changes are reported but not remembered.
-It enforces one VIRA rule the catalog states in prose: publishing to LinkedIn needs an open,
-public job.
+(5101–5104, 5201–5202) and suggested and self-sourcing candidates. By default it is stateless:
+every task group starts from those fixtures, a created job's id comes from its title
+(`created_job_id`), and changes are reported but not remembered, so repeated and parallel runs
+agree (tests, `compare_agents`). It enforces one VIRA rule the catalog states in prose:
+publishing to LinkedIn needs an open, public job.
+
+`mock_jeni.remember_changes()` switches it to one `State` that lives across calls, for the demo:
+skills, visibility, status, teams, owners, stages and LinkedIn postings stick, a created
+job or application gets an id of its own and is found by the db lookups
+(`State.db_fixtures()` lists are refilled in place), and `reset()` goes back to the fixtures.
+The kept State also logs every sub-task it ran (`activity`) with ids, skills, titles and flags
+only, never names, emails or search text; `snapshot()` is what the demo's data panel shows.
+`forget_changes()` makes it stateless again.
 
 Open points:
 - **People are masked in results,** so after `search_users` the agent picks a person by id. With

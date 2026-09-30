@@ -4,11 +4,13 @@ The catalog here is tests/fixtures/jeni_tasks.json (conftest sets JENI_TASKS_FIL
 v1's format with v1's field names, but not Jeni's real catalog, which stays out of git.
 """
 import argparse
+import asyncio
 import json
 
 import pytest
 
 import agent_kit
+import db_queries
 import grounding
 import jeni_eval
 import jeni_tools
@@ -240,6 +242,81 @@ def test_creator_and_owner_names_are_masked():
                                       "agentTaskGroupName": "Add collaborator"})
     assert masked == {"creatorName": "<redacted>", "ownerName": "<redacted>",
                       "jobName": "Data Analyst", "agentTaskGroupName": "Add collaborator"}
+
+
+# --- the mock's memory (the demo) ------------------------------------------------
+@pytest.fixture
+def kept():
+    """remember_changes() for one test, from the fixtures, and stateless again after it."""
+    state = mock_jeni.remember_changes()
+    state.reset()
+    yield state
+    mock_jeni.forget_changes()
+
+
+def test_the_mock_forgets_changes_by_default():
+    assert jeni_tools.run("make_job_public", {"job_id": 7001})["status"] == "ok"
+    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "error"
+    jeni_tools.run("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]})
+    details = jeni_tools.run("get_single_job_details", {"job_id": 7001})["result"]
+    assert details["skills"] == ["Python", "Go", "PostgreSQL"] and details["isPrivate"] is True
+    assert mock_jeni.JOBS[7001]["skills"] == ["Python", "Go", "PostgreSQL"]
+
+
+def test_a_kept_state_remembers_what_changed(kept):
+    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "error"
+    jeni_tools.run("make_job_public", {"job_id": 7001})
+    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "ok"
+    jeni_tools.run("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]})
+    jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
+    details = jeni_tools.run("get_single_job_details", {"job_id": 7001})["result"]
+    assert details["skills"][-1] == "Kafka" and details["isPrivate"] is False
+    assert details["publishedToLinkedIn"] is True
+    assert details["collaborators"] == [{"userId": 802, "roleId": 5}]
+    again = jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
+    assert again["result"]["passedArr"] == [] and len(again["result"]["existingArr"]) == 1
+    jeni_tools.run("shortlist_multiple_application", {"app_ids": [5102, 5103]})
+    stages = {a["appId"]: a["stage"]
+              for a in jeni_tools.run("get_applications", {"job_id": 7001})["result"]["applications"]}
+    assert stages == {5101: "applied", 5102: "shortlisted", 5103: "shortlisted", 5104: "applied"}
+    assert mock_jeni.JOBS[7001]["isPrivate"] is True and mock_jeni.APPLICATIONS[5102][2] == "applied"
+
+
+def test_a_created_job_and_candidate_are_found_by_the_db_lookups(kept):
+    queries = db_queries.fake_db_queries(kept.db_fixtures(5143))
+    context = {"auth_profile": {"company_id": 5143}}
+
+    def lookup(name, inputs):
+        return asyncio.run(queries[name].handler(inputs, context))
+
+    assert lookup("find_job_by_title", {"title": "Data Engineer"})["status"] == "not_found"
+    job_id = jeni_tools.run("create_job", VALID["create_job"])["result"]["jobId"]
+    assert job_id == mock_jeni.created_job_id("Data Engineer")
+    assert lookup("find_job_by_title", {"title": "Data Engineer"}) == {
+        "status": "resolved", "resolved_fields": {"job_id": job_id}}
+    app_id = jeni_tools.run("create_application_to_job", {**VALID["create_application_to_job"],
+                                                          "job_id": job_id})["result"]["appId"]
+    assert lookup("list_job_applications", {"job_id": job_id})["applications"] == [app_id]
+    assert jeni_tools.run("create_job", VALID["create_job"])["result"]["jobId"] == job_id + 1
+    kept.reset()
+    assert lookup("find_job_by_title", {"title": "Data Engineer"})["status"] == "not_found"
+    assert jeni_tools.run("get_single_job_details", {"job_id": job_id})["status"] == "error"
+
+
+def test_the_activity_log_keeps_ids_not_names_or_emails(kept):
+    jeni_tools.run("create_application_to_job", VALID["create_application_to_job"])
+    jeni_tools.run("share_application", VALID["share_application"])
+    jeni_tools.run("search_users", {"search_key": "Bob"})
+    jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})
+    create, share, search, publish = kept.snapshot()["activity"]
+    assert create["task"] == "create_application_to_job" and create["fields"] == {"job_id": 7001}
+    assert create["created"] == mock_jeni.created_app_id("maya.lim@example.com")
+    assert share["fields"] == {"app_ids": [5102], "recipients": 1}
+    assert search["fields"] == {}
+    assert (publish["status"], publish["reason"]) == (
+        "failed", "Job must be open and public before publishing to LinkedIn")
+    text = json.dumps(kept.snapshot())
+    assert "@" not in text and "Maya" not in text and "Mock Candidate" not in text
 
 
 # --- the agent -----------------------------------------------------------------
