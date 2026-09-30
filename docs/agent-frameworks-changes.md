@@ -144,7 +144,7 @@ Check the pinned set for known vulnerabilities (this sends package names and ver
 advisory API):
 
 ```bash
-pip-audit -r requirements.lock.txt --disable-pip     # "No known vulnerabilities found" on 2026-09-30
+pip-audit -r requirements.lock.txt --disable-pip     # "No known vulnerabilities found" on 2026-10-01
 ```
 
 Configuration comes from `.env`, which is gitignored and loaded by the programs themselves.
@@ -630,6 +630,7 @@ the proposals for engineering are in
 | `agent_kit.py` (db) | `toolset("jeni_db", query_tools=…, context=…)`: Jeni's tasks plus the db tools, one prompt with both rule sets. `arun_task`, `arun_and_show` and `arepl` drive a graph with async tools. `--dsn` and `--company-id` where `jeni_db` is offered. |
 | `run_langgraph.py` (db) | `jeni_db` runs in one `asyncio.run(amain())`: the asyncpg pool (checked with `SELECT 1`, clear errors for a bad DSN or a missing driver), the tools and every turn share one event loop. The database follows `--mode`: mock answers from `mock_jeni.db_fixtures()` so the ids agree with the task mock; real needs `--dsn` or `$TRON_POSTGRES_DSN`. |
 | `requirements.txt`, `requirements.lock.txt` (db) | `asyncpg==0.31.0` for `jeni_db` in real mode; the lock is regenerated with every other pin kept (139 packages, no known vulnerabilities on 2026-09-30). |
+| `requirements.lock.txt` (pyjwt) | pyjwt 2.14.0 → 2.15.1 for CVE-2026-101918, published after the lock was audited: a deeply nested token payload raised an uncaught `RecursionError` in `jwt.decode` (medium; our code never calls pyjwt, `mcp` and `langgraph-api` pull it in). Every other pin is unchanged, and the command in the lock's header reproduces it. |
 | `mock_jeni.py` (db) | `db_fixtures(company_id)`: the mock's jobs, users and applications as fixtures for the db lookups. |
 | `mock_jeni.py` (demo) | Handlers read and change a `State`: a fresh one per task group by default, so nothing changes for tests or `compare_agents`. `remember_changes()` keeps one across calls (changes stick, created jobs and applications get their own ids and show up in `State.db_fixtures()`), with `reset()`, an `activity` log of ids and flags only, and `snapshot()` for the demo's data panel. |
 | `.gitignore`, `.env.example` | `config/*` is ignored except its README; `JENI_TASKS_FILE` is listed with its default. |
