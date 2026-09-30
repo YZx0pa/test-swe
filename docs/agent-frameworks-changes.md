@@ -678,6 +678,7 @@ and every write gated, plus a live data panel. Design and security notes are in
 | `demo/app.py`, `demo/panel.html` | `GET /demo` (the panel), `GET /demo/state`, `POST /demo/reset`. The panel shows jobs, teams and applicants, and every sub-task that reached the mock; it polls every second and highlights changes. |
 | `requirements-demo.txt`, `requirements-demo.lock.txt` | `langgraph-cli[inmem]==0.4.32` on top of `requirements.txt`; the hashed lock keeps every pin of `requirements.lock.txt` (147 packages). |
 | `tests/test_demo.py` | 8 offline tests (section 3). |
+| `demo/ui/` | [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) (MIT) at upstream commit `cf72cb0` (2026-09-28), as published without its `.github/`: a Next.js chat for any LangGraph server that renders approval requests. Vendored so the demo can't change when upstream does; every local change is in the commit after it. |
 
 ### Modified files
 
