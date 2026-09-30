@@ -6,9 +6,10 @@ All domain "weight" lives HERE (outside mini's core, where the model can't
 reach it): endpoint routing, query-vs-body split, auth headers from env,
 PII masking, an audit log, and a confirm-gate for dangerous actions.
 
-The same guarded path is importable: execute() and the four typed actions
-(find_talents, generate_jd, score_candidates, candidate_insights) back
-vira_tools.py (LangGraph, deepagents, MCP) and run_workflow.py.
+The same guarded path is importable: execute() and the typed actions
+(find_talents, generate_jd, score_candidates, candidate_insights,
+get_match_id_from_profile_id) back vira_tools.py (LangGraph, deepagents, MCP)
+and run_workflow.py.
 
 Design notes tied to the four real curls you gave:
   * base url + 3 header auth (x-api-key / x-client-name / x-user-id), read
@@ -17,6 +18,8 @@ Design notes tied to the four real curls you gave:
     and some in the JSON BODY.  Each subcommand declares which is which.
   * #3 and #4 hit the SAME endpoint (candidate_score_calculation) with
     different query params, so they are two subcommands, one path.
+  * #5 get-match-id-from-profile-id is an ASSUMED endpoint (no curl yet):
+    mock mode answers it; real mode sends it to VIRA like the others.
 
 Run modes (--mode is required, so nothing reaches VIRA by default):
   --mode real  -> calls VIRA at $VIRA_BASE_URL (your localhost).
@@ -78,12 +81,12 @@ MAX_ITEMS = 30           # entries per list argument
 LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")    # en, ar, zh-CN, zh-Hans
 
 # Dangerous subcommands require --confirmed (structural gate, not a prompt
-# request).  The four AI endpoints here are read/compute only, so this is
+# request).  The endpoints here are read/compute only, so this is
 # empty; add names here the moment a write/notify/irreversible action is added.
 NEEDS_CONFIRM: set[str] = set()
 
 # Fields whose values may ONLY come from explicit user input — the model is
-# never allowed to invent them.  (None needed for these four; kept for parity
+# never allowed to invent them.  (None needed for these; kept for parity
 # with the CRUD tool where app_ids/emails live.)
 USER_ONLY_FIELDS: set[str] = set()
 
@@ -142,19 +145,7 @@ def _mask_pii(obj: Any) -> Any:
     if isinstance(obj, str):
         return _scrub_text(obj)
     return obj
-# def cmd_get_match_id(ns):
-#     # "assume this endpoint exists" — synthesize a real-shaped response locally,
-#     # even in --mode real, since the server may not have it yet.
-#     pids = _csv_int(ns.profile_ids)
-#     result = {
-#         "status": "ok",
-#         "http_status": 200,
-#         "result": {
-#             "matches": [{"profile_id": p, "match_id": p + 500000} for p in pids]
-#         },
-#     }
-#     _audit("get-match-id", {}, {"profile_ids": pids}, result)   # keep it in the audit log
-#     _emit(result)
+
 
 def _audit(cmd: str, query: Dict, body: Dict, result: Dict, error: str | None = None) -> None:
     entry = {"ts": _now(), "command": cmd, "query": _mask_pii(query), "body": _mask_pii(body),
@@ -362,6 +353,20 @@ def candidate_insights(app_ids: list[int] | None = None, match_ids: list[int] | 
                    mode=mode, confirmed=confirmed)
 
 
+def get_match_id_from_profile_id(job_id: int, profile_ids: list[int], *,
+                                 mode: str, confirmed: bool = False) -> Dict:
+    # #5 ASSUMED endpoint: VIRA doesn't have it yet, so only --mode mock answers it.
+    # Params all in BODY.  A match is one profile for one job, hence the job_id.
+    problem = _input_problem(ids={"job_id": [job_id], "profile_ids": profile_ids})
+    if problem:
+        return _error(problem)
+    return execute("get-match-id-from-profile-id", "get_match_id_from_profile_id",
+                   query={},
+                   body={"job_id": job_id,
+                         "profile_ids": profile_ids},
+                   mode=mode, confirmed=confirmed)
+
+
 # --- CLI subcommands: parse the CSV flags, call the typed action -------------
 def _finish(result: Dict) -> None:
     _emit(result)
@@ -390,6 +395,10 @@ def cmd_score_candidates(ns):
 
 def cmd_candidate_insights(ns):
     _finish(candidate_insights(_csv_int(ns.app_ids), _csv_int(ns.match_ids), **_opts(ns)))
+
+
+def cmd_get_match_id_from_profile_id(ns):
+    _finish(get_match_id_from_profile_id(ns.job_id, _csv_int(ns.profile_ids), **_opts(ns)))
 
 
 # --- argparse wiring --------------------------------------------------------
@@ -430,9 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--match-ids", dest="match_ids", default="", help="csv of match ids")
     s.set_defaults(func=cmd_candidate_insights)
 
-    # s = sub.add_parser("get-match-id", allow_abbrev=False, help="Convert profile_ids to match_ids (assumed endpoint).")
-    # s.add_argument("--profile-ids", dest="profile_ids", required=True)
-    # s.set_defaults(func=cmd_get_match_id)
+    s = sub.add_parser("get-match-id-from-profile-id", allow_abbrev=False,
+                       help="Look up match ids of suggested talents for a job (read; assumed).")
+    s.add_argument("--job-id", dest="job_id", type=int, required=True)
+    s.add_argument("--profile-ids", dest="profile_ids", required=True, help="csv of profile ids")
+    s.set_defaults(func=cmd_get_match_id_from_profile_id)
     return p
 
 

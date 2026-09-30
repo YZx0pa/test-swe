@@ -1,7 +1,7 @@
 """Typed VIRA tools — the model-facing contract for every non-bash runtime.
 
 mini-swe-agent sees VIRA as a CLI (recruiter_cli.py + commands.md).  Every
-other runtime sees these four typed functions instead: LangGraph and
+other runtime sees these typed functions instead: LangGraph and
 deepagents via langchain_tools(), any MCP client via vira_mcp.py.  The
 signatures (Annotated + pydantic Field) and docstrings ARE the tool schema
 and description the model gets, so edit them like you'd edit commands.md.
@@ -51,7 +51,7 @@ def _call(action: Callable[..., Dict], *args, **kwargs) -> Dict:
         return {"status": "error", "message": f"VIRA call failed ({type(exc).__name__})"}
 
 
-# --- the four tools ----------------------------------------------------------
+# --- the tools ---------------------------------------------------------------
 def find_talents(
     job_ids: Annotated[list[Id], Field(
         min_length=1, max_length=vira.MAX_IDS, description="Job ids to source talents for.")],
@@ -62,9 +62,24 @@ def find_talents(
 
     Returns profile_id values and their scores (overall_score, skill_score,
     job_name_similarity). These are profile ids: they are neither match ids
-    nor application ids.
+    nor application ids. To score them, get their match ids from
+    get_match_id_from_profile_id first.
     """
     return _call(vira.find_talents, job_ids, profile_ids or [])
+
+
+def get_match_id_from_profile_id(
+    job_id: Annotated[Id, Field(description="The job the talents were found for.")],
+    profile_ids: Annotated[list[Id], Field(
+        min_length=1, max_length=vira.MAX_IDS,
+        description="profile_id values that find_talents returned for that job.")],
+) -> Dict[str, Any]:
+    """Look up the match ids of suggested talents for one job (read-only).
+
+    Returns matches[] with a profile_id and its match_id. Pass those match_id
+    values to score_candidates or candidate_insights.
+    """
+    return _call(vira.get_match_id_from_profile_id, job_id, profile_ids)
 
 
 def generate_jd(
@@ -103,7 +118,9 @@ def score_candidates(
     app_ids: Annotated[list[Id] | None, Field(
         max_length=vira.MAX_IDS, description="Application ids (applicants who applied).")] = None,
     match_ids: Annotated[list[Id] | None, Field(
-        max_length=vira.MAX_IDS, description="Match ids of suggested talents. Not profile ids.")] = None,
+        max_length=vira.MAX_IDS,
+        description="Match ids of suggested talents, from get_match_id_from_profile_id. "
+                    "Not profile ids.")] = None,
 ) -> Dict[str, Any]:
     """Trigger CV scoring (composite score + briq) for applicants and/or suggested talents.
 
@@ -128,11 +145,12 @@ def candidate_insights(
     return _call(vira.candidate_insights, app_ids, match_ids or [])
 
 
-TOOLS = [find_talents, generate_jd, score_candidates, candidate_insights]
+TOOLS = [find_talents, get_match_id_from_profile_id, generate_jd, score_candidates,
+         candidate_insights]
 NAMES = {fn.__name__ for fn in TOOLS}
 # Pure reads.  score/insights *trigger* calculations on VIRA (e.g. recal_briq),
 # so they are advertised as idempotent, not read-only.
-READ_ONLY = {"find_talents", "generate_jd"}
+READ_ONLY = {"find_talents", "get_match_id_from_profile_id", "generate_jd"}
 
 
 def description(fn: Callable) -> str:
@@ -140,6 +158,6 @@ def description(fn: Callable) -> str:
 
 
 def langchain_tools() -> list:
-    """The four tools as LangChain StructuredTools (LangGraph, deepagents)."""
+    """The tools as LangChain StructuredTools (LangGraph, deepagents)."""
     from langchain_core.tools import StructuredTool
     return [StructuredTool.from_function(fn, description=description(fn)) for fn in TOOLS]

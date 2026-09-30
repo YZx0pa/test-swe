@@ -4,12 +4,21 @@ Flags:
   --job-ids CSV     (REQUIRED) job ids to source talents for
   --profile-ids CSV (optional) specific profile ids to consider
 Returns: profile_id values AND their scores (overall_score, skill_score, job_name_similarity).
+To score these talents, get their match ids with get-match-id-from-profile-id first.
+
+### get-match-id-from-profile-id
+Look up the match ids of suggested talents for one job (read-only).
+Flags:
+  --job-id INT      (REQUIRED) the job the talents were found for
+  --profile-ids CSV (REQUIRED) profile ids that find-talents returned for that job
+Returns: matches[] with a profile_id and its match_id. Pass those match_id values to
+score-candidates or candidate-insights with --match-ids.
 
 ### score-candidates
 Trigger CV scoring calculation (composite + briq).
 Flags:
   --app-ids CSV   (optional) application ids (applicants who applied)
-  --match-ids CSV (optional) match ids (from get-match-id, for suggested talents)
+  --match-ids CSV (optional) match ids (from get-match-id-from-profile-id, for suggested talents)
 Returns: scores[] with composite_score and briq per id.
 
 ### generate-jd

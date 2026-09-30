@@ -28,6 +28,8 @@ FIND = "python3 recruiter_cli.py --mode mock find-talents --job-ids 123"
      ("cli", ["score-candidates", "--app-ids", "11"])),
     ('python3 recruiter_cli.py generate-jd --job-title "R&D Lead; Ops"',
      ("cli", ["generate-jd", "--job-title", "R&D Lead; Ops"])),
+    ("python3 recruiter_cli.py get-match-id-from-profile-id --job-id 123 --profile-ids 900001",
+     ("cli", ["get-match-id-from-profile-id", "--job-id", "123", "--profile-ids", "900001"])),
 ])
 def test_allowed_commands(command, expected):
     assert mini_policy.parse(command, "mock") == expected
@@ -139,6 +141,15 @@ def test_real_mock_subprocess_reaches_mock_vira_and_the_audit_log(audit_log):
     profiles = json.loads(out["output"])["result"]["suggested_profiles"]
     assert [p["profile_id"] for p in profiles] == [900001, 900002, 900003]
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
+
+
+def test_match_id_lookup_runs_through_mini_and_needs_no_approval(audit_log):
+    assert "get-match-id-from-profile-id" not in mini_policy.SIDE_EFFECTS    # a read, like find
+    out = run(env_for(audit_log), "python3 recruiter_cli.py get-match-id-from-profile-id "
+                                  "--job-id 123 --profile-ids 900001,900002")
+    assert out["returncode"] == 0
+    matches = json.loads(out["output"])["result"]["matches"]
+    assert [m["match_id"] for m in matches] == [123900001, 123900002]
 
 
 def test_argparse_errors_reach_the_model_but_tracebacks_do_not(audit_log, tmp_path):

@@ -18,6 +18,14 @@ def _score(n: int, salt: int) -> float:
     return round(0.55 + (n * salt % 41) / 100, 2)
 
 
+def _match_id(job_id: int, profile_id: int) -> int:
+    """Deterministic match id for one profile on one job: job 123, profile 900001 -> 123900001.
+
+    Never equal to a mock profile id, so a profile id passed as a match id stays detectable.
+    """
+    return job_id * 1_000_000 + profile_id % 1_000_000
+
+
 _INSIGHTS = ["strong backend fit", "solid data-engineering background",
              "good culture add; needs Go ramp-up"]
 
@@ -38,6 +46,17 @@ class MockVira:
                     {"profile_id": 900002, "match_score": 0.87},
                     {"profile_id": 900003, "match_score": 0.83},
                 ],
+                "_note": "SYNTHETIC mock response"}}
+
+        if path == "get_match_id_from_profile_id":  # #5, assumed: not on VIRA yet
+            job_id, profile_ids = body.get("job_id"), body.get("profile_ids") or []
+            if not job_id or not profile_ids:
+                return {"status": "error", "http_status": 400,
+                        "result": {"message": "job_id and profile_ids are required"}}
+            return {"status": "ok", "http_status": 200, "result": {
+                "job_id": job_id,
+                "matches": [{"profile_id": p, "match_id": _match_id(job_id, p)}
+                            for p in profile_ids],
                 "_note": "SYNTHETIC mock response"}}
 
         if path == "JD_generation/jd_generation":

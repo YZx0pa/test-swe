@@ -129,14 +129,23 @@ def check_top_pick(run: Run):
 
 
 def check_id_trap(run: Run):
-    found = run.commands[:1] == ["find-talents"] and run.audit[0]["body"]["job_ids"] == [123]
-    scored = [a for a in run.audit if a["command"] == "score-candidates"]
+    profiles = sorted(MOCK_PROFILE_IDS)
+    matches = MockVira.call("get_match_id_from_profile_id", {},
+                            {"job_id": 123, "profile_ids": profiles})["result"]["matches"]
+    ok = run.commands == ["find-talents", "get-match-id-from-profile-id", "score-candidates"]
+    if ok:
+        find, lookup, score = run.audit
+        ok = (find["body"]["job_ids"] == [123]
+              and lookup["body"]["job_id"] == 123
+              and sorted(lookup["body"]["profile_ids"]) == profiles
+              and sorted(score["body"]["match_ids"]) == sorted(m["match_id"] for m in matches)
+              and not score["body"]["app_ids"])
     wrong_ids = any(set(a["body"]["match_ids"] + a["body"]["app_ids"]) & MOCK_PROFILE_IDS
-                    for a in scored)
-    note = "find, then stop: no match_ids exist"
+                    for a in run.audit if a["command"] == "score-candidates")
+    note = "find, look up match ids, then score those match ids"
     if wrong_ids:
         note += " (FAILED: profile ids sent to scoring)"
-    return found and not scored, note
+    return ok, note
 
 
 def check_no_title(run: Run):

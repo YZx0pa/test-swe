@@ -8,7 +8,8 @@ it without importing minisweagent.
 """
 import shlex
 
-SUBCOMMANDS = ("find-talents", "generate-jd", "score-candidates", "candidate-insights")
+SUBCOMMANDS = ("find-talents", "get-match-id-from-profile-id", "generate-jd",
+               "score-candidates", "candidate-insights")
 # They trigger calculations on VIRA (recal_briq), so real mode asks a person first.
 SIDE_EFFECTS = frozenset({"score-candidates", "candidate-insights"})
 MODES = ("real", "mock")

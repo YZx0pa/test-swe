@@ -22,6 +22,8 @@ CASES = [
      lambda: recruiter_cli.score_candidates([11, 12], [7], mode="mock")),
     (["candidate-insights", "--app-ids", "11"],
      lambda: recruiter_cli.candidate_insights([11], mode="mock")),
+    (["get-match-id-from-profile-id", "--job-id", "123", "--profile-ids", "900001,900002"],
+     lambda: recruiter_cli.get_match_id_from_profile_id(123, [900001, 900002], mode="mock")),
 ]
 
 
@@ -67,7 +69,7 @@ def test_pii_keys_are_masked_by_name_and_pattern(key):
 
 @pytest.mark.parametrize("key", [
     "job_name_similarity", "job_name", "job_title", "jobTitle", "job_description", "profile_id",
-    "match_ids", "app_id", "overall_score", "skill_score", "composite_score", "briq",
+    "match_ids", "match_id", "matches", "job_id", "app_id", "overall_score", "skill_score", "composite_score", "briq",
     "summary", "skills", "industry", "lang", "status", "hotel", "result"])
 def test_other_keys_are_kept(key):
     assert recruiter_cli._mask_pii({key: 7}) == {key: 7}
@@ -90,6 +92,8 @@ def test_emails_and_phones_inside_text_are_masked():
     lambda: recruiter_cli.find_talents([0], mode="mock"),
     lambda: recruiter_cli.score_candidates(["123.."], mode="mock"),
     lambda: recruiter_cli.candidate_insights([11], [True], mode="mock"),
+    lambda: recruiter_cli.get_match_id_from_profile_id(0, [900001], mode="mock"),
+    lambda: recruiter_cli.get_match_id_from_profile_id(123, list(range(1, 52)), mode="mock"),
     lambda: recruiter_cli.generate_jd("x" * 201, mode="mock"),
     lambda: recruiter_cli.generate_jd("Dev", lang="en;x", mode="mock"),
     lambda: recruiter_cli.generate_jd("Dev", skills=["s"] * 31, mode="mock"),
@@ -131,6 +135,16 @@ def test_mock_mode_end_to_end(audit_log):
     assert [p["profile_id"] for p in result["result"]["suggested_profiles"]] == [
         900001, 900002, 900003]
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
+
+
+def test_mock_match_id_lookup_is_per_job_and_never_a_profile_id(audit_log):
+    result = recruiter_cli.get_match_id_from_profile_id(123, [900001, 900002], mode="mock")
+    assert result["status"] == "ok"
+    assert result["result"]["matches"] == [{"profile_id": 900001, "match_id": 123900001},
+                                           {"profile_id": 900002, "match_id": 123900002}]
+    other_job = recruiter_cli.get_match_id_from_profile_id(124, [900001], mode="mock")
+    assert other_job["result"]["matches"][0]["match_id"] == 124900001
+    assert [a["command"] for a in read_audit(audit_log)] == ["get-match-id-from-profile-id"] * 2
 
 
 def test_confirm_gate_blocks_before_any_call(calls, audit_log, monkeypatch, capsys):

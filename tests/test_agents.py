@@ -45,6 +45,7 @@ def test_tool_schemas_are_typed_and_described():
     schemas = {name: t.tool_call_schema.model_json_schema() for name, t in tools.items()}
     assert {name: set(s.get("required", [])) for name, s in schemas.items()} == {
         "find_talents": {"job_ids"},
+        "get_match_id_from_profile_id": {"job_id", "profile_ids"},
         "generate_jd": {"job_title"},
         "score_candidates": set(),
         "candidate_insights": {"app_ids"},
@@ -135,6 +136,38 @@ def test_an_id_of_the_wrong_kind_is_refused_before_vira(monkeypatch, audit_log):
     refused = tool_messages(result)["c2"]
     assert refused.status == "error"
     assert "900001 is a profile_id, not a match_id" in refused.text
+    assert "get_match_id_from_profile_id" in refused.text      # points at the converter
+    assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
+
+
+def test_profile_ids_are_looked_up_as_match_ids_then_scored(audit_log):
+    # The id_trap task done right, against mock VIRA: find -> look up match ids -> score.
+    result = run(scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")),
+        calls(call("get_match_id_from_profile_id",
+                   {"job_id": 123, "profile_ids": [900001, 900002]}, "c2")),
+        calls(call("score_candidates", {"match_ids": [123900001, 123900002]}, "c3")),
+        say("Scored 2 talents.")), task="Find talents for job 123 and score them.")
+    assert all(m.status != "error" for m in tool_messages(result).values())
+    audit = read_audit(audit_log)
+    assert [a["command"] for a in audit] == ["find-talents", "get-match-id-from-profile-id",
+                                             "score-candidates"]
+    assert audit[1]["body"] == {"job_id": 123, "profile_ids": [900001, 900002]}
+    assert audit[2]["body"]["match_ids"] == [123900001, 123900002]
+
+
+@pytest.mark.parametrize("job_id,reason", [
+    (124, "124 isn't in the task or any earlier result"),
+    (900001, "900001 is a profile_id, not a job_id"),
+])
+def test_the_lookup_refuses_a_job_id_the_model_cant_have(audit_log, job_id, reason):
+    result = run(scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")),
+        calls(call("get_match_id_from_profile_id",
+                   {"job_id": job_id, "profile_ids": [900001]}, "c2")),
+        say("Stopped.")), task="Find talents for job 123 and score them.")
+    refused = tool_messages(result)["c2"]
+    assert refused.status == "error" and reason in refused.text
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
 
 
@@ -163,6 +196,8 @@ def test_ids_from_an_earlier_result_are_not_invented(vira):
 @pytest.mark.parametrize("name,args", [
     ("find_talents", {"job_ids": list(range(1, 52))}),
     ("find_talents", {"job_ids": [0]}),
+    ("get_match_id_from_profile_id", {"job_id": 123, "profile_ids": []}),
+    ("get_match_id_from_profile_id", {"job_id": 0, "profile_ids": [900001]}),
     ("score_candidates", {"app_ids": [-3]}),
     ("generate_jd", {"job_title": "x" * 201}),
     ("generate_jd", {"job_title": "Dev", "lang": "en; drop"}),

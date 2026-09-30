@@ -127,6 +127,23 @@ def test_parse_cli_keeps_typos_as_ungroundable_strings():
         "job_ids": [{"value": "123..", "sources": []}]}
 
 
+def test_parse_cli_maps_the_match_id_lookup():
+    assert grounding.parse_cli("python3 recruiter_cli.py get-match-id-from-profile-id "
+                               "--job-id 123 --profile-ids 900001,900002") == (
+        "get_match_id_from_profile_id", {"job_id": 123, "profile_ids": [900001, 900002]})
+
+
+def test_looked_up_match_ids_ground_as_match_ids():
+    lookup = json.dumps({"result": {"job_id": 123, "matches": [
+        {"profile_id": 900001, "match_id": 123900001}]}})
+    sources = [("task", "Find talents for job 123 and score them."), ("step 4", lookup)]
+    assert grounding.ground_args({"match_ids": [123900001]}, sources) == {
+        "match_ids": [{"value": 123900001, "sources": ["step 4"]}]}
+    wrong = grounding.ground_args({"match_ids": [900001], "job_id": 900001}, sources)
+    assert wrong["match_ids"][0]["misused_as"] == "profile_id"
+    assert wrong["job_id"][0]["misused_as"] == "profile_id"
+
+
 def test_a_real_id_passed_as_the_wrong_kind_is_misuse_not_grounding():
     # Seen live with gpt-4o-mini: profile ids from find_talents sent to scoring as match ids.
     task = "Find talents for job 123 and score them."

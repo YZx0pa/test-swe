@@ -25,8 +25,8 @@ def test_state_backend_only_and_no_shell():
     assert agent_kit.final_text(agent_kit.run_task(agent, "hello")) == "hi"
 
     offered = set(model.offered[0])
-    assert {"find_talents", "generate_jd", "score_candidates", "candidate_insights",
-            "write_todos", "task", "read_file", "write_file"} <= offered
+    assert {"find_talents", "get_match_id_from_profile_id", "generate_jd", "score_candidates",
+            "candidate_insights", "write_todos", "task", "read_file", "write_file"} <= offered
     assert "execute" not in offered                  # never offered to the model
 
     tools = agent.nodes["tools"].bound.tools_by_name

@@ -20,9 +20,11 @@ from typing import Any
 
 import mini_policy
 
-VIRA_TOOLS = {"find_talents", "generate_jd", "score_candidates", "candidate_insights"}
+VIRA_TOOLS = {"find_talents", "get_match_id_from_profile_id", "generate_jd",
+              "score_candidates", "candidate_insights"}
 # An id argument may only take ids that appeared as the same kind of id.
-ID_KINDS = {"job_ids": {"job_id", "job_ids"}, "profile_ids": {"profile_id", "profile_ids"},
+ID_KINDS = {"job_ids": {"job_id", "job_ids"}, "job_id": {"job_id", "job_ids"},
+            "profile_ids": {"profile_id", "profile_ids"},
             "app_ids": {"app_id", "app_ids"}, "match_ids": {"match_id", "match_ids"}}
 _ALL_ID_KEYS = set().union(*ID_KINDS.values())
 LANGUAGES = {"ar": "arabic", "en": "english", "fr": "french", "de": "german",

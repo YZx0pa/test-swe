@@ -165,7 +165,7 @@ class ToolCallGuard(AgentMiddleware):
                 continue
             for p in entries:
                 if "misused_as" in p:
-                    misused.append(f"{p['value']} is a {p['misused_as']}, not a {arg[:-1]}")
+                    misused.append(f"{p['value']} is a {p['misused_as']}, not a {arg.removesuffix('s')}")
                 elif not p["sources"]:
                     invented.append(f"{p['value']}")
         return misused, invented
@@ -173,8 +173,10 @@ class ToolCallGuard(AgentMiddleware):
     def _refusal(self, request) -> ToolMessage | None:
         misused, invented = self._bad_ids(request)
         if misused:
-            return self._result(request, "Refused: " + "; ".join(misused) + ". No tool converts "
-                                "between id kinds: finish and say which id is missing.")
+            return self._result(request, "Refused: " + "; ".join(misused) + ". Pass an id only as "
+                                "the kind it came back as: call the tool that returns the kind "
+                                "you need (profile ids -> get_match_id_from_profile_id), or "
+                                "finish and say which id is missing.")
         if invented:
             return self._result(request, f"Refused: {', '.join(invented)} isn't in the task or any "
                                 "earlier result. Never invent ids: finish and say which id is missing.")

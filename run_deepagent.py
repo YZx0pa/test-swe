@@ -51,11 +51,12 @@ def subagents(tools: dict, step_limit: int, ledger: agent_kit.CallLedger) -> lis
     # all sharing one ledger: a subagent can't repeat a VIRA call the parent already made.
     return [
         {"name": "sourcing-analyst",
-         "description": ("Finds suggested talents for ONE job, scores applicants or suggested "
-                         "talents, and gets candidate insights. Give it the job id and any "
-                         "application or match ids."),
+         "description": ("Finds suggested talents for ONE job, looks up their match ids, scores "
+                         "applicants or suggested talents, and gets candidate insights. Give it "
+                         "the job id and any application, profile or match ids."),
          "system_prompt": SOURCING_PROMPT + agent_kit.SYSTEM_PROMPT,
-         "tools": [tools[n] for n in ("find_talents", "score_candidates", "candidate_insights")],
+         "tools": [tools[n] for n in ("find_talents", "get_match_id_from_profile_id",
+                                      "score_candidates", "candidate_insights")],
          "middleware": agent_kit.middleware(step_limit, ledger)},
         {"name": "jd-writer",
          "description": ("Drafts a job description. Give it the job title, skills, language "

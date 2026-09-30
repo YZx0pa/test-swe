@@ -74,8 +74,8 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 
 | File | Role |
 |---|---|
-| `recruiter_cli.py` | `execute()` plus four typed actions own routing and the query/body split. The CLI wraps them; its output is byte-identical to before. |
-| `vira_tools.py` | The model-facing contract: four typed functions whose `Annotated[…, Field(…)]` signatures and docstrings **are** the tool schema. Edit them the way you'd edit `commands.md`. |
+| `recruiter_cli.py` | `execute()` plus the typed actions (four VIRA endpoints and the assumed `get_match_id_from_profile_id` lookup) own routing and the query/body split. The CLI wraps them; its output is byte-identical to before. |
+| `vira_tools.py` | The model-facing contract: typed functions whose `Annotated[…, Field(…)]` signatures and docstrings **are** the tool schema. Edit them the way you'd edit `commands.md`. |
 | `agent_kit.py` | Shared prompt, model factory, middleware, approval loop and REPL for the LangChain-based runners. |
 | `run_langgraph.py` / `run_workflow.py` / `run_deepagent.py` | The runtimes. New runners default to `--mode mock`; `--mode real` reaches VIRA. |
 | `vira_mcp.py` | The same tools over MCP. |
@@ -115,7 +115,7 @@ How mini's bash-era prompt rules became structure:
 | "Use `--mode mock`" (model-written) | Mode is fixed by the host; no tool parameter for it |
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
 | "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents |
-| "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`) |
+| "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`), and points at `get_match_id_from_profile_id`, the one tool that turns profile ids into match ids |
 | "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither the task nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(thread_limit=12)`, one fresh thread per task |
 | "Tell the user … retry with `--confirmed`" | A LangGraph interrupt pauses before the call (approve, edit or reject): for score/insights always in real mode, for every tool with `--approve-all` |
@@ -219,7 +219,7 @@ isolated subagents, or should produce a written artifact (a report file in the v
 
 ## 5. MCP server: `vira_mcp.py`
 
-One stdio server exposes the four tools to any MCP client. It uses `mcp==1.30` (`mcp.server.fastmcp`);
+One stdio server exposes the tools to any MCP client. It uses `mcp==1.30` (`mcp.server.fastmcp`);
 mcp 2.x renamed `FastMCP` to `MCPServer` and would conflict with `langchain-mcp-adapters`
 (`mcp<2`) in the same venv.
 
@@ -233,12 +233,13 @@ claude mcp add vira -- "$PWD/.venv/bin/python" "$PWD/vira_mcp.py" --mode mock
   directory. No client config ever carries a VIRA key.
 - `--mode` is required. stdout is the JSON-RPC channel, and a test checks that every stdout line
   is JSON-RPC.
-- Annotations: find/JD are `readOnlyHint`; score/insights trigger calculations that overwrite
+- Annotations: find, the match-id lookup and JD are `readOnlyHint`; score/insights trigger calculations that overwrite
   scores, so they're `destructiveHint` (and `idempotentHint`). They are hints, not enforcement.
 - Confirm-gated tools are never exposed. MCP approval depends on the client (elicitation needs
   client support), so a write tool needs an approval design first.
 - The server can't see the client's conversation, so `ToolCallGuard` doesn't apply. Instead:
-  - in `--mode real`, only find/JD are listed unless you pass `--allow-side-effects`, and then
+  - in `--mode real`, only the reads (find, match-id lookup, JD) are listed unless you pass
+    `--allow-side-effects`, and then
     approving each score/insights call is the client's job;
   - the process makes at most `--max-calls` VIRA calls (default 50), then answers `Refused`;
   - the input limits of §2 are part of the tool schemas, so an oversized call is an MCP error.
@@ -305,9 +306,13 @@ The four endpoints are stand-ins chosen to compare runtimes, not Jeni's producti
 | jd_ar | one generate-jd: lang=ar, given title + skills | 3/3 · 2 · 4.1k · 22s | 3/3 · 2 · 3.5k · 19s | 3/3 · 2 · 10.2k · 17s |
 | score_insights | score 11,12, then insights for 11 | 3/3 · 3 · 5.8k · 22s | 3/3 · 3 · 4.2k · 8s | 3/3 · 3 · 14.8k · 10s |
 | top_pick | score 11,12,13, then insights only for the top scorer (12) | 3/3 · 3 · 4.8k · 18s | 3/3 · 3 · 4.3k · 6s | 3/3 · 3 · 14.9k · 15s |
-| id_trap | find, then stop (no match_ids exist) | 3/3 · 4 · 9.8k · 55s | 3/3 · 2 · 3.6k · 11s | 3/3 · 4 · 21.5k · 36s |
+| id_trap | find, then stop (no match_ids existed; see the note below) | 3/3 · 4 · 9.8k · 55s | 3/3 · 2 · 3.6k · 11s | 3/3 · 4 · 21.5k · 36s |
 | no_title | no call: title missing, don't invent one | 1/3 · 12 · 37.8k · 169s | 3/3 · 1 · 1.7k · 5s | 3/3 · 1 · 5.0k · 12s |
 | **total** | | **16/18** · ~$0.167 | **18/18** · ~$0.037 | **18/18** · ~$0.096 |
+
+`id_trap` was measured before the assumed `get_match_id_from_profile_id` lookup existed. Its
+check is now find → look up match ids for job 123 → score those match ids, so this row needs a
+re-run.
 
 No wrong-kind id reached VIRA in any run, and the guard had none to refuse. The grounding check
 flagged two values, both in deepagents' `no_title` answer: "5+ years" and "~300 words" in the
@@ -367,6 +372,10 @@ What the runs showed:
    beside it) and add the key to `test_pii_keys_are_masked_by_name_and_pattern`.
 7. `mock_vira.py`: add a mock reply. Tests: add a parity case to `tests/test_recruiter_cli.py`
    and the schema expectation to `tests/test_agents.py`.
+8. `grounding.py`: add the name to `VIRA_TOOLS` so traces and `compare_agents` grounding include
+   its calls, and any new id argument to `ID_KINDS` so `ToolCallGuard` checks it.
+   `run_deepagent.py`: subagent tool lists are explicit, so add the tool to the subagent that
+   needs it.
 
 ## 9. Running it
 
@@ -374,7 +383,7 @@ What the runs showed:
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 193 tests
+.venv/bin/python -m pytest -q                                   # offline, 210 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
@@ -404,8 +413,10 @@ emails and phone numbers scrubbed, since they hold the task text and final answe
   `vira_tools` passes `confirmed=True` only for tools that `agent_kit` gates with `interrupt_on`,
   asserted at build time for the main agent and every subagent. MCP keeps them off, or uses
   elicitation.
-- **get-match-id:** the `id_trap` task shows the gap: without it, scoring suggested talents
-  can't be done correctly.
+- **get-match-id on VIRA:** `get_match_id_from_profile_id` is an assumed endpoint that only mock
+  VIRA answers. Real mode sends `POST get_match_id_from_profile_id` with
+  `{"job_id", "profile_ids"}` and gets VIRA's error until the backend adds it. Confirm the real
+  path and body, then re-run `id_trap` for §7.
 - **Durable approvals:** `SqliteSaver` (langgraph-checkpoint-sqlite) so a paused run survives a
   restart. Encrypt checkpoints at rest (`EncryptedSerializer`).
 - **Per-task tool budgets shared across subagents** (e.g. one `generate_jd` per task). Exact-repeat
@@ -443,7 +454,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
 | An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the task nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
 | An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
-| An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only find/JD unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
+| An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only the reads (find, match-id lookup, JD) unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
 | Secrets, audit logs or traces committed by accident | `.gitignore` covers `.env`/`.env.*` (except `.env.example`), `*.env`, key and certificate files, `credentials*`, `secrets*`, `.netrc`/`.npmrc`/`.pypirc`, `*.jsonl` and `traces/` | `git ls-files -ci --exclude-standard` is empty |
 | Traces or reports readable by other users, or carrying the task's PII | `agent_kit.write_private()`: 0600 files (a missing directory is created 0700), emails and phone numbers scrubbed | `test_trace_json_is_owner_only_and_scrubbed` |
 | Model or VIRA text drives your terminal (ESC/OSC sequences, clipboard writes, bidi tricks in an approval prompt) | `terminal.printable()` on every trajectory, approval prompt, virtual-file and workflow print, in all runners | `test_printable_strips_terminal_escapes_and_bidi_controls`, `test_trajectories_print_without_escapes` |
