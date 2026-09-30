@@ -78,6 +78,9 @@ Rules:
   Always read the result fields for the real outcome. If a result field contains an error or
   a message saying nothing was found/obtained/processed, treat it as a FAILURE even though
   status is "ok", and correct your next call.
+- A person may approve, edit or reject a call before it runs. An edit or a rejection is their
+  decision: report what ran as the outcome, not as a failure, and don't redo what they removed
+  or rejected, or offer to, with the same tool or another.
 - When you are done, reply in plain text without calling a tool. If the task is only
   partially done or cannot be fully completed, start that reply with
   SUMMARY: <what succeeded> | <what failed or is missing> | <why>
@@ -240,20 +243,23 @@ class ToolCallGuard(AgentMiddleware):
         """An identical call earlier in the conversation.  It counts as new again once a
         write ran after it, if it is a read (the write may have changed what it reads) or if
         it failed (the write may have fixed why): "publish" fails on a closed job, "reopen
-        it, then publish" retries it.  A write that succeeded is never repeated."""
+        it, then publish" retries it.  A call that failed or was refused also counts as new
+        once the user has written since.  A write that succeeded is never repeated."""
         call = request.tool_call
         key = _normalise(call["args"])
+        is_read = call["name"] in self.read_only
         messages = request.state.get("messages", [])
         failed = {m.tool_call_id for m in messages if m.type == "tool" and _failed(m)}
-        repeat = retry_ok = False
+        repeat = earlier_failed = False
         for msg in messages:
+            if msg.type == "human" and repeat and earlier_failed:
+                repeat = False
             for earlier in getattr(msg, "tool_calls", None) or []:
                 if earlier.get("id") == call.get("id"):
                     return repeat         # everything after this is not earlier
                 if earlier["name"] == call["name"] and _normalise(earlier["args"]) == key:
-                    repeat = True
-                    retry_ok = call["name"] in self.read_only or earlier.get("id") in failed
-                elif repeat and retry_ok and earlier["name"] not in self.read_only:
+                    repeat, earlier_failed = True, earlier.get("id") in failed
+                elif repeat and (is_read or earlier_failed) and earlier["name"] not in self.read_only:
                     repeat = False
         return repeat
 
@@ -313,6 +319,11 @@ class ToolCallGuard(AgentMiddleware):
         return bad
 
     def _refusal(self, request) -> ToolMessage | None:
+        if request.tool_call["name"] in overruled(request.state.get("messages", [])):
+            return self._result(request, f"Refused: the reviewer already edited or rejected "
+                                f"{request.tool_call['name']} in this request, and that decision "
+                                "stands. Report what ran; don't redo it or offer to. The user "
+                                "will ask if they want more.")
         misused, invented = self._bad_ids(request)
         if misused:
             return self._result(request, "Refused: " + "; ".join(misused) + ". Pass an id only as "
@@ -379,6 +390,30 @@ def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
 
 
 DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
+# How HumanInTheLoopMiddleware marks a reviewer's decision at the start of a tool result
+# (tests check these against the middleware's own messages).
+REVIEWER_EDITED = "Note: a human reviewer replaced this tool call before it ran."
+REVIEWER_REJECTED = "User rejected the tool call for "
+
+
+def overruled(messages) -> set[str]:
+    """Tools whose call a reviewer edited or rejected since the user last wrote.
+
+    The decision stands until the user writes again: until then a new call to the same
+    tool gets no approval card (interrupt_on's `when`) and ToolCallGuard refuses it, so the
+    agent can't redo what the reviewer removed.
+    """
+    names = set()
+    for m in reversed(messages):
+        if m.type == "human":
+            break
+        if m.type == "tool" and m.text.startswith((REVIEWER_EDITED, REVIEWER_REJECTED)):
+            names.add(m.name)
+    return names
+
+
+def _ask_unless_overruled(request) -> bool:
+    return request.tool_call["name"] not in overruled(request.state.get("messages", []))
 
 # Tools that ALWAYS pause for a human, in any mode and even without --approve-all, because
 # acting on the wrong ones is costly/irreversible (bulk actions on candidates, ownership, etc.).
@@ -402,7 +437,8 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     ON TOP of that, tools in ALWAYS_CONFIRM always pause (any mode), if present in the
     toolset -- high-stakes actions a human should see every time.
     `mode` defaults to the configured one (vira_tools.configure), so a real-mode agent
-    can't be built without the write gates.
+    can't be built without the write gates.  No card for a tool the reviewer already
+    overruled (overruled()).
     """
     if approve_all:
         names = toolset.names - toolset.read_only
@@ -411,7 +447,7 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     else:
         names = set()
     names |= (ALWAYS_CONFIRM & toolset.names)      # always-confirm, whatever the mode
-    return {name: DECISIONS for name in sorted(names)}
+    return {name: {**DECISIONS, "when": _ask_unless_overruled} for name in sorted(names)}
 
 
 # --- running a task ----------------------------------------------------------

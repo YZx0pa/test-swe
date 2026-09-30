@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 298 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 300 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -117,7 +117,7 @@ How mini's bash-era prompt rules became structure:
 |---|---|
 | "Use `--mode mock`" (model-written) | Mode is fixed by the host; no tool parameter for it |
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
-| "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents. A read, or a call that failed, may run again once a write ran after it |
+| "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents. A read, or a call that failed, may run again once a write ran after it; a failed or refused call also once the user wrote again |
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`), and points at `get_match_id_from_profile_id`, the one tool that turns profile ids into match ids |
 | "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither anything the user wrote (any turn) nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(run_limit=12)`: 12 model calls per user turn (and per resume after an approval), so a conversation can go on |
@@ -158,8 +158,9 @@ create_agent(build_chat_model(), vira_tools.langchain_tools(),
   repeat of an earlier call in the same conversation is still refused, unless a write ran
   since and the earlier call was a read or failed: "show job 7001", "add Kafka to it", "show it
   again" reads it twice, and "publish it to LinkedIn" (fails: private), "make it public, then
-  publish" retries the publish. A write that succeeded never runs twice. deepagents' shared
-  `CallLedger` still refuses both.
+  publish" retries the publish. A call that failed or was refused may also run again once the
+  user has written since. A write that succeeded never runs twice. deepagents' shared
+  `CallLedger` still refuses these repeats.
   `--task`, `compare_agents.py` and mini run every task on a fresh thread.
 - A string model is built with no kwargs; pass an instance to control options.
   `build_chat_model()` maps litellm-style `CHAT_MODEL` ids (`openai/…` → `openai:…`) and uses Chat
@@ -197,6 +198,19 @@ via `Command(resume={"decisions": [...]})` on the same thread. A rejected call n
 ("only 12"), which a small confirmation model (`CONFIRM_MODEL`, default `gpt-4o-mini`) turns into
 edited args. Only values the original call offered survive, the change is shown, and nothing runs
 until Enter or `y`. Interrupts need a checkpointer; `InMemorySaver` covers a single process.
+
+**A reviewer's edit or rejection stands until the user writes again.** HumanInTheLoopMiddleware
+keeps the model's own call in its message and marks the decision only at the start of the tool
+result ("Note: a human reviewer replaced this tool call …", "User rejected the tool call for …").
+Asked to shortlist the top two, with the reviewer editing the card to one, gpt-5-mini then
+proposed the other applicant in a new call: a second card for what the reviewer had just
+removed. A prompt rule ("report what ran as the outcome … don't redo what they removed or
+rejected, or offer to") didn't stop it: the demo's rehearsal still saw it in 2 of 3 runs. So it
+is structural now. `agent_kit.overruled(messages)` names the tools a reviewer edited or rejected
+since the user's last message; `interrupt_on()` gives HITL a `when` predicate so a new call to
+such a tool gets no card, and `ToolCallGuard` refuses it ("the reviewer already edited or
+rejected … that decision stands"). The next message from the user lifts it, so "shortlist 5103
+too" works.
 
 ## 4. deepagents: `run_deepagent.py`
 
@@ -434,7 +448,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 298 tests
+.venv/bin/python -m pytest -q                                   # offline, 300 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -519,6 +533,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
 | Jeni: a guessed candidate email or share recipient reaches VIRA (a CV sent to the wrong person) | `ToolCallGuard` refuses a `USER_ONLY` value (candidate name and email, new owner's email, share recipients) that isn't in the user's words, without echoing it; masked values from results fail the email pattern | `test_an_email_the_user_never_gave_is_refused`, `test_an_email_the_user_gave_is_used`, `test_invalid_input_never_reaches_vira` |
 | Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
+| An agent redoes what a reviewer removed (the applicant edited off a shortlist, a rejected change with other args) | `agent_kit.overruled()`: until the user writes again, a new call to a tool the reviewer edited or rejected gets no card (HITL's `when`) and `ToolCallGuard` refuses it | `test_a_reviewers_edit_stands_until_the_user_writes_again`, `test_a_rejection_stands_and_gets_no_second_card` |
 | Jeni: candidate names in task payloads reach the audit log, or the creator's name reaches the model | `_mask_pii` masks a `field_value` whose `field_name` is sensitive, and creator/owner names; the model gets only the sub-task result | `test_candidate_details_are_masked_in_the_audit_log`, `test_creator_and_owner_names_are_masked`, `test_the_model_sees_only_the_sub_task_result` |
 | Jeni: a collaborator silently added as administrator | `role_id` has no default and takes only 1 (administrator) or 5 (team member); `is_private` is set by the task | `test_role_has_no_default_and_visibility_is_set_by_the_task` |
 | Jeni's internal task catalog published with the code | `config/*` is gitignored (only its README is tracked); `jeni_tools` reads the catalog from there or `JENI_TASKS_FILE`; the tests use a synthetic fixture and pass without the real file | `test_the_catalog_is_read_from_the_configured_file`, `test_a_missing_catalog_is_a_clear_error_and_only_for_jeni` |
@@ -572,6 +587,8 @@ How a call works:
 - **Asking.** `RULES` tells the model to ask only for what no tool can give it, not to have the
   user confirm values they already gave, to do each step once it has what that step needs, and,
   after a failure, to report the reason rather than offer a retry or another tool's workaround.
+  To compare or rank applicants it points at `get_applications`, which returns their match
+  scores in one call (the rehearsal saw four one-by-one reads otherwise).
 - **Ids and personal values.** Ids must come from the user or an earlier result and keep their
   kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails, a
   new owner's email and share recipients must be exactly what the user wrote. Results carry them

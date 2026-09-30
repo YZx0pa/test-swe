@@ -336,6 +336,43 @@ def test_a_read_runs_again_after_a_write_but_not_twice_in_a_row(audit_log):
         "get-single-job-details", "add-job-skills", "get-single-job-details"]
 
 
+def test_a_reviewers_edit_stands_until_the_user_writes_again(audit_log):
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
+        calls(call("shortlist_multiple_application", {"app_ids": [5102, 5103]}, "c1")),
+        calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c2")),   # around the edit
+        say("Shortlisted 5102, as edited."),
+        calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c3")),   # now the user asked
+        say("Shortlisted 5103 too.")))
+    cards = []
+
+    def edit_the_first(request):
+        cards.append([a["args"] for a in request["action_requests"]])
+        if len(cards) > 1:
+            return [{"type": "approve"}]
+        return [{"type": "edit", "edited_action": {"name": "shortlist_multiple_application",
+                                                   "args": {"app_ids": [5102]}}}]
+
+    first = agent_kit.run_task(agent, "Shortlist applicants 5102 and 5103.", decide=edit_the_first,
+                               thread_id="t1")
+    assert "reviewer already edited or rejected" in tool_messages(first)["c2"].text
+    agent_kit.run_task(agent, "Shortlist 5103 too.", decide=edit_the_first, thread_id="t1")
+    assert cards == [[{"app_ids": [5102, 5103]}], [{"app_ids": [5103]}]]      # no card for c2
+    assert [fields_of(a)["app_ids"] for a in read_audit(audit_log)] == [[5102], [5103]]
+
+
+def test_a_rejection_stands_and_gets_no_second_card(audit_log):
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]}, "c1")),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kafka", "Spark"]}, "c2")),
+        say("I left the skills as they were.")))
+    cards = []
+    result = agent_kit.run_task(agent, "Add Kafka to job 7001.", decide=lambda r: cards.append(r) or [
+        {"type": "reject", "message": "Not now."}])
+    assert len(cards) == 1 and read_audit(audit_log) == []
+    assert "reviewer already edited or rejected" in tool_messages(result)["c2"].text
+    assert agent_kit.overruled(result["messages"]) == {"add_job_skills"}
+
+
 def test_a_failed_write_runs_again_once_another_write_ran(audit_log, kept):
     result = run(scripted(
         calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c1")),    # private: fails
