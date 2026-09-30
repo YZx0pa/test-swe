@@ -20,3 +20,6 @@ langgraph==1.2.12        # StateGraph, interrupt(), InMemorySaver in run_workflo
 langchain-openai==1.6.4  # ChatOpenAI behind init_chat_model() for CHAT_MODEL=gpt-5-mini
 deepagents==0.7.18       # create_deep_agent in run_deepagent.py; pulls in langchain-anthropic, langchain-google-genai, langsmith
 mcp==1.30.0              # FastMCP stdio server in vira_mcp.py (v1 line: mcp.server.fastmcp)
+
+# --- Jeni's database: run_langgraph.py --tools jeni_db --mode real ---
+asyncpg==0.31.0          # asyncpg pool behind db_queries.build_db_queries (db_lookup.py)
