@@ -438,7 +438,7 @@ def parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["real", "mock"], default="mock",
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
-    p.add_argument("--tools", choices=TOOLSET_NAMES, default="vira",
+    p.add_argument("--tools", choices=TOOLSET_NAMES, default="jeni",
                    help="vira (default): the sample AI endpoints; jeni: Jeni's own tasks, "
                         "one per call (needs config/jeni_tasks.json, see config/README.md)")
     p.add_argument("--approve-all", action="store_true",
