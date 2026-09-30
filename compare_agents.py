@@ -3,7 +3,8 @@
 
 Mock VIRA only, by construction.  The environment is fixed before any project
 module is imported:
-  * only OPENAI_API_KEY / CHAT_MODEL are taken from .env, then .env loading is
+  * only OPENAI_API_KEY / CHAT_MODEL (and JENI_TASKS_FILE, where Jeni's internal task
+    catalog lives) are taken from .env, then .env loading is
     disabled for this process and everything it spawns;
   * JENI_MODE=mock, blank VIRA credentials and a dead VIRA_BASE_URL;
   * mini's "bash" is mini_env.RecruiterEnvironment, which runs only
@@ -19,6 +20,7 @@ cell and LLMs are not deterministic, so read the table as anecdotal.
     python compare_agents.py
     python compare_agents.py --model gpt-4o-mini --repeat 3 --json traces/runs.json
     python compare_agents.py --runners langgraph,deepagents --tasks find,id_trap --out traces/report.md
+    python compare_agents.py --suite jeni --repeat 3 --out traces/jeni.md   # Jeni's own tasks (jeni_eval.py)
 
 --out and --json files are written owner-only with emails and phone numbers
 scrubbed (agent_kit.write_private); traces/ is gitignored.
@@ -38,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 def _fix_environment() -> None:
     from dotenv import dotenv_values
     for key, value in dotenv_values(HERE / ".env").items():   # read here, never printed
-        if key in ("OPENAI_API_KEY", "CHAT_MODEL") and value:
+        if key in ("OPENAI_API_KEY", "CHAT_MODEL", "JENI_TASKS_FILE") and value:
             os.environ.setdefault(key, value)
     os.environ.update({
         "PYTHON_DOTENV_DISABLED": "1",
@@ -56,6 +58,8 @@ _fix_environment()
 
 import agent_kit      # noqa: E402
 import grounding      # noqa: E402
+import jeni_eval      # noqa: E402
+import jeni_tools     # noqa: E402
 import mini_policy    # noqa: E402
 import recruiter_cli  # noqa: E402
 import run_deepagent  # noqa: E402
@@ -152,7 +156,7 @@ def check_no_title(run: Run):
     return run.commands == [], "no VIRA call: the title is missing and must not be invented"
 
 
-TASKS = {
+VIRA_TASKS = {
     "find": ("Find potential talents for job 123.", check_find),
     "jd_ar": ("Write an Arabic job description for a Senior Backend Engineer with Python "
               "and Go skills.", check_jd_ar),
@@ -163,6 +167,9 @@ TASKS = {
     "id_trap": ("Find talents for job 123 and score them.", check_id_trap),
     "no_title": ("Generate a job description.", check_no_title),
 }
+# --suite picks the tasks and the tools: the sample endpoints, or Jeni's own tasks.
+SUITES = {"vira": VIRA_TASKS, "jeni": jeni_eval.TASKS}     # toolset: agent_kit.toolset(suite)
+TASKS = VIRA_TASKS
 
 
 # --- runners -------------------------------------------------------------------
@@ -216,7 +223,8 @@ def run_mini(task: str, audit_path: Path, step_limit: int) -> Run:
     return run
 
 
-def run_langchain(name: str, build, task: str, audit_path: Path) -> Run:
+def run_langchain(name: str, build, task: str, audit_path: Path,
+                  tools=grounding.VIRA_TOOLS) -> Run:
     recruiter_cli.EVENTS_LOG = str(audit_path)
     run = Run(name, task)
     counter = agent_kit.UsageCounter()
@@ -225,7 +233,7 @@ def run_langchain(name: str, build, task: str, audit_path: Path) -> Run:
         result = agent_kit.run_task(build(), task, callbacks=[counter],
                                     decide=lambda req: [{"type": "reject"}] * len(req["action_requests"]))
         run.final = agent_kit.final_text(result)
-        run.steps = grounding.trace_from_messages(result["messages"], task)
+        run.steps = grounding.trace_from_messages(result["messages"], task, tools)
         run.trajectory = [f"{tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"
                           for m in result["messages"] if m.type == "ai" for tc in m.tool_calls]
     except Exception as exc:
@@ -287,10 +295,11 @@ def details(r: Run) -> list[str]:
     return lines + ["```", "", "Final answer:", "", "> " + (final.replace("\n", "\n> ") or "(none)"), ""]
 
 
-def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int) -> str:
+def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int,
+           suite: str = "vira") -> str:
     groups = {(runner, t): [r for r in runs if r.runner == runner and r.task == t]
               for runner in runners for t in tasks}
-    lines = [f"# VIRA agent comparison — {MODEL}, mock VIRA", "",
+    lines = [f"# VIRA agent comparison ({suite} tasks) — {MODEL}, mock VIRA", "",
              f"{repeat} run(s) per cell; medians shown. PASS/FAIL is judged on the audit log: "
              "what actually reached VIRA.", "",
              "| task | check | " + " | ".join(runners) + " |",
@@ -316,9 +325,9 @@ def report(runs: list[Run], runners: list[str], tasks: list[str], repeat: int) -
     return "\n".join(lines)
 
 
-def to_json(runs: list[Run], repeat: int) -> dict:
+def to_json(runs: list[Run], repeat: int, suite: str = "vira") -> dict:
     return {
-        "model": MODEL, "mode": "mock", "repeat": repeat,
+        "model": MODEL, "mode": "mock", "repeat": repeat, "suite": suite,
         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tasks": {k: {"text": v[0], "check": v[1](next(r for r in runs if r.task == k))[1]}
                   for k, v in TASKS.items() if any(r.task == k for r in runs)},
@@ -333,10 +342,14 @@ def to_json(runs: list[Run], repeat: int) -> dict:
 
 
 def main(argv=None):
-    global MODEL
+    global MODEL, TASKS
     p = argparse.ArgumentParser(description="Compare VIRA agent runtimes on mock VIRA.")
-    p.add_argument("--runners", default="mini,langgraph,deepagents")
-    p.add_argument("--tasks", default=",".join(TASKS))
+    p.add_argument("--suite", choices=sorted(SUITES), default="vira",
+                   help="vira: the sample endpoints; jeni: Jeni's own tasks (LangGraph and "
+                        "deepagents only)")
+    p.add_argument("--runners", help="default: mini,langgraph,deepagents (vira) or "
+                                     "langgraph,deepagents (jeni)")
+    p.add_argument("--tasks", help="default: every task in the suite")
     p.add_argument("--model", default=MODEL, help="CHAT_MODEL for every runner (litellm-style id)")
     p.add_argument("--repeat", type=int, default=1, help="runs per cell (LLMs are not deterministic)")
     p.add_argument("--step-limit", type=int, default=12)
@@ -344,15 +357,26 @@ def main(argv=None):
     p.add_argument("--json", help="write every run's trace (steps, grounding, audit) here")
     args = p.parse_args(argv)
     MODEL = os.environ["CHAT_MODEL"] = args.model
-    runners = [r for r in args.runners.split(",") if r]
-    tasks = [t for t in args.tasks.split(",") if t]
+    TASKS = SUITES[args.suite]
+    try:
+        toolset = agent_kit.toolset(args.suite)       # jeni: reads the internal catalog
+    except jeni_tools.CatalogMissing as exc:
+        p.error(str(exc))
+    runners = [r for r in (args.runners or ("mini,langgraph,deepagents" if args.suite == "vira"
+                                            else "langgraph,deepagents")).split(",") if r]
+    tasks = [t for t in (args.tasks or ",".join(TASKS)).split(",") if t]
+    if args.suite == "jeni" and "mini" in runners:
+        p.error("mini runs recruiter_cli's subcommands, which don't cover Jeni's tasks")
+    unknown = [t for t in tasks if t not in TASKS]
+    if unknown:
+        p.error(f"unknown task(s) for --suite {args.suite}: {', '.join(unknown)}")
     vira_tools.configure("mock")
 
     logs = Path(tempfile.mkdtemp(prefix="vira-compare-"))
 
     builders = {
-        "langgraph": lambda: run_langgraph.build_agent(step_limit=args.step_limit),
-        "deepagents": lambda: run_deepagent.build_agent(step_limit=args.step_limit),
+        "langgraph": lambda: run_langgraph.build_agent(step_limit=args.step_limit, toolset=toolset),
+        "deepagents": lambda: run_deepagent.build_agent(step_limit=args.step_limit, toolset=toolset),
     }
     runs = []
     for task in tasks:
@@ -363,19 +387,20 @@ def main(argv=None):
                 if runner == "mini":
                     run = run_mini(TASKS[task][0], audit_path, args.step_limit)
                 else:
-                    run = run_langchain(runner, builders[runner], TASKS[task][0], audit_path)
+                    run = run_langchain(runner, builders[runner], TASKS[task][0], audit_path,
+                                        toolset.names)
                 run.task, run.repeat = task, n
                 if audit_path.exists():
                     run.audit = [json.loads(line) for line in
                                  audit_path.read_text(encoding="utf-8").splitlines()]
                 runs.append(run)
 
-    text = report(runs, runners, tasks, args.repeat)
+    text = report(runs, runners, tasks, args.repeat, args.suite)
     print(text)
     if args.out:
         agent_kit.write_private(args.out, text + "\n")
     if args.json:
-        agent_kit.write_private(args.json, json.dumps(to_json(runs, args.repeat),
+        agent_kit.write_private(args.json, json.dumps(to_json(runs, args.repeat, args.suite),
                                                       ensure_ascii=False, indent=1))
     print(f"\n(audit logs: {logs})", file=sys.stderr)
 

@@ -85,7 +85,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
-| `tests/` | 244 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 256 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -355,6 +355,38 @@ What the runs showed:
    the cost overall). mini needs extra calls just to finish (echo SUMMARY, echo COMPLETE), cost
    about 4.5× LangGraph, and was the slowest in every cell.
 
+### Jeni's own tasks (`--suite jeni`)
+
+`compare_agents.py --suite jeni --repeat 3` on 2026-09-30 with gpt-5-mini against `mock_jeni`
+(§12): seven Jeni requests (`jeni_eval.py`). Writes must match exactly, reads are free. mini
+isn't in this suite, because its CLI doesn't cover Jeni's tasks.
+
+| task | check | LangGraph | deepagents |
+|---|---|---|---|
+| job_details | one get_single_job_details for job 7001 | 3/3 · 2 · 7.1k · 5s | 3/3 · 2 · 13.6k · 4s |
+| create_then_skill | create the job, then add Spark using the new job's id | 3/3 · 3 · 10.4k · 4s | 3/3 · 3 · 20.4k · 6s |
+| assign_team_member | search for Bob, then add user 802 as a team member (role 5), no transfer | 3/3 · 3 · 10.5k · 5s | 3/3 · 3 · 20.3k · 6s |
+| shortlist_top2 | read job 7001's applications, then shortlist the top two (5102, 5103) | 3/3 · 3 · 10.8k · 5s | 3/3 · 3 · 20.7k · 6s |
+| add_candidate | one create_application_to_job on job 7001 with the name and email given | 3/3 · 2 · 6.9k · 4s | 3/3 · 2 · 13.5k · 4s |
+| share_no_email | no share: the recipient's email wasn't given, so ask for it | 3/3 · 1 · 4.2k · 6s | 3/3 · 1 · 7.3k · 5s |
+| unsupported | nothing changed: sharing a job isn't supported | 3/3 · 1 · 4.0k · 5s | 3/3 · 1 · 7.4k · 6s |
+| **total** | | **21/21** · ~$0.060 | **21/21** · ~$0.101 |
+
+- **Real outputs chained in one request.** Every run took the new job's id from `create_job`'s
+  result, Bob's user id from `search_users`, and the top two applicants from `get_applications`,
+  and passed them on. v1 can't do the first of these in one request (§12).
+- **No guessing.** Every run chose role 5 for "team member" and none transferred ownership. With
+  no recipient email, every run asked for one instead of sharing, and "share job 7001 on
+  Facebook" was declined with what is supported instead. The guard never had to refuse a call.
+- **Cost.** The 22 tool schemas put LangGraph at 4–11k tokens per request, against 1.7–4.3k with
+  the five sample tools. deepagents used about twice LangGraph's tokens and 1.7× its cost, with no
+  gain on these single-job requests.
+- **Grounding** flagged 7 values per runtime, none of them ids: `search_users`' `limit: 10`,
+  `role_id: 5` (from "team member" via the field description), a page size of 50, and a
+  "1–2000 characters" hint in an answer.
+- Not covered yet: requests over several jobs, and a clarifying answer continuing the same
+  request (the runners start a new thread per task).
+
 ## 8. Adding a VIRA endpoint
 
 1. `recruiter_cli.py`: add a typed action that calls `execute()` (path plus the query/body split),
@@ -384,7 +416,7 @@ What the runs showed:
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 244 tests
+.venv/bin/python -m pytest -q                                   # offline, 256 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default

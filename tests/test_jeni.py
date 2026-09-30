@@ -10,6 +10,7 @@ import pytest
 
 import agent_kit
 import grounding
+import jeni_eval
 import jeni_tools
 import mock_jeni
 import recruiter_cli
@@ -350,3 +351,87 @@ def test_camel_case_result_keys_count_as_id_kinds():
     assert grounding._id_keys(result) == {802: {"user_id"}, 7001: {"job_id"}}
     [entry] = grounding.ground_args({"app_ids": [802]}, [("task", "x"), ("step 2", result)])["app_ids"]
     assert entry["misused_as"] == "user_id"
+
+
+# --- the comparison suite's checks (jeni_eval) ----------------------------------
+class Judged:
+    """What compare_agents hands a check: the run's audit log."""
+
+    def __init__(self, audit):
+        self.audit, self.commands = audit, [a["command"] for a in audit]
+
+
+def judge(audit_log, key, *steps):
+    for name, args in steps:
+        jeni_tools.run(name, args)
+    return jeni_eval.TASKS[key][1](Judged(read_audit(audit_log)))[0]
+
+
+def test_every_check_has_a_task_and_a_note():
+    assert set(jeni_eval.TASKS) == {"job_details", "create_then_skill", "assign_team_member",
+                                    "shortlist_top2", "add_candidate", "share_no_email",
+                                    "unsupported"}
+    for key, (text, check) in jeni_eval.TASKS.items():
+        assert text and check(Judged([]))[1], key
+
+
+def test_assign_passes_only_with_a_search_and_the_team_member_role(audit_log):
+    search = ("search_users", {"search_key": "Bob"})
+    add = ("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
+    assert judge(audit_log, "assign_team_member", search, add)
+
+
+@pytest.mark.parametrize("steps", [
+    [("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})],   # no search
+    [("search_users", {"search_key": "Bob"}),
+     ("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 1})],  # administrator
+    [("search_users", {"search_key": "Bob"}),
+     ("transfer_job_ownership", {"job_id": 7001, "new_owner_user_email": "bob.tan@example.com"})],
+])
+def test_assign_fails_otherwise(audit_log, steps):
+    assert not judge(audit_log, "assign_team_member", *steps)
+
+
+def test_create_then_skill_needs_the_new_jobs_id(audit_log):
+    create = ("create_job", {"job_title": "Data Engineer", "skills": ["Python", "SQL"],
+                             "min_exp": 3, "max_exp": 5})
+    new_id = mock_jeni.created_job_id("Data Engineer")
+    assert judge(audit_log, "create_then_skill", create,
+                 ("add_job_skills", {"job_id": new_id, "skills": ["Spark"]}))
+
+
+def test_create_then_skill_fails_on_another_job(audit_log):
+    create = ("create_job", {"job_title": "Data Engineer", "skills": ["Python", "SQL"],
+                             "min_exp": 3, "max_exp": 5})
+    assert not judge(audit_log, "create_then_skill", create,
+                     ("add_job_skills", {"job_id": 7001, "skills": ["Spark"]}))
+
+
+def test_shortlist_wants_the_two_best_after_reading_them(audit_log):
+    assert jeni_eval.top_applicants(7001, 2) == [5102, 5103]
+    read = ("get_applications", {"job_id": 7001})
+    assert judge(audit_log, "shortlist_top2", read,
+                 ("shortlist_multiple_application", {"app_ids": [5103, 5102]}))
+
+
+def test_shortlist_fails_on_the_wrong_two(audit_log):
+    read = ("get_applications", {"job_id": 7001})
+    assert not judge(audit_log, "shortlist_top2", read,
+                     ("shortlist_multiple_application", {"app_ids": [5101, 5102]}))
+
+
+def test_reads_are_free_but_any_write_fails_the_ask_first_tasks(audit_log):
+    read = ("get_single_application_details", {"app_id": 5102})
+    assert judge(audit_log, "share_no_email", read)
+    share = ("share_application", {"app_ids": [5102], "emails": ["hm@example.com"], "message": "hi"})
+    assert not judge(audit_log, "share_no_email", share)
+
+
+def test_add_candidate_is_one_create_on_the_job(audit_log):
+    assert judge(audit_log, "add_candidate", ("create_application_to_job",
+                                              VALID["create_application_to_job"]))
+
+
+def test_job_details_is_exactly_one_read(audit_log):
+    assert judge(audit_log, "job_details", ("get_single_job_details", {"job_id": 7001}))
+    assert not judge(audit_log, "job_details", ("get_single_job_details", {"job_id": 7001}))
