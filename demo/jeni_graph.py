@@ -28,9 +28,10 @@ SUMMARY_RULE = """\
   SUMMARY: <what succeeded> | <what failed or is missing> | <why>
 """
 CHAT_RULE = """\
-- When you are done, reply without calling a tool, in a few short sentences for a chat
-  window (a short markdown list for several items). If the task is only partially done or
-  cannot be fully completed, say what succeeded, what failed or is missing, and why.
+- When you are done, reply without calling a tool, briefly, for a chat window: the outcome
+  first, in a sentence or two, and a short markdown list only for several items. Don't recount
+  the tools you called. If the task is only partially done or cannot be fully completed, say
+  what succeeded, what failed or is missing, and why.
 """
 
 

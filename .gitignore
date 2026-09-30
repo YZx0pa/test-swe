@@ -42,3 +42,6 @@ demo/ui/node_modules/
 demo/ui/.next/
 demo/ui/next-env.d.ts
 demo/ui/.env.local
+
+# demo/run.sh logs
+demo/.run/

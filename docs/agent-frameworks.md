@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 300 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 308 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -448,7 +448,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 300 tests
+.venv/bin/python -m pytest -q                                   # offline, 308 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -459,7 +459,8 @@ python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents 
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
 python jeni_tools.py                                                      # list them: read or write, and their fields
 python run_langgraph.py --task "Add Kubernetes to the backend engineer job"      # jeni_db: looks the job up first (§13)
-LANGGRAPH_CLI_NO_ANALYTICS=1 .venv/bin/langgraph dev --no-browser --no-reload    # the demo (§14): graph "jeni", panel at /demo
+demo/run.sh                                                               # the demo (§14): chat on :3000, data panel beside it
+.venv/bin/python -m demo.rehearse                                         # play the demo script against it and check the data
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
@@ -721,7 +722,10 @@ browser ─ chat UI ───────────── langgraph dev (127.0
 |---|---|
 | `langgraph.json` | Graph `jeni` from `demo/jeni_graph.py:make_graph`, the panel's routes from `demo/app.py:app`, env from `.env` (the model key; nothing reaches VIRA). |
 | `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=True, own_checkpointer=False)`. `make_graph()` is the async factory: it builds once, on a worker thread. |
-| `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. |
+| `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. `/demo/prompts` gives the chat its starter cards. |
+| `demo/script.py`, `demo/SCRIPT.md` | The script: eight acts, each with its prompts, what to do at each approval card, and a check over the data. `SCRIPT.md` is the presenter's copy, with talking points and recovery; a test keeps its prompts identical. |
+| `demo/rehearse.py` | Plays the script against the running server through `langgraph_sdk`, the API the chat uses, and checks the data after each act. |
+| `demo/run.sh`, `demo/README.md` | The launcher (preflight, UI build when needed, both servers, the agent built and the data reset before anyone types) and the setup guide. |
 | `requirements-demo.txt`, `requirements-demo.lock.txt` | `requirements.txt` plus `langgraph-cli[inmem]==0.4.32`. The lock keeps every pin of `requirements.lock.txt` and adds 27 packages (langgraph-api 0.15.1, the in-memory runtime, uvicorn extras, OpenTelemetry), all with hashes; no known vulnerabilities on 2026-10-01. |
 
 What differs from `run_langgraph.py`, and why:
@@ -736,9 +740,10 @@ What differs from `run_langgraph.py`, and why:
   handled automatically by the platform") and keeps threads itself, in memory, flushed to
   `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
 - **The closing rule is written for a chat window.** `SYSTEM_PROMPT` ends with the grading format
-  `SUMMARY: <what succeeded> | <what failed> | <why>`. The demo replaces only that rule with "a
-  few short sentences … say what succeeded, what failed or is missing, and why", and fails at
-  build time if the rule it replaces has changed.
+  `SUMMARY: <what succeeded> | <what failed> | <why>`. The demo replaces only that rule with "the
+  outcome first, in a sentence or two … don't recount the tools you called … say what
+  succeeded, what failed or is missing, and why", and fails at build time if the rule it
+  replaces has changed.
 - **Built off the event loop.** The server calls the factory inside its event loop, and runs
   there under blockbuster, which raises on blocking I/O (reading the catalog, for one). The
   factory is `async` and builds with `asyncio.to_thread` once; the panel's endpoints are plain
@@ -772,6 +777,54 @@ Security, beyond §11 (each has a test in `tests/test_demo.py` unless noted):
 | Demo conversations stay on disk | `.langgraph_api/` holds the threads (what people typed, masked tool results); it is gitignored. Delete it after a demo (not tested) |
 | Prompts and results go to LangSmith | Tracing is forced off in `build()`. Studio (the link `langgraph dev` prints) is a LangSmith page that talks to the local server from your browser; use it with demo data only |
 
+### The script and its rehearsal
+
+Each act of `demo/script.py` shows one thing v2 does differently, on the mock's data. A check
+reads the data panel after the act (jobs by id, and the sub-tasks that reached the mock during
+it), so a pass means the data changed as the script says. Acts that end with nothing changed,
+or with the reviewer's edit, also name the approval card that must have appeared. The rehearsal
+answers each card as the script says (approve, reject with a reason, or edit the args), sends a
+follow-up turn only while the check still fails ("As a team member."), and deletes its threads
+and resets the data at the end.
+
+| Act | Shows | Check |
+|---|---|---|
+| lookup | the job found by name; the write waits for a card | 7001 gains Kubernetes and Terraform, one write |
+| reject | a person says no | the close card appeared and was rejected; nothing reached VIRA |
+| chain | a result used in the next step | `add_job_skills` on the id `create_job` returned |
+| shortlist | the pick from match scores; the reviewer's edit is what runs | 5102 shortlisted, 5103 not, one write |
+| ask | only what can't be looked up is asked | Bob (802) joins 7001 as a team member |
+| email | personal values only from the user | one share of 5102, to one recipient |
+| recover | LinkedIn needs an open job; both steps when told | 7002 reopened, then published |
+| unsupported | no approximation | nothing changed |
+
+`python -m demo.rehearse --repeat 3` on 2026-10-01 with gpt-5-mini, after everything below was
+fixed: **24/24**. Medians per act: 1–6 model calls, 5–27k tokens, 8–30 s including the
+approvals; per pass about 135k tokens, about 2½ minutes and about $0.05 (litellm's price table).
+
+What the rehearsals found, and what changed:
+- **The agent went around the reviewer.** Told to shortlist the top two and edited down to one,
+  it proposed the other in a new call. The prompt rule alone left it in 2 of 3 runs; now it is
+  structural (§3, human in the loop).
+- **Re-reads and retries were refused as repeats.** "Show it again" after a change, and
+  "reopen it, then publish" after a refused publish, now run (§3a).
+- **Ranking applicants one by one** (four reads, 35 s): the rules now point at
+  `get_applications`, which returns the scores in one call (§12). The shortlist act went from 7
+  model calls to 4.
+- **"Add Bob to the backend engineer job"** was once read as adding Bob as a candidate. The
+  script now says "to the hiring team".
+- **An external recipient was refused.** The db rules validate every email the user gives with
+  `validate_emails`, which knows only the company's users, so "share it with
+  hm.lee@example.com" stopped. The script shares with a colleague (Priya); whether share
+  recipients must be colleagues is a product question (below).
+- **The UI sent edited ids as a string** (above). The browser check that found it drives the real
+  chat in headless Chromium; it isn't part of the repository.
+
 Open points:
 - `langgraph dev` is a development server (in-memory, one process). A hosted pilot would run the
   same graph on a licensed LangGraph deployment or behind our own API with auth.
+- **Share recipients.** `validate_emails` checks an address against the company's users, and the
+  db rules validate every email before a write, so a CV can't be shared with an outside address.
+  If sharing outside the company is allowed, the rule should exempt `share_application`.
+- The replies still run long now and then, and sometimes offer to redo what the reviewer removed
+  (the code refuses it if asked in the same request).
