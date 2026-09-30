@@ -127,6 +127,16 @@ def test_parse_cli_keeps_typos_as_ungroundable_strings():
         "job_ids": [{"value": "123..", "sources": []}]}
 
 
+def test_a_later_turn_of_the_conversation_counts_as_the_task():
+    messages = [HumanMessage("Score the applicants."), AIMessage("Which applicants?"),
+                HumanMessage("Applicants 11 and 12."),
+                AIMessage("", tool_calls=[{"name": "score_candidates", "args": {"app_ids": [11, 12]},
+                                           "id": "c1", "type": "tool_call"}])]
+    steps = grounding.trace_from_messages(messages, "Score the applicants.")
+    [step] = [s for s in steps if s["kind"] == "call"]
+    assert [p["sources"] for p in step["provenance"]["app_ids"]] == [["task"], ["task"]]
+
+
 def test_parse_cli_maps_the_match_id_lookup():
     assert grounding.parse_cli("python3 recruiter_cli.py get-match-id-from-profile-id "
                                "--job-id 123 --profile-ids 900001,900002") == (

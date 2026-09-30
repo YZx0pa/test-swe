@@ -299,6 +299,21 @@ def test_an_email_the_user_gave_is_used(audit_log):
     assert entry["command"] == "share-application" and fields_of(entry)["emails"] == "<redacted>"
 
 
+def test_the_user_answers_the_agents_question_in_the_next_turn(audit_log):
+    # The agent asks for the email instead of guessing; the reply continues the same thread.
+    agent = run_langgraph.build_agent(model=scripted(
+        say("Which email should I share it with?"),
+        calls(call("share_application", {"app_ids": [5102], "emails": ["hm@example.com"],
+                                         "message": "Please review"}, "c1")),
+        say("Shared.")), toolset=agent_kit.toolset("jeni"))
+    agent_kit.run_task(agent, "Share the CV of applicant 5102 with the hiring manager.",
+                       thread_id="t1")
+    result = agent_kit.run_task(agent, "hm@example.com", thread_id="t1")
+    assert tool_messages(result)["c1"].status != "error"
+    [entry] = read_audit(audit_log)
+    assert entry["command"] == "share-application"
+
+
 def test_real_mode_gates_every_task_that_changes_data(monkeypatch):
     jeni = agent_kit.toolset("jeni")
     writes = jeni_tools.names() - jeni_tools.READ_ONLY

@@ -85,7 +85,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
-| `tests/` | 256 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 262 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -117,8 +117,8 @@ How mini's bash-era prompt rules became structure:
 | One command per response; quote `SUMMARY`; `echo COMPLETE_TASK…`; `tool_choice="required"` | Gone: typed calls, parallel calls allowed, the loop ends when the model answers in prose |
 | "Never repeat a command with the same arguments" | `ToolCallGuard` refuses exact repeats (normalised args) without calling VIRA, across the main agent and its subagents |
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`), and points at `get_match_id_from_profile_id`, the one tool that turns profile ids into match ids |
-| "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither the task nor an earlier tool result |
-| `step_limit: 12` | `ModelCallLimitMiddleware(thread_limit=12)`, one fresh thread per task |
+| "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither anything the user wrote (any turn) nor an earlier tool result |
+| `step_limit: 12` | `ModelCallLimitMiddleware(run_limit=12)`: 12 model calls per user turn (and per resume after an approval), so a conversation can go on |
 | "Tell the user … retry with `--confirmed`" | A LangGraph interrupt pauses before the call (approve, edit or reject): for score/insights always in real mode, for every tool with `--approve-all` |
 | Arg validation by argparse (strings) | Pydantic schema: `job_ids` 1–50 positive ids, `job_title` 1–200 characters, `lang` a language code, and so on; the model gets the error and retries. The typed actions check the same limits, so the CLI and mini are covered too |
 
@@ -143,11 +143,18 @@ create_agent(build_chat_model(), vira_tools.langchain_tools(),
              system_prompt=SYSTEM_PROMPT,
              middleware=[HumanInTheLoopMiddleware(...),   # real mode or --approve-all; outermost
                          ToolCallGuard(),                   # refuse repeats and unsourced ids, contain crashes
-                         ModelCallLimitMiddleware(thread_limit=12, exit_behavior="end")],
+                         ModelCallLimitMiddleware(run_limit=12, exit_behavior="end")],
              checkpointer=InMemorySaver())
 ```
 
 - `create_agent`'s recursion limit is now 9,999, so the call-limit middleware is the real step cap.
+- **Conversations.** The interactive REPL (LangGraph and deepagents) keeps one thread per session,
+  so when the agent asks for something (an email it may not guess, which applicants) your reply
+  continues the same task. `new` starts a fresh conversation. Every user turn counts as user input
+  for `ToolCallGuard`. The call cap is per run, i.e. one turn or one resume after an approval, each
+  started by a person; a per-thread cap would end the conversation after 12 calls in total. A
+  repeat of an earlier call in the same conversation is still refused. `--task`,
+  `compare_agents.py` and mini run every task on a fresh thread.
 - A string model is built with no kwargs; pass an instance to control options.
   `build_chat_model()` maps litellm-style `CHAT_MODEL` ids (`openai/…` → `openai:…`) and uses Chat
   Completions for OpenAI, like mini's litellm path. The Responses API stores responses server-side
@@ -416,11 +423,12 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 256 tests
+.venv/bin/python -m pytest -q                                   # offline, 262 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --task "Find potential talents for job 123"       # mock VIRA by default
 python run_langgraph.py --approve-all                                     # approve/edit/reject each call
+python run_langgraph.py --tools jeni                                      # one conversation: answer its questions; 'new' starts over
 python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --task "For jobs 101 and 102, find talents and write /report.md"
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
@@ -452,8 +460,8 @@ emails and phone numbers scrubbed, since they hold the task text and final answe
   VIRA answers. Real mode sends `POST get_match_id_from_profile_id` with
   `{"job_id", "profile_ids"}` and gets VIRA's error until the backend adds it. Confirm the real
   path and body, then re-run `id_trap` for §7.
-- **Durable approvals:** `SqliteSaver` (langgraph-checkpoint-sqlite) so a paused run survives a
-  restart. Encrypt checkpoints at rest (`EncryptedSerializer`).
+- **Durable approvals:** `SqliteSaver` (langgraph-checkpoint-sqlite) so a paused run, and a
+  REPL conversation, survives a restart. Encrypt checkpoints at rest (`EncryptedSerializer`).
 - **Per-task tool budgets shared across subagents** (e.g. one `generate_jd` per task). Exact-repeat
   refusal doesn't stop retries with tweaked arguments, and `ToolCallLimitMiddleware` counts per
   agent context, so the budget needs the ledger approach.
@@ -487,7 +495,7 @@ every control sits in code the model can't reach, and each one has a test.
 | `.env` from a parent directory gets loaded | recruiter_cli loads the `.env` next to it, by path | — |
 | Candidate PII reaches the model (and the model provider) | `_mask_pii`: normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply. Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
 | Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
-| An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the task nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
+| An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the user's messages (any turn) nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
 | An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
 | An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only the reads (find, match-id lookup, JD) unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
 | Secrets, audit logs or traces committed by accident | `.gitignore` covers `.env`/`.env.*` (except `.env.example`), `*.env`, key and certificate files, `credentials*`, `secrets*`, `.netrc`/`.npmrc`/`.pypirc`, `*.jsonl` and `traces/` | `git ls-files -ci --exclude-standard` is empty |

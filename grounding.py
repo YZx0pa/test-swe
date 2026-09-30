@@ -151,7 +151,9 @@ def trace_from_messages(messages, task: str, tools=VIRA_TOOLS) -> list[dict]:
     """
     steps, sources, answer = [], [("task", task)], ""
     for m in messages:
-        if m.type == "ai":
+        if m.type == "human" and m.text != task:
+            sources.append(("task", m.text))     # a later turn of the conversation: user input too
+        elif m.type == "ai":
             if m.text and m.tool_calls:
                 steps.append({"i": len(steps) + 1, "kind": "note", "text": m.text})
             for tc in m.tool_calls:

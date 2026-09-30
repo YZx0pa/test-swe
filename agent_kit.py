@@ -201,13 +201,13 @@ class ToolCallGuard(AgentMiddleware):
         """(wrong-kind ids, invented ids), from grounding's provenance of the call's id args.
 
         Wrong kind: an id passed as a different kind than it came back as.  Invented: an id
-        that is in neither the task nor any earlier tool result.  A reviewer's edited args
-        (HumanInTheLoopMiddleware) count as user input, like the task.
+        that is in neither anything the user wrote (any turn of the conversation) nor any
+        earlier tool result.  A reviewer's edited args (HumanInTheLoopMiddleware) count as
+        user input, like the task.
         """
         messages = request.state.get("messages", [])
-        task = next((m.text for m in messages if m.type == "human"), "")
-        sources = [("task", task)] + [(f"step {i}", m.text) for i, m in enumerate(messages)
-                                      if m.type == "tool"]
+        sources = ([("task", m.text) for m in messages if m.type == "human"]
+                   + [(f"step {i}", m.text) for i, m in enumerate(messages) if m.type == "tool"])
         edited = (request.state.get("hitl_edited_tool_calls") or {}).get(request.tool_call.get("id"))
         if edited:
             sources.append(("task", json.dumps(edited.get("args", {}))))
@@ -300,12 +300,14 @@ class ToolCallGuard(AgentMiddleware):
 
 def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
                toolset: Toolset = VIRA) -> list:
-    """Guard + a per-thread cap on model calls (each task runs on a fresh thread).
+    """Guard + a cap on model calls per run.
 
-    Pass one shared ledger to an agent and all its subagents.
+    A run is one user turn, or one resume after an approval, so a person starts each one.
+    A per-thread cap would end a conversation after `step_limit` calls in total.  Pass one
+    shared ledger to an agent and all its subagents.
     """
     return [ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only),
-            ModelCallLimitMiddleware(thread_limit=step_limit, exit_behavior="end")]
+            ModelCallLimitMiddleware(run_limit=step_limit, exit_behavior="end")]
 
 
 DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
@@ -390,9 +392,14 @@ def ask_human(request: dict) -> list[dict]:
 
 
 def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_human,
-             callbacks: list | None = None) -> dict:
-    """Run one task on a fresh thread, pausing for `decide` at every interrupt."""
-    config = {"configurable": {"thread_id": uuid.uuid4().hex}, "callbacks": callbacks or []}
+             callbacks: list | None = None, thread_id: str | None = None) -> dict:
+    """Run one user turn, pausing for `decide` at every interrupt.
+
+    A fresh thread by default.  Pass the same `thread_id` again to continue that
+    conversation: the agent's checkpointer keeps the earlier turns.
+    """
+    config = {"configurable": {"thread_id": thread_id or uuid.uuid4().hex},
+              "callbacks": callbacks or []}
     out = agent.invoke({"messages": [{"role": "user", "content": task}]}, config, version="v2")
     while out.interrupts:
         if len(out.interrupts) == 1:
@@ -403,9 +410,12 @@ def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_hum
     return out.value
 
 
-def show(messages) -> None:
-    """Trajectory printout in the style of run_mini.show(); control characters removed."""
-    for i, m in enumerate(messages):
+def show(messages, start: int = 0) -> None:
+    """Trajectory printout in the style of run_mini.show(); control characters removed.
+
+    Prints messages[start:], numbered as in the whole conversation.
+    """
+    for i, m in enumerate(messages[start:], start):
         if m.type == "human":
             print(printable(f"[{i}] user      : {m.text}"))
         elif m.type == "ai":
@@ -463,12 +473,14 @@ def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
 
 def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                  trace: dict | None = None, label: str = "",
-                 tools=grounding.VIRA_TOOLS) -> dict:
+                 tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
     counter = UsageCounter()
     t0 = time.monotonic()
-    result = run_task(agent, task, callbacks=[counter])
+    result = run_task(agent, task, callbacks=[counter], thread_id=thread_id)
+    messages = result["messages"]
+    turn = max((i for i, m in enumerate(messages) if m.type == "human"), default=0)
     print("\n=== trajectory ===")
-    show(result["messages"])
+    show(messages, turn)                 # this turn only; earlier turns were printed already
     if after:
         after(result)
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
@@ -494,7 +506,9 @@ def repl(label: str, agent, args: argparse.Namespace,
     if args.task:
         run_and_show(agent, args.task, after, trace, label, tools)
         return
-    print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, or 'quit'.")
+    print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, 'new' to start a new "
+          f"conversation, or 'quit'.")
+    thread_id = uuid.uuid4().hex         # one conversation: each reply sees the earlier turns
     while True:
         try:
             task = input("\ninput task> ").strip()
@@ -504,7 +518,11 @@ def repl(label: str, agent, args: argparse.Namespace,
         if not task or task.lower() in {"quit", "exit"}:
             print("bye")
             return
+        if task.lower() == "new":
+            thread_id = uuid.uuid4().hex
+            print("(new conversation)")
+            continue
         try:
-            run_and_show(agent, task, after, trace, label, tools)
+            run_and_show(agent, task, after, trace, label, tools, thread_id)
         except Exception as exc:
             print(printable(f"[error] {type(exc).__name__}: {exc}"))

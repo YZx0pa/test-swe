@@ -1,4 +1,5 @@
 """vira_tools + agent_kit on LangGraph: create_agent loop and the explicit workflow."""
+import argparse
 import json
 import os
 import stat
@@ -234,6 +235,57 @@ def test_model_call_cap_ends_the_run(vira):
     loop = [calls(call("find_talents", {"job_ids": [i]}, f"c{i}")) for i in range(1, 10)]
     run(scripted(*loop), "Find talents for jobs 1, 2, 3, 4, 5, 6, 7, 8 and 9.", step_limit=3)
     assert len(vira) == 3
+
+
+# --- conversations: later turns continue the same thread ---------------------
+def test_a_reply_continues_the_conversation_and_its_ids_are_the_users(vira):
+    agent = run_langgraph.build_agent(model=scripted(
+        say("Which applicants should I score?"),
+        calls(call("score_candidates", {"app_ids": [11, 12]}, "c1")), say("Scored 11 and 12.")))
+    agent_kit.run_task(agent, "Score the applicants.", thread_id="t1")
+    result = agent_kit.run_task(agent, "Applicants 11 and 12.", thread_id="t1")
+    assert [m.text for m in result["messages"] if m.type == "human"] == [
+        "Score the applicants.", "Applicants 11 and 12."]
+    assert tool_messages(result)["c1"].status != "error"      # 11 and 12 came from the user
+    assert [v["body"]["app_ids"] for v in vira] == [[11, 12]]
+
+
+def test_the_model_call_cap_is_per_turn_not_per_conversation(vira):
+    agent = run_langgraph.build_agent(model=scripted(
+        calls(call("find_talents", {"job_ids": [1]}, "c1")),
+        calls(call("find_talents", {"job_ids": [2]}, "c2")), say("Found talents for 1 and 2."),
+        calls(call("find_talents", {"job_ids": [3]}, "c3")), say("Found talents for 3.")),
+        step_limit=3)
+    agent_kit.run_task(agent, "Find talents for jobs 1 and 2.", thread_id="t1")
+    result = agent_kit.run_task(agent, "Now job 3.", thread_id="t1")    # a 4th and 5th call
+    assert len(vira) == 3 and agent_kit.final_text(result) == "Found talents for 3."
+
+
+def test_a_repeat_in_a_later_turn_is_still_refused(vira):
+    agent = run_langgraph.build_agent(model=scripted(
+        calls(call("find_talents", {"job_ids": [123]}, "c1")), say("Found 900001."),
+        calls(call("find_talents", {"job_ids": [123]}, "c2")), say("Same as before: 900001.")))
+    agent_kit.run_task(agent, "Find talents for job 123.", thread_id="t1")
+    result = agent_kit.run_task(agent, "Find them again.", thread_id="t1")
+    assert len(vira) == 1 and "identical to an earlier call" in tool_messages(result)["c2"].text
+
+
+def test_the_repl_keeps_one_conversation_until_new(vira, monkeypatch, capsys):
+    agent = run_langgraph.build_agent(model=scripted(
+        say("Which applicants should I score?"),
+        calls(call("score_candidates", {"app_ids": [11, 12]}, "c1")), say("Scored 11 and 12."),
+        say("Hello.")))
+    replies = iter(["Score the applicants.", "Applicants 11 and 12.", "new", "hi", "quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(replies))
+    agent_kit.repl("LangGraph", agent,
+                   argparse.Namespace(task=None, trace_json=None, mode="mock", tools="vira"))
+    out = capsys.readouterr().out
+    turns = [t.strip() for t in out.split("=== trajectory ===")[1:]]
+    assert turns[0].startswith("[0] user      : Score the applicants.")
+    assert turns[1].startswith("[2] user      : Applicants 11 and 12.")    # this turn only
+    assert "Score the applicants." not in turns[1]
+    assert "(new conversation)" in out and turns[2].startswith("[0] user      : hi")
+    assert [v["body"]["app_ids"] for v in vira] == [[11, 12]]
 
 
 # --- human in the loop -------------------------------------------------------
