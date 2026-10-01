@@ -29,6 +29,9 @@ JOBS = {
     7003: {"jobId": 7003, "jobName": "Product Designer", "status": "open", "isPrivate": False,
            "skills": ["Figma", "User research"], "minExp": 3, "maxExp": 6,
            "countryName": "Singapore", "vacancy": 1},
+    686412: {"jobId": 686412, "jobName": "Data Scientist", "status": "open", "isPrivate": False,
+             "skills": [], "minExp": None, "maxExp": None,
+             "countryName": "Singapore", "vacancy": 1},
 }
 USERS = [
     {"userId": 801, "firstName": "Alice", "lastName": "Johnson", "email": "alice.johnson@example.com"},
@@ -39,6 +42,10 @@ APPLICATIONS = {                       # appId -> (jobId, matchScore, stage)
     5101: (7001, 0.72, "applied"), 5102: (7001, 0.91, "applied"),
     5103: (7001, 0.85, "applied"), 5104: (7001, 0.64, "applied"),
     5201: (7002, 0.88, "shortlisted"), 5202: (7002, 0.59, "applied"),
+    674320: (686412, 0.90, "applied"), 674321: (686412, 0.88, "applied"),
+    674322: (686412, 0.86, "applied"), 674323: (686412, 0.84, "applied"),
+    674324: (686412, 0.82, "applied"), 674325: (686412, 0.80, "applied"),
+    674346: (686412, 0.78, "applied"), 674347: (686412, 0.76, "applied"),
 }
 SUGGESTED = {7001: [(910001, 0.93), (910002, 0.89), (910003, 0.81)],
              7002: [(920001, 0.86), (920002, 0.78)]}
@@ -169,11 +176,12 @@ def _status(status: str) -> Callable[[Dict], Result]:
 
 def _per_application(stage: str) -> Callable[[Dict], Result]:
     def handler(f) -> Result:
+        # User-driven action: the user chooses which applications to act on, so accept the
+        # ids they give rather than gating on the fixture.  (A real backend still checks the
+        # ids belong to the recruiter's company; the db validate_app_ids tool covers that.)
         passed = [{"error": False, "appId": a, "stage": stage, "message": f"Application {stage}"}
-                  for a in f["app_ids"] if a in APPLICATIONS]
-        failed = [{"error": True, "appId": a, "message": "Application not found"}
-                  for a in f["app_ids"] if a not in APPLICATIONS]
-        return {"failedArr": failed, "passedArr": passed, "existingArr": []}, None
+                  for a in f["app_ids"]]
+        return {"failedArr": [], "passedArr": passed, "existingArr": []}, None
     return handler
 
 

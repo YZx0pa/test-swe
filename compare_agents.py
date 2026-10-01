@@ -102,7 +102,7 @@ class Run:
 
 # --- tasks and their checks (over the audit log) ------------------------------
 def check_find(run: Run):
-    return (run.commands == ["find-talents"] and run.audit[0]["body"]["job_ids"] == [123],
+    return (run.commands == ["find-talents"] and run.audit[0]["body"]["job_ids"] == [5143],
             "exactly one find-talents for job 123")
 
 

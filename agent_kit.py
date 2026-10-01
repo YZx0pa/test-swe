@@ -80,6 +80,11 @@ Rules:
 - When you are done, reply in plain text without calling a tool. If the task is only
   partially done or cannot be fully completed, start that reply with
   SUMMARY: <what succeeded> | <what failed or is missing> | <why>
+- End EVERY reply that has no tool call with a status line as its LAST line, one of:
+    STATUS: done                 - the task is finished (succeeded or cannot proceed)
+    STATUS: needs_user: <what>   - you must get something from the user to continue
+  Use needs_user only when you are genuinely blocked on the user (e.g. a value no tool
+  can supply). Otherwise, if more tool calls are needed, make them instead of replying.
 """
 
 
@@ -354,12 +359,18 @@ DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
 
 
 def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = VIRA) -> dict:
-    """Which tools pause for a human: every one with --approve-all; in real mode, always
-    the ones that change data on VIRA (not in the toolset's read_only).  `mode` defaults to
-    the configured one (vira_tools.configure), so a real-mode agent can't be built
-    without them."""
+    """Which tools pause for a human.
+
+    Read-only tools (GET-style VIRA calls, db lookups/validations in toolset.read_only)
+    NEVER pause: they change nothing, so approving them is just noise.  So:
+      * --approve-all: every data-CHANGING tool (all names minus read_only);
+      * real mode: the same data-changing set (unsafe to skip on real VIRA);
+      * otherwise (mock, no --approve-all): nothing.
+    `mode` defaults to the configured one (vira_tools.configure), so a real-mode agent
+    can't be built without the write gates.
+    """
     if approve_all:
-        names = toolset.names
+        names = toolset.names - toolset.read_only
     elif (mode or vira_tools.current_mode()) == "real":
         names = toolset.names - toolset.read_only
     else:
@@ -613,38 +624,173 @@ def repl(label: str, agent, args: argparse.Namespace,
             print(printable(f"[error] {type(exc).__name__}: {exc}"))
 
 
+def _last_ai_text(messages) -> str:
+    for m in reversed(messages):
+        if m.type == "ai" and not m.tool_calls and m.text:
+            return m.text
+    return ""
+
+
+def read_status(messages) -> tuple[str, str]:
+    """(verdict, detail) from the agent's last prose reply.
+
+    verdict: "done" | "needs_user" | "continue".  Tolerant of a forgetful model:
+    a reply with no STATUS line is treated as "done" (it stopped calling tools), which
+    is the safe default -- the next user message then starts a fresh task.
+    """
+    text = _last_ai_text(messages)
+    if not text:
+        return "continue", ""          # still mid-loop (last message was a tool call)
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("STATUS:"):
+            body = line[len("STATUS:"):].strip()
+            if body.startswith("needs_user"):
+                return "needs_user", body.split(":", 1)[1].strip() if ":" in body else ""
+            return "done", ""
+    return "done", ""                  # prose, no STATUS: assume the task ended
+
+
+def extract_record(messages, read_only: frozenset) -> dict:
+    """A compact, deterministic record of one finished task -- no LLM.
+
+    Walks the thread in order and reports, for each value used in a data-CHANGING call,
+    where it came from (user text vs an earlier tool result), plus the actions taken and
+    the final outcome.  Read-only resolver/validator calls (find_*, validate_*) are not
+    stored as actions; they only serve as provenance for the ids the actions used.
+    """
+    instruction = next((m.text for m in messages if m.type == "human" and m.text), "")
+    # provenance sources, mirroring ToolCallGuard._bad_ids: user text + each tool result
+    sources = ([("task", m.text) for m in messages if m.type == "human"]
+               + [(f"step {i}", m.text) for i, m in enumerate(messages) if m.type == "tool"])
+    actions, resolved, seen_vals = [], [], set()
+    for m in messages:
+        if m.type != "ai":
+            continue
+        for tc in m.tool_calls:
+            if tc["name"] in read_only:
+                continue                               # resolver read: not an action
+            actions.append({"tool": tc["name"], "args": tc.get("args", {})})
+            for arg, entries in grounding.ground_args(tc.get("args", {}), sources).items():
+                for p in entries:
+                    key = (arg, json.dumps(p["value"], default=str))
+                    if key in seen_vals:
+                        continue
+                    seen_vals.add(key)
+                    src = p["sources"]
+                    origin = ("unknown" if not src
+                              else "user" if any(s == "task" for s in src)
+                              else "system (looked up)")
+                    resolved.append({"field": arg, "value": p["value"], "from": origin})
+    return {"instruction": instruction, "resolved": resolved, "actions": actions,
+            "outcome": _last_ai_text(messages)}
+
+
+def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int = 1800,
+                  hard_cap: int = 15) -> str:
+    """A short text block of recent finished tasks, injected into a new task as user text.
+
+    A record is kept if it is newer than `max_age_sec` (default 30 min) OR among the last
+    `keep_last` (default 5) -- so a quiet session still shows the last few, and a busy one
+    keeps everything recent, up to `hard_cap` (newest win) so the context can't blow up.
+
+    Because ToolCallGuard grounds ids against the user's words, any id named here becomes
+    usable in the new task (e.g. 'add sql to that same job 501') without being refused.
+    """
+    if not records:
+        return ""
+    now = time.time()
+    n = len(records)
+    kept = [r for i, r in enumerate(records)
+            if (now - r.get("ts", 0) <= max_age_sec) or i >= n - keep_last]
+    kept = kept[-hard_cap:]                              # ceiling; keep the newest
+    kept = [r for r in kept if r.get("actions")]         # a task that did nothing isn't memory
+    if not kept:
+        return ""
+
+    def _clean(text: str) -> str:
+        # strip control chars (e.g. a pasted "\r") and collapse whitespace
+        return " ".join((text or "").split())
+
+    def _tag(origin: str) -> str:
+        return "from user" if origin == "user" else "looked up" if "system" in origin else origin
+
+    lines = ["[earlier in this session - for reference]"]
+    for i, r in enumerate(kept, 1):
+        did = ", ".join(a["tool"] for a in r["actions"]) or "(none)"
+        # group resolved values by (field, origin) so 8 app_ids become one line, not eight
+        groups: dict[tuple, list] = {}
+        for v in r.get("resolved", []):
+            groups.setdefault((v["field"], _tag(v["from"])), []).append(v["value"])
+        val_parts = [f"{field} = {', '.join(str(x) for x in vals)} ({tag})"
+                     for (field, tag), vals in groups.items()]
+        lines.append(f"{i}. Instruction: {_clean(r['instruction'])}")
+        lines.append(f"   Did: {did}")
+        if val_parts:
+            lines.append(f"   Values: {'; '.join(val_parts)}")
+    return "\n".join(lines)
+
+
 async def arepl(label: str, agent, args: argparse.Namespace, tools,
                 after: Callable[[dict], None] | None = None) -> None:
     """Async twin of repl for toolsets with async tools (db/jeni_db).
 
-    `tools` is the toolset's names (as repl derives via cli_toolset); the caller passes
-    it, because a db toolset can't be re-resolved without the pool/context.
+    `tools` is the Toolset (so read_only is available for the finished-task record); a bare
+    name set is also accepted (then no record filtering / memory).
     """
+    names = getattr(tools, "names", tools)              # grounding wants the name set
+    read_only = getattr(tools, "read_only", frozenset())
     trace = None
     if getattr(args, "trace_json", None):
         trace = {"path": args.trace_json, "model": os.environ.get("CHAT_MODEL", "gpt-5-mini"),
                  "mode": args.mode, "repeat": 1, "tasks": {}, "runs": [],
                  "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if args.task:
-        await arun_and_show(agent, args.task, after, trace, label, tools)
+        await arun_and_show(agent, args.task, after, trace, label, names)
         return
     print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, 'new' to start a new "
           f"conversation, or 'quit'.")
+    records: list[dict] = []                            # finished-task memory, this session
     thread_id = uuid.uuid4().hex
+    awaiting = False                                    # are we mid-task, waiting on the user?
+    instruction = ""                                    # the task's ORIGINATING user text
     while True:
         try:
-            task = input("\ninput task> ").strip()
+            user = input("\ninput task> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nbye")
             return
-        if not task or task.lower() in {"quit", "exit"}:
+        if not user or user.lower() in {"quit", "exit"}:
             print("bye")
             return
-        if task.lower() == "new":
+        if user.lower() == "new":
             thread_id = uuid.uuid4().hex
+            awaiting = False
             print("(new conversation)")
             continue
+        # A fresh task (not a reply to a pending question) carries the memory digest in,
+        # as user text, so past ids are both visible to the model and grounded for the guard.
+        # Keep the ORIGINATING instruction separately, so the record stores what the user
+        # actually typed -- not the injected digest (which would nest, digest-in-digest).
+        task = user
+        if not awaiting:
+            instruction = user                         # first turn of this task
+            digest = memory_digest(records)
+            if digest:
+                task = f"{digest}\n\n{user}"
         try:
-            await arun_and_show(agent, task, after, trace, label, tools, thread_id)
+            result = await arun_and_show(agent, task, after, trace, label, names,
+                                         thread_id)
         except Exception as exc:
             print(printable(f"[error] {type(exc).__name__}: {exc}"))
+            continue
+        verdict, detail = read_status(result.get("messages", []))
+        if verdict == "needs_user":
+            awaiting = True                            # keep the thread; next input continues it
+        else:                                          # done (or treated as done)
+            record = extract_record(result.get("messages", []), read_only)
+            record["instruction"] = instruction        # the real instruction, never the digest
+            record["ts"] = time.time()                 # completion time, for memory_digest's age window
+            records.append(record)
+            thread_id = uuid.uuid4().hex               # refresh: next task starts clean
+            awaiting = False

@@ -94,7 +94,7 @@ async def amain(args):
     try:
         toolset = agent_kit.cli_toolset(args, query_tools=query_tools, context=context)
         agent = build_agent(toolset, approve_all=args.approve_all, step_limit=args.step_limit)
-        await agent_kit.arepl("LangGraph", agent, args, toolset.names)
+        await agent_kit.arepl("LangGraph", agent, args, toolset)
     finally:
         if pool is not None:
             await pool.close()
