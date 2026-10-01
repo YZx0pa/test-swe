@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+import re
 
 from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
 from langchain_core.callbacks import BaseCallbackHandler
@@ -357,6 +358,16 @@ def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
 
 DECISIONS = {"allowed_decisions": ["approve", "edit", "reject"]}
 
+# Tools that ALWAYS pause for a human, in any mode and even without --approve-all, because
+# acting on the wrong ones is costly/irreversible (bulk actions on candidates, ownership, etc.).
+# Only names that exist in the active toolset are gated, so this is safe for vira/jeni/jeni_db.
+ALWAYS_CONFIRM = frozenset({
+    "shortlist_multiple_application",
+    "reject_multiple_application",
+    "transfer_job_ownership",
+    "share_application",
+})
+
 
 def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = VIRA) -> dict:
     """Which tools pause for a human.
@@ -366,6 +377,8 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
       * --approve-all: every data-CHANGING tool (all names minus read_only);
       * real mode: the same data-changing set (unsafe to skip on real VIRA);
       * otherwise (mock, no --approve-all): nothing.
+    ON TOP of that, tools in ALWAYS_CONFIRM always pause (any mode), if present in the
+    toolset -- high-stakes actions a human should see every time.
     `mode` defaults to the configured one (vira_tools.configure), so a real-mode agent
     can't be built without the write gates.
     """
@@ -375,6 +388,7 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
         names = toolset.names - toolset.read_only
     else:
         names = set()
+    names |= (ALWAYS_CONFIRM & toolset.names)      # always-confirm, whatever the mode
     return {name: DECISIONS for name in sorted(names)}
 
 
@@ -425,21 +439,189 @@ def _ask_args() -> dict:
         print('expected a JSON object, e.g. {"job_ids": [124]}')
 
 
-def ask_human(request: dict) -> list[dict]:
-    """One decision per pending tool call: approve, reject, or edit its args."""
+_INTERPRET_PROMPT = (
+    "Interpret the user's latest reply about a pending action. Return ONLY one JSON object, "
+    "one of these shapes:\n"
+    '  {"decision":"approve"}\n'
+    '  {"decision":"reject"}\n'
+    '  {"decision":"update","args":{...}}\n'
+    '  {"decision":"clarify","message":"..."}\n'
+    "Context you are given: `action`, `original_args` (the ONLY allowed values), "
+    "`current_args` (the proposed selection so far), and `latest_user_reply`.\n"
+    "Rules:\n"
+    "- approve: accept current_args unchanged (e.g. 'yes', 'looks good'). If nothing changes, approve.\n"
+    "- reject: cancel the action (e.g. 'no', 'cancel').\n"
+    "- update: return the COMPLETE replacement args (same arg names).\n"
+    "- clarify: ask only if the instruction is unclear, or names a value not in original_args.\n"
+    "- List values are ORDERED SETS: never repeat a value.\n"
+    "- 'add <ids>' adds values not already selected; 'remove/drop/except <ids>' removes values.\n"
+    "- 'only/keep/select/first N/last N/top N' REPLACES the list (first/last/top use "
+    "original_args order).\n"
+    "- Every value must come from original_args; never invent one.\n"
+    "- Do NOT perform the action. The script handles confirmation and execution.")
+
+
+def _confirm_payload(action: dict, original_args: dict, current_args: dict, reply: str) -> str:
+    """The user-message payload for the confirm model: action, allowed set, current, reply."""
+    return json.dumps({"action": action, "original_args": original_args,
+                       "current_args": current_args, "latest_user_reply": reply},
+                      ensure_ascii=False)
+
+
+CONFIRM_USAGE = None        # UsageCounter for the CURRENT confirmation (set per [approval])
+CONFIRM_TURN = None         # UsageCounter summing all confirmations in the whole turn
+
+
+def _interpret(history: list, model) -> dict | None:
+    """Send the confirmation conversation to the model; return its decision dict or None.
+
+    `history` is the running message list for THIS confirmation only (system prompt, the
+    original call, and each instruction/result since) -- so the model has the original ids
+    and the changes so far in context, and validates against them itself (no code guard).
+
+    On failure prints a short reason (set JENI_DEBUG=0 to silence) and returns None."""
+    if model is None:
+        if os.environ.get("JENI_DEBUG", "1") != "0":
+            print("  [interpret] no confirmation model (build failed or CHAT_MODEL unset)")
+        return None
+    cfg = {"callbacks": [CONFIRM_USAGE]} if CONFIRM_USAGE is not None else {}
+    try:
+        reply = model.invoke(history, config=cfg)
+        # LangChain chat reply -> text. .text is a property; fall back to .content.
+        raw = getattr(reply, "text", "") or ""
+        if not raw:
+            content = getattr(reply, "content", reply)
+            if isinstance(content, list):      # content parts -> join the text pieces
+                content = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
+                                  for p in content)
+            raw = str(content)
+        raw = raw.strip()
+        brace = raw[raw.find("{"): raw.rfind("}") + 1] if "{" in raw else ""
+        out = json.loads(brace) if brace else None
+        if isinstance(out, dict) and "decision" in out:
+            return out
+        if os.environ.get("JENI_DEBUG", "1") != "0":
+            print(f"  [interpret] reply had no usable decision; got: {raw[:200]!r}")
+        return None
+    except Exception as exc:
+        if os.environ.get("JENI_DEBUG", "1") != "0":
+            print(f"  [interpret] {type(exc).__name__}: {exc}")
+        return None
+
+
+def ask_human(request: dict, model=None) -> list[dict]:
+    """One decision per pending tool call: approve, reject, or edit its args.
+
+    Fast paths (no model): press Enter or 'y' to approve, 'n' to reject.  Any other text is
+    a free-text instruction sent -- with this confirmation's history -- to the interpreter
+    model, which applies it to the current proposal (add/remove/select) or asks back if a
+    value isn't in the original call.  Each change is shown; nothing runs until Enter/y.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    global CONFIRM_USAGE, CONFIRM_TURN
+    model = model or confirm_chat_model()
     decisions = []
     for action in request["action_requests"]:
-        print(printable(f"\n[approval] {action['name']}"
-                        f"({json.dumps(action['args'], ensure_ascii=False)})"))
-        answer = input("approve? [y]es / [n]o / [e]dit args > ").strip().lower()
-        if answer.startswith("y"):
-            decisions.append({"type": "approve"})
-        elif answer.startswith("e"):
-            decisions.append({"type": "edit",
-                              "edited_action": {"name": action["name"], "args": _ask_args()}})
-        else:
-            decisions.append({"type": "reject", "message": "The user declined this call."})
+        base = {"name": action["name"], "args": action.get("args", {})}
+        proposal = dict(base["args"])
+        # history for THIS confirmation only: system rules + the original call
+        history = [SystemMessage(_INTERPRET_PROMPT)]   # per-turn payloads carry the args + reply
+        conf = UsageCounter()          # tokens/calls for THIS confirmation
+        CONFIRM_USAGE = conf           # _interpret counts into the current confirmation
+        calls = 0                      # interpreter calls so far, this confirmation (cap 5)
+        MAX_CALLS = 5
+        print(printable(f"\n[approval] {base['name']}"
+                        f"({json.dumps(proposal, ensure_ascii=False)})"))
+        while True:
+            answer = input("approve? [Enter/y]es  [n]o  or say what to change > ").strip()
+            low = answer.lower()
+            if low in {"", "y", "yes"}:
+                decisions.append({"type": "approve"} if proposal == base["args"] else
+                                 {"type": "edit",
+                                  "edited_action": {"name": base["name"], "args": proposal}})
+                break
+            if low in {"n", "no"}:
+                decisions.append({"type": "reject", "message": "The user declined this call."})
+                break
+            if calls >= MAX_CALLS:     # cap reached without a yes/no -> bail to the main agent
+                print(f"  reached {MAX_CALLS} attempts without a decision; abandoning this call.")
+                decisions.append({"type": "reject",
+                                  "message": f"Approval abandoned: the change could not be "
+                                             f"confirmed after {MAX_CALLS} attempts."})
+                break
+            # free text -> interpreter, with the running history as context
+            history.append(HumanMessage(_confirm_payload(
+                base["name"], base["args"], proposal, answer)))
+            out = _interpret(history, model)
+            calls += 1
+            if out is None:
+                print("  (couldn't reach the interpreter) -- press Enter to run, 'n' to reject.")
+                history.pop()
+                continue
+            history.append(AIMessage(json.dumps(out, ensure_ascii=False)))
+            decision = out.get("decision")
+            if decision == "reject":
+                decisions.append({"type": "reject", "message": "The user declined this call."})
+                break
+            if decision == "approve":
+                decisions.append({"type": "approve"} if proposal == base["args"] else
+                                 {"type": "edit",
+                                  "edited_action": {"name": base["name"], "args": proposal}})
+                break
+            if decision == "clarify":                   # the model needs the user to clarify
+                print(printable(f"  {out.get('message', 'please clarify')}"))
+                continue
+            if decision == "update" and isinstance(out.get("args"), dict):
+                # safety net: drop duplicates (order-preserving) and any value not in the
+                # ORIGINAL call -- the model should already do this, but guarantee it.
+                cleaned = {}
+                for k, v in out["args"].items():
+                    if isinstance(v, list):
+                        orig = base["args"].get(k)
+                        allowed = list(orig) if isinstance(orig, list) else None
+                        seen, out_list = set(), []
+                        for x in v:
+                            if x in seen:
+                                continue
+                            if allowed is not None and x not in allowed:
+                                continue          # not offered in the original call -> drop
+                            seen.add(x)
+                            out_list.append(x)
+                        cleaned[k] = out_list
+                    else:
+                        cleaned[k] = v
+                proposal = cleaned
+                print(printable(f"  updated -> {base['name']}"
+                                f"({json.dumps(proposal, ensure_ascii=False)})"))
+                print("  press Enter to run this, 'n' to reject, or say another change.")
+                continue
+            print("  couldn't apply that -- press Enter to run, 'n' to reject, or rephrase.")
+        if conf.calls:                 # per-confirmation usage line, when this [approval] closes
+            print(f"  (confirmation {_confirm_model_id()}: {conf.calls} call(s), "
+                  f"tokens in/out: {conf.input_tokens}/{conf.output_tokens})")
+            if CONFIRM_TURN is not None:          # add into the whole-turn total
+                CONFIRM_TURN.calls += conf.calls
+                CONFIRM_TURN.input_tokens += conf.input_tokens
+                CONFIRM_TURN.output_tokens += conf.output_tokens
     return decisions
+
+
+CONFIRM_MODEL = os.environ.get("CONFIRM_MODEL", "gpt-4o-mini")  # small model for confirmations
+
+
+@functools.lru_cache(maxsize=1)
+def confirm_chat_model():
+    """The dedicated chat model for interrupt confirmations (no tools). Small/cheap by
+    default (CONFIRM_MODEL, e.g. gpt-5-mini or gpt-4o-mini), separate from the agent model."""
+    try:
+        return build_chat_model(CONFIRM_MODEL)
+    except Exception:
+        return None
+
+
+def _confirm_model_id() -> str:
+    """The confirmation model's id, for the usage line."""
+    return CONFIRM_MODEL
 
 
 def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_human,
@@ -540,6 +722,9 @@ def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
         after(result)
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
           f"{counter.input_tokens}/{counter.output_tokens})")
+    if CONFIRM_TURN is not None and CONFIRM_TURN.calls:
+        print(f"(confirmation model {_confirm_model_id()} total: {CONFIRM_TURN.calls} call(s), "
+              f"tokens in/out: {CONFIRM_TURN.input_tokens}/{CONFIRM_TURN.output_tokens})")
     if trace is not None:
         trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0,
                                         tools))
@@ -553,6 +738,9 @@ def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
 def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                  trace: dict | None = None, label: str = "",
                  tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
+    global CONFIRM_USAGE, CONFIRM_TURN
+    CONFIRM_USAGE = UsageCounter()        # current confirmation (reset again per [approval])
+    CONFIRM_TURN = UsageCounter()         # fresh per turn; sums all confirmations this turn
     counter = UsageCounter()
     t0 = time.monotonic()
     result = run_task(agent, task, callbacks=[counter], thread_id=thread_id)
@@ -584,6 +772,9 @@ async def arun_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = 
 async def arun_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                         trace: dict | None = None, label: str = "",
                         tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
+    global CONFIRM_USAGE, CONFIRM_TURN
+    CONFIRM_USAGE = UsageCounter()        # current confirmation (reset again per [approval])
+    CONFIRM_TURN = UsageCounter()         # fresh per turn; sums all confirmations this turn
     counter = UsageCounter()
     t0 = time.monotonic()
     result = await arun_task(agent, task, callbacks=[counter], thread_id=thread_id)
@@ -651,39 +842,102 @@ def read_status(messages) -> tuple[str, str]:
     return "done", ""                  # prose, no STATUS: assume the task ended
 
 
+_EXECUTED_RE = re.compile(r"[Ee]xecuted instead:[^\n]*?with arguments\s*(\{[^\n]*\})")
+
+
+def _result_ids(tool_msg_text: str) -> list:
+    """The ids a read-only resolver returned, for the Resolve trail.  Handles the common
+    shapes: a top-level list of ints under 'applications'/'valid_values', or selection
+    'candidates' of {..._id: N}.  Best-effort: returns [] if nothing id-like is found."""
+    text = tool_msg_text or ""
+    try:
+        data = json.loads(text[: text.rfind("}") + 1])
+    except (ValueError, AttributeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    res = data.get("result", data)
+    if not isinstance(res, dict):
+        res = data
+    for key in ("applications", "valid_values"):
+        v = res.get(key) if isinstance(res, dict) else None
+        if isinstance(v, list) and v and all(isinstance(x, int) for x in v):
+            return v
+    sel = res.get("selection") if isinstance(res, dict) else None
+    if isinstance(sel, dict) and isinstance(sel.get("candidates"), list):
+        ids = [c[k] for c in sel["candidates"] if isinstance(c, dict)
+               for k in c if k.endswith("_id") and isinstance(c[k], int)]
+        if ids:
+            return ids
+    return []
+
+
+def _executed_args(tool_msg_text: str) -> dict | None:
+    """If a tool result carries the HITL 'Executed instead: ... with arguments {...}' note,
+    return those executed args; else None.  This is how an interrupt EDIT is recovered: the
+    agent's own message still shows its ORIGINAL call, but the edited call is what ran."""
+    if not tool_msg_text or "xecuted instead" not in tool_msg_text:
+        return None
+    m = _EXECUTED_RE.search(tool_msg_text)
+    if not m:
+        return None
+    try:
+        args = json.loads(m.group(1))
+        return args if isinstance(args, dict) else None
+    except ValueError:
+        return None
+
+
 def extract_record(messages, read_only: frozenset) -> dict:
     """A compact, deterministic record of one finished task -- no LLM.
 
-    Walks the thread in order and reports, for each value used in a data-CHANGING call,
-    where it came from (user text vs an earlier tool result), plus the actions taken and
-    the final outcome.  Read-only resolver/validator calls (find_*, validate_*) are not
-    stored as actions; they only serve as provenance for the ids the actions used.
+    Reports, for each data-CHANGING call, the args that ACTUALLY RAN (an interrupt edit
+    replaces the agent's proposed args, recovered from the tool result's 'Executed instead'
+    note), where each value came from, and the final outcome.  Read-only resolver/validator
+    calls are not stored as actions; they only provide provenance for the ids used.
     """
     instruction = next((m.text for m in messages if m.type == "human" and m.text), "")
-    # provenance sources, mirroring ToolCallGuard._bad_ids: user text + each tool result
     sources = ([("task", m.text) for m in messages if m.type == "human"]
                + [(f"step {i}", m.text) for i, m in enumerate(messages) if m.type == "tool"])
-    actions, resolved, seen_vals = [], [], set()
-    for m in messages:
+    # pair each ai tool call with the tool message that follows it, to find an edit note
+    resolve, actions, resolved, seen_vals = [], [], [], set()
+    for i, m in enumerate(messages):
         if m.type != "ai":
             continue
         for tc in m.tool_calls:
+            nxt = next((messages[j] for j in range(i + 1, len(messages))
+                        if messages[j].type == "tool"), None)
             if tc["name"] in read_only:
-                continue                               # resolver read: not an action
-            actions.append({"tool": tc["name"], "args": tc.get("args", {})})
-            for arg, entries in grounding.ground_args(tc.get("args", {}), sources).items():
+                # a lookup/validation step: record HOW things were found (and what it returned)
+                resolve.append({"tool": tc["name"], "args": tc.get("args", {}),
+                                "found": _result_ids(nxt.text) if nxt is not None else []})
+                continue
+            args = tc.get("args", {})
+            edited = False
+            if nxt is not None:                   # HITL edit -> the executed args, not the proposed
+                executed = _executed_args(nxt.text)
+                if executed is not None:
+                    args = executed
+                    edited = True                 # a human chose these at the approval step
+            actions.append({"tool": tc["name"], "args": args})
+            for arg, entries in grounding.ground_args(args, sources).items():
                 for p in entries:
                     key = (arg, json.dumps(p["value"], default=str))
                     if key in seen_vals:
                         continue
                     seen_vals.add(key)
                     src = p["sources"]
-                    origin = ("unknown" if not src
-                              else "user" if any(s == "task" for s in src)
-                              else "system (looked up)")
+                    if edited:
+                        origin = "user (reviewer-selected)"   # chosen by the human at approval
+                    elif not src:
+                        origin = "unknown"
+                    elif any(s == "task" for s in src):
+                        origin = "user"
+                    else:
+                        origin = "system (looked up)"
                     resolved.append({"field": arg, "value": p["value"], "from": origin})
-    return {"instruction": instruction, "resolved": resolved, "actions": actions,
-            "outcome": _last_ai_text(messages)}
+    return {"instruction": instruction, "resolve": resolve, "resolved": resolved,
+            "actions": actions, "outcome": _last_ai_text(messages)}
 
 
 def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int = 1800,
@@ -713,11 +967,22 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
         return " ".join((text or "").split())
 
     def _tag(origin: str) -> str:
-        return "from user" if origin == "user" else "looked up" if "system" in origin else origin
+        return ("from user" if origin == "user"
+                else "reviewer-selected" if "reviewer" in origin
+                else "looked up" if "system" in origin else origin)
 
     lines = ["[earlier in this session - for reference]"]
     for i, r in enumerate(kept, 1):
         did = ", ".join(a["tool"] for a in r["actions"]) or "(none)"
+        resolve_parts = []
+        for a in r.get("resolve", []):
+            found = a.get("found") or []
+            if found:
+                shown = ", ".join(str(x) for x in found[:12]) + ("…" if len(found) > 12 else "")
+                resolve_parts.append(f"{a['tool']} -> [{shown}]")
+            else:
+                resolve_parts.append(a["tool"])
+        resolve = "; ".join(resolve_parts)
         # group resolved values by (field, origin) so 8 app_ids become one line, not eight
         groups: dict[tuple, list] = {}
         for v in r.get("resolved", []):
@@ -725,6 +990,8 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
         val_parts = [f"{field} = {', '.join(str(x) for x in vals)} ({tag})"
                      for (field, tag), vals in groups.items()]
         lines.append(f"{i}. Instruction: {_clean(r['instruction'])}")
+        if resolve:
+            lines.append(f"   Resolve: {resolve}")
         lines.append(f"   Did: {did}")
         if val_parts:
             lines.append(f"   Values: {'; '.join(val_parts)}")
