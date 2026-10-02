@@ -350,6 +350,12 @@ def execute(cmd: str, path: str, query: Dict, body: Dict, *, mode: str,
         _audit(cmd, query, body, {"status": "exception"}, error=type(exc).__name__)
         raise
     _audit(cmd, query, body, result)
+    return mask_result(cmd, result)
+
+
+def mask_result(cmd: str, result: Dict) -> Dict:
+    """A reply to `cmd` as the model may see it: emails as tokens (colleagues' for the user
+    directory), other personal values redacted."""
     return _mask_pii(result, pii_vault.COLLEAGUE if cmd in DIRECTORY_COMMANDS else pii_vault.RECORD)
 
 

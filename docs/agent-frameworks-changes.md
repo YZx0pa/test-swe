@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 335 offline tests (section 3). |
+| `tests/` | 347 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -192,7 +192,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 335 passed
+# 347 passed
 ```
 
 How the tests stay hermetic:
@@ -219,6 +219,7 @@ How the tests stay hermetic:
 | `tests/test_mini_env.py` | 46 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 | `tests/test_jeni.py` | 63 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a read runs again after a write but not twice in a row, a failed write runs again once another write ran but a successful one never repeats, a reviewer's edit or rejection stands (no second card, the call refused) until the user writes again, a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). The mock forgets changes by default; a kept State remembers them (a job made public can be published, stages and teams stick, the fixtures stay untouched), a created job and candidate are found by the db lookups until `reset()`, and the activity log keeps ids, never names or emails. |
 | `tests/test_db.py` | 19 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
+| `tests/test_vira_results.py` | 12 | Reading an engine group back (section 10): the reply shape from the tables, polling until nothing is queued, the deadline, no read without a source; the read-back masked and audited, failures with reasons, queued otherwise; `vira_check.py`'s verdicts, read-only payloads and settings check. |
 | `tests/test_pii.py` | 11 | Email tokens (section 11): a token hides the address and only its vault opens it; who may send a token or "me"; results carry tokens and the address goes out only at send time, with the audit log redacted; an unknown token sends nothing; the CLI redacts; a colleague found by search can be shared with, a candidate's token is refused, "me" is the signed-in user (and asks without one); candidate fields take a typed address only; directory lookups return colleague tokens and take "me". |
 | `tests/test_demo.py` | 18 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt differs only in the two closing rules (no `SUMMARY:`, no `STATUS:`), and the build fails if either changes; routine writes run while a shortlist asks, and the changes show on the panel; with `gate_writes` every write asks; a rejected transfer never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. The script: `SCRIPT.md` has every prompt and `/demo/prompts` serves the first ones; every check fails on the starting data unless the act names its cards; the rehearsal (on the in-process graph with a scripted model) passes an edited shortlist, refuses a second shortlist with no card, fails a reject act whose card never appeared, sends a follow-up only while the check fails, and deletes its threads and resets the data. |
 
@@ -732,18 +733,24 @@ Jeni's task groups in `--mode real` go to the VIRA engine. Findings and what isn
 | `recruiter_cli.py` | `TASK_GROUP_PATH` calls go to `VIRA_ACTUAL_LOCATION` (a full URL, or a path under `VIRA_BASE_URL`) with only `xrtoken: $VIRA_XRTOKEN`; the other endpoints keep `VIRA_BASE_URL` and `x-api-key`. `_real_mode_problem(path)` checks the setting the call needs and names it, never the host. |
 | `jeni_tools.py` | `PATH` is `recruiter_cli.TASK_GROUP_PATH`. Every group carries an `agent_session_uuid`, one per conversation (`session_uuid(thread_id)`; tools read the thread from their `RunnableConfig`). `project()` reports the engine's "received" reply as `queued`, and `RULES` says to report it as submitted. |
 | `.env.example`, `tests/conftest.py` | `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` (placeholders); the tests blank both. |
+| `vira_results.py` (new) | Reads a task group's outcome back: with `VIRA_RESULT_SOURCE=db`, polls the engine's tables on `TRON_POSTGRES_DSN` by the group's uuid (read-only) up to `VIRA_RESULT_WAIT` seconds, and returns it in the engine's reply shape. |
+| `jeni_tools.py` (read-back) | An engine acknowledgement makes `run()` wait for the outcome, mask it (`recruiter_cli.mask_result`), audit the read (`read-result`) and project it; still queued, or unreachable, is reported queued. |
+| `vira_check.py` (new) | `python vira_check.py [--wait N]`: three read-only groups to the real engine, read back, with verdicts on chaining and independence; exit 1 while anything is still queued. |
+| `tests/test_vira_results.py` | 12 offline tests: rows become the reply shape, polling stops when nothing is queued and reads only this group, a deadline returns it unfinished, nothing is read without a source; the outcome is read back masked and audited, a failed sub-task says why, no outcome means queued; the check's verdicts, its read-only payloads, and that it sends nothing without its settings. |
 | `tests/test_recruiter_cli.py`, `tests/test_jeni.py` | Task groups go to the engine with only the xrtoken, and the other endpoints keep their auth; a relative location is under `VIRA_BASE_URL`; a missing location or token, or plain http, sends nothing; each conversation is one session; a queued reply is reported as queued. |
 
 ### Run it
 
 Set `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` in `.env` (the token decides whose rights the tasks
-run with), then:
+run with), and `VIRA_RESULT_SOURCE=db` to read outcomes back over the TRON tunnel, then:
 
 ```bash
-python run_langgraph.py --mode real --tools jeni --task "Show me the details of job <id>"   # a read: answers "submitted"
+python vira_check.py                                                                       # does the engine run task groups? (read-only)
+python run_langgraph.py --mode real --tools jeni --task "Show me the details of job <id>"   # waits for the outcome, or answers "submitted"
 ```
 
-On staging today the group stays queued: see §15 of the design doc.
+On staging today groups stay queued (design doc §15); `vira_check.py` says so, and gives its
+verdicts once they run.
 
 ---
 

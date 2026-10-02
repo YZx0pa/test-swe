@@ -38,6 +38,7 @@ from pydantic import ConfigDict, Field, ValidationError, create_model
 
 import pii_vault
 import recruiter_cli as vira
+import vira_results
 import vira_tools
 
 HERE = Path(__file__).resolve().parent
@@ -392,6 +393,33 @@ def payload(task: dict, args: dict, session: str | None = None) -> dict:
                                       "description": sub["description"], "fields": fields}]}]}
 
 
+QUEUED = {"status": "queued", "task_status": "queued", "failed_reason": None,
+          "result": {"message": "VIRA accepted the task and runs it in the background; "
+                                "its outcome isn't known yet."}}
+
+
+def _queued_uuid(result: Dict) -> str | None:
+    """The group's uuid when the engine only acknowledged it ("We are processing your tasks")."""
+    reply = result.get("result") if result.get("status") == "ok" else None
+    if isinstance(reply, dict) and reply.get("agentTaskGroupUuid") and "tasks" not in reply:
+        return reply["agentTaskGroupUuid"]
+    return None
+
+
+def _read_back(command: str, group_uuid: str) -> Dict | None:
+    """The group's outcome from vira_results, masked like any VIRA reply and audited, or None."""
+    try:
+        group = vira_results.wait_for(group_uuid)
+    except Exception as exc:           # e.g. the database is unreachable: still just queued
+        vira._audit("read-result", {}, {"agentTaskGroupUuid": group_uuid, "for": command},
+                    {"status": "exception"}, error=type(exc).__name__)
+        return None
+    if group is None:
+        return None
+    vira._audit("read-result", {}, {"agentTaskGroupUuid": group_uuid, "for": command}, group)
+    return vira.mask_result(command, group)
+
+
 def project(result: Dict) -> Dict:
     """What the model sees: the sub-task's status and result, not the whole group.
 
@@ -400,16 +428,14 @@ def project(result: Dict) -> Dict:
     """
     if result.get("status") != "ok":
         return result
-    reply = result.get("result") or {}
-    if isinstance(reply, dict) and reply.get("agentTaskGroupUuid") and "tasks" not in reply:
-        # The VIRA engine queues the group and runs it later: nothing is known yet.
-        return {"status": "queued", "task_status": "queued", "failed_reason": None,
-                "result": {"message": "VIRA accepted the task and runs it in the background; "
-                                      "its outcome isn't known yet."}}
+    if _queued_uuid(result):
+        return QUEUED      # the VIRA engine queued the group and runs it later: nothing is known yet
     try:
         sub = result["result"]["tasks"][0]["subTasks"][0]
     except (KeyError, IndexError, TypeError):
         return {"status": "error", "message": "unexpected VIRA reply (no sub-task result)"}
+    if str(sub.get("agentSubTaskStatus")).lower() in vira_results.UNFINISHED:
+        return QUEUED      # read back, but still not run when the wait ran out
     done = sub.get("agentSubTaskStatus") == "completed"
     return {"status": "ok" if done else "error", "task_status": sub.get("agentSubTaskStatus"),
             "failed_reason": sub.get("failedReason"), "result": sub.get("agentSubTaskResponse")}
@@ -454,11 +480,14 @@ def run(name: str, args: dict, session: str | None = None) -> Dict:
         return {"status": "error", "message": "The signed-in user's email isn't known here: ask "
                                               "the user to type it."}
     try:
-        result = vira.execute(name.replace("_", "-"), PATH, {},
-                              payload(catalog()[name], clean, session),
+        command = name.replace("_", "-")
+        result = vira.execute(command, PATH, {}, payload(catalog()[name], clean, session),
                               mode=vira_tools.current_mode(), confirmed=False)
     except Exception as exc:        # e.g. VIRA unreachable; the message may name hosts
         return {"status": "error", "message": f"VIRA call failed ({type(exc).__name__})"}
+    group_uuid = _queued_uuid(result)
+    if group_uuid:                  # the engine runs it in the background: wait for the outcome
+        result = _read_back(command, group_uuid) or result
     return project(result)
 
 
