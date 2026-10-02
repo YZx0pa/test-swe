@@ -14,6 +14,7 @@ synthetic.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import threading
 import time
@@ -25,16 +26,16 @@ NOTE = "SYNTHETIC mock response"
 _NS = uuid.UUID("6f1c2a52-6a0e-4c43-9a57-000000000000")
 
 JOBS = {
-    7001: {"jobId": 7001, "jobName": "Senior Backend Engineer", "status": "open", "isPrivate": True,
+    7001: {"jobId": 7001, "openDate": "2026-08-21", "jobName": "Senior Backend Engineer", "status": "open", "isPrivate": True,
            "skills": ["Python", "Go", "PostgreSQL"], "minExp": 5, "maxExp": 8,
            "countryName": "Singapore", "vacancy": 2},
-    7002: {"jobId": 7002, "jobName": "Data Analyst", "status": "closed", "isPrivate": False,
+    7002: {"jobId": 7002, "openDate": "2026-07-02", "jobName": "Data Analyst", "status": "closed", "isPrivate": False,
            "skills": ["SQL", "Tableau"], "minExp": 2, "maxExp": 4,
            "countryName": "Malaysia", "vacancy": 1},
-    7003: {"jobId": 7003, "jobName": "Product Designer", "status": "open", "isPrivate": False,
+    7003: {"jobId": 7003, "openDate": "2026-09-10", "jobName": "Product Designer", "status": "open", "isPrivate": False,
            "skills": ["Figma", "User research"], "minExp": 3, "maxExp": 6,
            "countryName": "Singapore", "vacancy": 1},
-    686412: {"jobId": 686412, "jobName": "Data Scientist", "status": "open", "isPrivate": False,
+    686412: {"jobId": 686412, "openDate": "2026-09-15", "jobName": "Data Scientist", "status": "open", "isPrivate": False,
              "skills": [], "minExp": None, "maxExp": None,
              "countryName": "Singapore", "vacancy": 1},
 }
@@ -98,7 +99,8 @@ class State:
 
     def _sync_db(self) -> None:
         cid = self.db["company_id"]
-        self.db["jobs"][:] = [{"jobId": j["jobId"], "jobName": j["jobName"], "company_id": cid}
+        self.db["jobs"][:] = [{"jobId": j["jobId"], "jobName": j["jobName"], "company_id": cid,
+                               "openDate": _date(j.get("openDate"))}
                               for j in self.jobs.values()]
         self.db["users"][:] = [{"userId": u["userId"], "firstname": u["firstName"],
                                 "lastname": u["lastName"], "email": u["email"], "company_id": cid}
@@ -173,10 +175,14 @@ def created_app_id(email: str) -> int:
     return 6000 + zlib.crc32(email.strip().lower().encode()) % 1000
 
 
+def _date(text: str | None) -> datetime.date | None:
+    return datetime.date.fromisoformat(text) if text else None
+
+
 def _new_job(job_id: int, name: str, **fields) -> Dict:
     return {"jobId": job_id, "jobName": name, "status": "open", "isPrivate": True,
             "skills": [], "minExp": None, "maxExp": None, "countryName": None, "vacancy": 1,
-            **fields}
+            "openDate": time.strftime("%Y-%m-%d"), **fields}
 
 
 def _job(s: State, job_id: Any) -> Dict | None:

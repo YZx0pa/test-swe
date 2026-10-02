@@ -66,9 +66,11 @@ def _resolve_one(rows: List[Mapping[str, Any]], id_key: str, out_field: str,
 
 
 def _job_label(row: Mapping[str, Any]) -> str:
-    """'Data Scientist (opened 2026-08-21)': jobs often share a title, their open dates differ."""
+    """'Data Scientist (job 501, opened 2026-08-21)': jobs often share a title, so the label has
+    the id and, when known, the open date that tells them apart."""
     opened = row.get("openDate")
-    return f"{row['jobName']} (opened {opened:%Y-%m-%d})" if opened else row["jobName"]
+    details = f"job {row['jobId']}" + (f", opened {opened:%Y-%m-%d}" if opened else "")
+    return f"{row['jobName']} ({details})"
 
 
 def _user_label(row: Mapping[str, Any]) -> str:

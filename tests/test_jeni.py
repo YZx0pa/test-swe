@@ -596,6 +596,31 @@ def test_every_write_has_a_plain_summary_and_other_tools_a_fallback():
                                                         "message": "x" * 2000})) < 200
 
 
+def test_values_typed_in_lower_case_are_sent_tidied(audit_log):
+    jeni_tools.run("create_job", {"job_title": "senior backend engineer", "skills": ["python", "sql", "node.js", "Go"],
+                                  "min_exp": 3, "max_exp": 5})
+    jeni_tools.run("create_application_to_job", {"job_id": 7001, "candidate_name": "maya lim",
+                                                 "candidate_email": "maya.lim@example.com"})
+    create, apply = read_audit(audit_log)
+    assert fields_of(create)["job_title"] == "Senior Backend Engineer"
+    assert fields_of(create)["skills"] == ["Python", "SQL", "Node.js", "Go"]
+    assert fields_of(apply)["candidate_email"] == "<redacted>"            # emails are never re-cased
+    assert jeni_tools.tidy_case({"job_title": "head of ml and ai", "candidate_name": "Maya de Souza",
+                                 "skills": ["machine learning", "iOS"]}) == {
+        "job_title": "Head of ML and AI", "candidate_name": "Maya de Souza",
+        "skills": ["Machine Learning", "iOS"]}
+    assert jeni_tools.summary("create_job", {"job_title": "backend engineer"}) == (
+        "Create the job “Backend Engineer”.")
+
+
+def test_a_lower_case_name_the_user_typed_still_passes_the_guard(audit_log):
+    run(scripted(calls(call("create_application_to_job", {"job_id": 7001, "candidate_name": "maya lim",
+                                                          "candidate_email": "maya.lim@example.com"}, "c1")),
+                 say("Added.")), "Add maya lim (maya.lim@example.com) to job 7001.")
+    [entry] = read_audit(audit_log)
+    assert entry["command"] == "create-application-to-job"
+
+
 def test_unattended_runs_approve_on_mock_vira_so_the_shortlist_check_can_pass(audit_log, monkeypatch):
     agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
         calls(call("get_applications", {"job_id": 7001}, "c1")),

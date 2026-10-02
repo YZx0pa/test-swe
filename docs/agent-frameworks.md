@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 321 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 324 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -455,7 +455,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 321 tests
+.venv/bin/python -m pytest -q                                   # offline, 324 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -588,6 +588,12 @@ How a call works:
   format (`handleGenerateViraPayload`), through `recruiter_cli.execute()`: audit log, PII mask,
   mode set by the host. Real mode sends it to the VIRA engine (§15); `mock_jeni.py` answers it
   in the shape of a completed VIRA reply.
+- **Values typed in lower case are tidied** before they are sent, and on the approval card
+  (`tidy_case`): job titles, countries, regions and candidate names in title case ("backend
+  engineer" became the job "backend engineer" in the demo; now "Backend Engineer"), each skill
+  in its usual spelling ("sql" → "SQL", "node.js" → "Node.js"). A value with any capital is left
+  exactly as typed ("iOS Developer", "Maya de Souza"); emails never change. The field
+  descriptions ask the model for the same, so the tidy-up is a safety net.
 - **Only the sub-task result reaches the model**: `{status, task_status, failed_reason, result}`.
   The group's uuids, timestamps and creator name stay out. A task can be `completed` with items in
   `failedArr` (one of two collaborators not found), and the prompt says to read it.
@@ -686,7 +692,7 @@ How a call works:
   Jeni task mock knows; a DSN is ignored, with a note. Real mode connects to `--dsn` (default
   `$TRON_POSTGRES_DSN`) and stops with a message without one. Mixing them fails every write: a
   staging job the database confirms is "not found" by the mock.
-- **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates,
+- **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates, each labelled with its name and id and, when known, its open date ("Senior Backend Engineer (job 7001, opened 2026-08-21)"); the rules say to list them that way, since a copy of a job has the same title, and to accept an answer by name, detail or id. Before, the agent asked "tell me the job_id: 7001 or 8001" with no names. Otherwise `ambiguous` keeps the candidates,
   and the prompt says to ask the user rather than pick. A search with more than 10 matches says
   so and asks for the id or a narrower title. Results go through `_mask_pii`. `%` and `_` in a
   search term match literally. A title that finds nothing is tried once more without a trailing

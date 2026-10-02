@@ -78,11 +78,12 @@ FIELD_HELP = {
     "app_ids": "Application ids: from the user or an earlier result (e.g. get_applications).",
     "user_ids": "User ids of people in the company: from the user or search_users.",
     "role_id": "1 = administrator, 5 = team member. If the user didn't say which, ask.",
-    "job_title": "The job title the user gave.",
-    "skills": "Skills the user named.",
+    "job_title": "The job title the user gave, in title case with acronyms kept (e.g. 'Senior "
+                 "Backend Engineer', 'ML Engineer'), even if they typed it in lower case.",
+    "skills": "Skills the user named, each spelled the usual way (e.g. 'Python', 'SQL', 'Node.js').",
     "job_description": "Job description text the user gave.",
     "job_requirements": "Job requirements the user gave.",
-    "country_name": "Country name, e.g. Singapore.",
+    "country_name": "Country name, capitalised, e.g. Singapore.",
     "region": "Region the user named.",
     "min_exp": "Minimum years of experience.",
     "max_exp": "Maximum years of experience.",
@@ -92,7 +93,7 @@ FIELD_HELP = {
     "new_owner_user_email": "The new owner's email, exactly as the user wrote it.",
     "emails": "Recipients' email addresses, exactly as the user wrote them.",
     "message": "A short message to send with the shared applications.",
-    "candidate_name": "The candidate's name, exactly as the user wrote it.",
+    "candidate_name": "The candidate's name as the user wrote it, capitalised (e.g. 'Maya Lim').",
     "candidate_email": "The candidate's email, exactly as the user wrote it.",
     "reason_for_closure": "Why the job is being closed, if the user said.",
     "search_key": "Text to search for (a name or email).",
@@ -120,6 +121,50 @@ Jeni rules:
 - When a call fails, report the reason. Don't offer to retry it, or to get the same effect
   with a different tool.
 """
+
+
+# Values typed all in lower case are tidied before they are sent (tidy_case): job titles,
+# places and names in title case, each skill in its usual spelling.
+TITLE_FIELDS = {"job_title", "country_name", "region", "candidate_name"}
+SKILL_FIELDS = {"skills"}
+SMALL_WORDS = {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"}
+SPELLINGS = {w.lower(): w for w in (
+    "AI", "ML", "QA", "UI", "UX", "HR", "IT", "VP", "PM", "CEO", "CTO", "CFO", "COO", "R&D",
+    "API", "AWS", "GCP", "SQL", "NoSQL", "CSS", "HTML", "iOS", "macOS", "DevOps", "MLOps", "SRE",
+    "ETL", "NLP", "LLM", "CI/CD", "SaaS", "B2B", "B2C", "CRM", "ERP", "SEO", "PHP", "C#", "C++",
+    ".NET", "ASP.NET", "Node.js", "React.js", "Vue.js", "Next.js", "JavaScript", "TypeScript",
+    "GraphQL", "PostgreSQL", "MySQL", "MongoDB", "TensorFlow", "PyTorch", "GitHub", "GitLab",
+    "LinkedIn", "Power BI", "SAP", "UAE", "USA", "UK")}
+
+
+def _word(word: str, first: bool) -> str:
+    if word.lower() in SPELLINGS:
+        return SPELLINGS[word.lower()]
+    if not first and word in SMALL_WORDS:
+        return word
+    return "-".join(part[:1].upper() + part[1:] for part in word.split("-"))
+
+
+def _title(text: str) -> str:
+    """'senior backend engineer' -> 'Senior Backend Engineer', 'sql' -> 'SQL'.  Only a value typed
+    all in lower case changes: 'iOS Developer' or 'McKinsey' stays as the user wrote it."""
+    if not isinstance(text, str) or not text.islower():
+        return text
+    whole = SPELLINGS.get(text.strip())
+    if whole:
+        return whole
+    return " ".join(_word(w, i == 0) for i, w in enumerate(text.split()))
+
+
+def tidy_case(args: dict) -> dict:
+    """The arguments with lower-case titles, places, names and skills tidied (see _title)."""
+    out = dict(args or {})
+    for field in TITLE_FIELDS & set(out):
+        out[field] = _title(out[field])
+    for field in SKILL_FIELDS & set(out):
+        if isinstance(out[field], list):
+            out[field] = [_title(v) for v in out[field]]
+    return out
 
 
 ROLE_NAMES = {1: "an administrator", 5: "a team member"}
@@ -198,9 +243,10 @@ SUMMARIES = {
 def summary(name: str, args: dict) -> str:
     """One plain sentence for an approval card: what the call would do.  Any other tool gets its
     name and its values in words, never as JSON."""
+    args = tidy_case(args)
     try:
         if name in SUMMARIES:
-            return SUMMARIES[name](args or {})
+            return SUMMARIES[name](args)
     except Exception:          # an odd value must not break the card; fall back to the words
         pass
     values = "; ".join(f"{k.replace('_', ' ')} {_short(_words(v), 60)}"
@@ -383,7 +429,7 @@ def run(name: str, args: dict, session: str | None = None) -> Dict:
     if name not in catalog():
         return {"status": "error", "message": f"unknown task {name}"}
     try:
-        clean = models()[name].model_validate(args).model_dump(exclude_none=True)
+        clean = tidy_case(models()[name].model_validate(args).model_dump(exclude_none=True))
     except ValidationError as exc:
         return {"status": "error", "message": f"invalid arguments: {_problems(exc)}"}
     try:

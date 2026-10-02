@@ -101,8 +101,8 @@ def test_one_match_resolves_and_several_are_ambiguous_with_their_open_dates():
     found = tool("find_job_by_title", {"title": "data scientist"})
     assert found["status"] == "ambiguous" and found["message"] == "2 jobs match"
     assert found["candidates"] == [
-        {"job_id": 502, "label": "Senior Data Scientist (opened 2026-08-27)"},
-        {"job_id": 501, "label": "Data Scientist (opened 2026-08-21)"}]
+        {"job_id": 502, "label": "Senior Data Scientist (job 502, opened 2026-08-27)"},
+        {"job_id": 501, "label": "Data Scientist (job 501, opened 2026-08-21)"}]
 
 
 class SearchConn(FakeConn):
@@ -165,7 +165,7 @@ def test_the_real_title_search_is_literal_and_asks_for_one_more_row():
     assert "recuiter_company_id = $1" in sql
     assert params == (CID, "%100\\%\\_sure%", db_queries.SEARCH_LIMIT + 1)
     assert [c["label"] for c in result["candidates"]] == [
-        "Senior Data Scientist (opened 2026-08-27)", "Data Scientist"]
+        "Senior Data Scientist (job 502, opened 2026-08-27)", "Data Scientist (job 501)"]
 
 
 def test_the_real_user_search_is_literal_and_tenant_scoped():
@@ -249,6 +249,20 @@ def test_mock_mode_looks_up_only_ids_the_task_mock_knows(audit_log):
     assert replies["shortlist_multiple_application"]["result"]["failedArr"] == []
     assert [a["command"] for a in read_audit(audit_log)] == [
         "add-job-skills", "shortlist-multiple-application"]
+
+
+def test_a_copied_job_is_told_apart_by_id_and_open_date(audit_log):
+    state = mock_jeni.State(kept=True)
+    vira_tools.configure("mock")
+    queries = db_queries.fake_db_queries(state.db_fixtures(CID))
+    mock_jeni._clone_job({"job_id": 7001}, state)
+    state._sync_db()
+    found = asyncio.run(queries["find_job_by_title"].handler({"title": "backend engineer"},
+                                                             {"auth_profile": {"company_id": CID}}))
+    labels = [c["label"] for c in found["candidates"]]
+    assert found["status"] == "ambiguous" and labels[1] == "Senior Backend Engineer (job 7001, opened 2026-08-21)"
+    assert labels[0].startswith("Senior Backend Engineer (job 8001, opened ") and "id" in db_tools.RULES
+    assert "the name and the id" in db_tools.RULES
 
 
 def runner_args(*argv):
