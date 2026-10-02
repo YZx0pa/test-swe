@@ -44,6 +44,8 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
+import pii_vault
+
 DOTENV = Path(__file__).with_name(".env")    # this file's .env, not whichever a parent dir holds
 
 
@@ -89,6 +91,8 @@ LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$")    # en, ar, zh-CN, zh-Ha
 # request).  The endpoints here are read/compute only, so this is
 # empty; add names here the moment a write/notify/irreversible action is added.
 NEEDS_CONFIRM: set[str] = set()
+# Commands whose results come from the company's user directory: emails in them are colleagues'.
+DIRECTORY_COMMANDS = {"search-users"}
 
 # Fields whose values may ONLY come from explicit user input — the model is
 # never allowed to invent them.  (None needed for these; kept for parity
@@ -114,7 +118,7 @@ _PII_NAME = re.compile(r"^(first|last|full|middle|given|family|sur|user|candidat
                        r"contact|display|person|legal|creator|owner)_?names?$")
 # Inside any string value (free-text summaries, a non-JSON reply): emails, and phone
 # numbers written in groups or with a "+" (8+ digits; bare digit runs, like ids, stay).
-_EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
+_EMAIL = pii_vault.EMAIL
 _PHONE = re.compile(r"(?<![\w+])(?<!\d\.)(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?"
                     r"\d{2,4}(?:[ .-]\d{2,5}){1,4}(?!\w|\.\d)")      # not inside a decimal
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
@@ -134,8 +138,10 @@ def _redact_phone(m: re.Match) -> str:
     return "<redacted-phone>"
 
 
-def _scrub_text(text: str) -> str:
-    text = _EMAIL.sub("<redacted-email>", text)
+def _scrub_text(text: str, source: str | None = None) -> str:
+    """Emails as tokens the tools can send back (pii_vault) when `source` says where the text came
+    from, redacted otherwise; phone numbers always redacted."""
+    text = pii_vault.VAULT.tokenize(text, source) if source else _EMAIL.sub("<redacted-email>", text)
     parts, last = [], 0
     for m in _UUID.finditer(text):           # phones are looked for between uuids, never in one
         parts += [_PHONE.sub(_redact_phone, text[last:m.start()]), m.group(0)]
@@ -143,7 +149,7 @@ def _scrub_text(text: str) -> str:
     return "".join(parts) + _PHONE.sub(_redact_phone, text[last:])
 
 
-def _mask_pii(obj: Any) -> Any:
+def _mask_pii(obj: Any, source: str | None = None) -> Any:
     """Small PII masker for anything that flows back into model context.
 
     Real deployment: swap this for your existing vault mask.  Here it redacts
@@ -151,17 +157,26 @@ def _mask_pii(obj: Any) -> Any:
     inside any string.  Names inside free text are not detected.  A
     {"field_name": ..., "field_value": ...} pair (Jeni's task payloads) counts
     as a key and its value.
+
+    With a `source` (pii_vault.COLLEAGUE for the user directory, RECORD for anything else), each
+    email address, under an email key or inside text, becomes a pii_vault token instead: the
+    model still never sees it, and a tool can send it back.  The audit log passes no source.
     """
     if isinstance(obj, dict):
         pair_is_pii = "field_value" in obj and _is_pii_key(obj.get("field_name", ""))
-        return {k: ("<redacted>" if _is_pii_key(k) or (pair_is_pii and k == "field_value"
-                                                     and v is not None)
-                    else _mask_pii(v)) for k, v in obj.items()}
+        return {k: (_mask_pii(v, source) if source and _is_email_key(k) and _EMAIL.search(str(v))
+                    else "<redacted>" if _is_pii_key(k) or (pair_is_pii and k == "field_value"
+                                                          and v is not None)
+                    else _mask_pii(v, source)) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_mask_pii(x) for x in obj]
+        return [_mask_pii(x, source) for x in obj]
     if isinstance(obj, str):
-        return _scrub_text(obj)
+        return _scrub_text(obj, source)
     return obj
+
+
+def _is_email_key(key: Any) -> bool:
+    return "email" in str(key).lower()
 
 
 def _audit(cmd: str, query: Dict, body: Dict, result: Dict, error: str | None = None) -> None:
@@ -194,7 +209,8 @@ def _guard(cmd: str, confirmed: bool) -> Dict | None:
 
 
 def _emit(result: Dict) -> None:
-    """Print result for mini to read — PII-masked before it enters context."""
+    """Print result for mini to read — PII-masked before it enters context.  Each CLI call is its own
+    process, so an email token couldn't be sent back by the next one: emails are redacted here."""
     print(json.dumps(_mask_pii(result), ensure_ascii=False))
 
 
@@ -264,6 +280,10 @@ def _error(message: str, http_status: int | None = None) -> Dict:
 
 
 def _call(path: str, query: Dict[str, Any], body: Dict[str, Any], mode: str) -> Dict:
+    try:              # the decrypt step: email tokens back to addresses, just before sending
+        query, body = pii_vault.VAULT.resolve(query), pii_vault.VAULT.resolve(body)
+    except pii_vault.UnknownToken:
+        return _error("an email token this conversation didn't receive; ask the user for the address")
     if mode == "mock":
         from mock_vira import MockVira
         return MockVira.call(path, query, body)
@@ -273,7 +293,6 @@ def _call(path: str, query: Dict[str, Any], body: Dict[str, Any], mode: str) -> 
         return _error(problem)
     import requests  # imported lazily so mock mode needs no dependency
     url, headers = _target(path)
-    # decrypt_pii(body) would go here in your deployment (vault -> real values)
     with requests.Session() as session:
         # No proxies, .netrc or CA bundle from the environment (or from .env via it).
         session.trust_env = False
@@ -331,7 +350,7 @@ def execute(cmd: str, path: str, query: Dict, body: Dict, *, mode: str,
         _audit(cmd, query, body, {"status": "exception"}, error=type(exc).__name__)
         raise
     _audit(cmd, query, body, result)
-    return _mask_pii(result)
+    return _mask_pii(result, pii_vault.COLLEAGUE if cmd in DIRECTORY_COMMANDS else pii_vault.RECORD)
 
 
 # --- typed actions (one per API you gave) — the importable surface ----------

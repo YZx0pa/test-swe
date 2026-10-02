@@ -15,6 +15,7 @@ import grounding
 import jeni_eval
 import jeni_tools
 import mock_jeni
+import pii_vault
 import recruiter_cli
 import run_deepagent
 import run_langgraph
@@ -248,8 +249,9 @@ def test_people_in_results_are_masked_but_their_ids_are_not():
     apps = json.dumps(jeni_tools.run("get_applications", {"job_id": 7001}))
     assert "@example.com" not in apps and "Mock Candidate" not in apps and "5102" in apps
     users = jeni_tools.run("search_users", {"search_key": "Bob"})["result"]["users"]
-    assert users == [{"userId": 802, "firstName": "<redacted>", "lastName": "<redacted>",
-                      "email": "<redacted>"}]
+    [user] = users
+    assert (user["userId"], user["firstName"], user["lastName"]) == (802, "<redacted>", "<redacted>")
+    assert pii_vault.TOKEN.fullmatch(user["email"]) and pii_vault.VAULT.sources(user["email"]) >= {"colleague"}
 
 
 def test_candidate_details_are_masked_in_the_audit_log(audit_log):

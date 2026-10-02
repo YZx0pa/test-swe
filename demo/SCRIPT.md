@@ -32,7 +32,8 @@ Starting data, for your reference:
 | Data Analyst | 7002 | closed, public | 5201 (0.88, shortlisted), 5202 (0.59) |
 | Product Designer | 7003 | open, public | none |
 
-Colleagues: Alice Johnson (801), Bob Tan (802), Priya Nair (803).
+Colleagues: Alice Johnson (801), Bob Tan (802), Priya Nair (803). You are Sam Lee (804):
+"share it with me" or "transfer it to me" means Sam.
 
 ## Opening (1 minute)
 

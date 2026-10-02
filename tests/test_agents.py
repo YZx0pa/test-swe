@@ -100,7 +100,7 @@ def test_agent_sees_only_masked_tool_output(vira, audit_log):
     result = run(scripted(calls(call("find_talents", {"job_ids": [123]}, "c1")),
                           say("Found profile 900001.")), "Find talents for job 123.")
     content = tool_messages(result)["c1"].text
-    assert "jane@example.com" not in content and "<redacted>" in content
+    assert "jane@example.com" not in content and "<email:" in content
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
     assert agent_kit.final_text(result) == "Found profile 900001."
 

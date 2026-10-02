@@ -32,6 +32,7 @@ from typing import Any, Callable, Mapping
 
 from pydantic import Field, create_model
 
+import pii_vault
 import recruiter_cli
 
 # Rules appended to the prompt when these tools are present, so the model resolves and
@@ -44,7 +45,8 @@ Database lookup rules:
   for an id you can look up.
 - Before any action that changes data, validate every user-supplied id or email with the
   matching validate_* tool (validate_job_id(s), validate_app_ids, validate_email(s)).
-  Proceed only when the status is "resolved". Ids a tool returned are valid already.
+  Proceed only when the status is "resolved". Ids a tool returned are valid already, and so
+  are a colleague's <email:...> token and "me".
 - "The applicants" of a job means all of them: get their ids with list_job_applications.
   Ask which ones only if the user said "some" without saying which.
 - On status "ambiguous", list every candidate by its label, which has the name and the id
@@ -66,6 +68,8 @@ READ_ONLY = frozenset({
 # Identifiers that must come from the USER, so ToolCallGuard refuses a value the user
 # didn't write (consistent with jeni_tools.USER_ONLY: emails are user-supplied).
 USER_ONLY = frozenset({"email", "emails"})
+# Lookups in the company's user directory: emails in their results are colleagues'.
+DIRECTORY_TOOLS = frozenset({"find_user", "validate_email", "validate_emails"})
 
 # db_queries declares inputs as these type strings; map them to Python types for the schema.
 _PY_TYPES: dict[str, Any] = {
@@ -119,11 +123,19 @@ def langchain_tools(query_tools: Mapping[str, Any], context: Mapping[str, Any]) 
         description, inputs, handler = _qt_parts(qt)
 
         # Bind name/handler per-iteration; context is shared and closed over.  The result is
-        # masked like every VIRA result: a user search's labels are emails.
-        async def _call(_handler=handler, **kwargs):
+        # masked like every VIRA result: a user search's labels are emails, which come back as
+        # colleagues' tokens; a token or "me" in the input is looked up by its address.
+        async def _call(_handler=handler, _name=name, **kwargs):
+            try:
+                kwargs = {k: pii_vault.VAULT.resolve(pii_vault.resolve_me(k, v))
+                          for k, v in kwargs.items()}
+            except LookupError:            # an unknown token, or "me" without a signed-in user
+                return json.dumps({"status": "error", "message": "unknown email: ask the user "
+                                                                 "for the address"})
             result = await _handler(kwargs, context)   # context NOT a model arg
-            return json.dumps(recruiter_cli._mask_pii(_translate(result)), ensure_ascii=False,
-                              default=str)
+            source = pii_vault.COLLEAGUE if _name in DIRECTORY_TOOLS else pii_vault.RECORD
+            return json.dumps(recruiter_cli._mask_pii(_translate(result), source),
+                              ensure_ascii=False, default=str)
 
         tools.append(StructuredTool.from_function(
             coroutine=_call, name=name, description=description,

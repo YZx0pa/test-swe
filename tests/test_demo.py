@@ -15,6 +15,7 @@ import agent_kit
 import db_tools
 import jeni_tools
 import mock_jeni
+import pii_vault
 import vira_tools
 from demo import app as demo_app
 from demo import jeni_graph, rehearse, script
@@ -29,6 +30,7 @@ def stateless_after():
     yield
     mock_jeni.forget_changes()
     vira_tools.configure("mock")
+    pii_vault.VAULT.user_email = None
 
 
 def demo_agent(*replies, gate_writes=jeni_graph.GATE_WRITES):

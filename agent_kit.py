@@ -35,6 +35,7 @@ from langgraph.types import Command
 
 import grounding
 import jeni_tools
+import pii_vault
 import recruiter_cli
 import vira_tools
 from terminal import printable
@@ -313,7 +314,8 @@ class ToolCallGuard(AgentMiddleware):
         bad = []
         for field in fields:
             values = args[field] if isinstance(args[field], list) else [args[field]]
-            if any(not isinstance(v, str) or v.strip().lower() not in said
+            if any(not isinstance(v, str) or (v.strip().lower() not in said
+                                               and not pii_vault.VAULT.allowed(field, v))
                    for v in values if v not in (None, "")):
                 bad.append(field)
         return bad

@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 324 offline tests (section 3). |
+| `tests/` | 335 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -192,7 +192,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 324 passed
+# 335 passed
 ```
 
 How the tests stay hermetic:
@@ -219,6 +219,7 @@ How the tests stay hermetic:
 | `tests/test_mini_env.py` | 46 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
 | `tests/test_jeni.py` | 63 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a read runs again after a write but not twice in a row, a failed write runs again once another write ran but a successful one never repeats, a reviewer's edit or rejection stands (no second card, the call refused) until the user writes again, a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). The mock forgets changes by default; a kept State remembers them (a job made public can be published, stages and teams stick, the fixtures stay untouched), a created job and candidate are found by the db lookups until `reset()`, and the activity log keeps ids, never names or emails. |
 | `tests/test_db.py` | 19 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
+| `tests/test_pii.py` | 11 | Email tokens (section 11): a token hides the address and only its vault opens it; who may send a token or "me"; results carry tokens and the address goes out only at send time, with the audit log redacted; an unknown token sends nothing; the CLI redacts; a colleague found by search can be shared with, a candidate's token is refused, "me" is the signed-in user (and asks without one); candidate fields take a typed address only; directory lookups return colleague tokens and take "me". |
 | `tests/test_demo.py` | 18 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt differs only in the two closing rules (no `SUMMARY:`, no `STATUS:`), and the build fails if either changes; routine writes run while a shortlist asks, and the changes show on the panel; with `gate_writes` every write asks; a rejected transfer never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. The script: `SCRIPT.md` has every prompt and `/demo/prompts` serves the first ones; every check fails on the starting data unless the act names its cards; the rehearsal (on the in-process graph with a scripted model) passes an edited shortlist, refuses a second shortlist with no card, fails a reject act whose card never appeared, sends a follow-up only while the check fails, and deletes its threads and resets the data. |
 
 Run a subset:
@@ -743,3 +744,21 @@ python run_langgraph.py --mode real --tools jeni --task "Show me the details of 
 ```
 
 On staging today the group stays queued: see §15 of the design doc.
+
+---
+
+## 11. Personal data: tokens and "me"
+
+Emails in results reach the model as reversible tokens, and "me" means the signed-in user.
+Design and limits: [agent-frameworks.md §16](agent-frameworks.md#16-personal-data-tokens-instead-of-redaction-and-me).
+
+| File | Change |
+|---|---|
+| `pii_vault.py` (new) | `Vault`: HMAC tokens, AES-GCM-encrypted addresses in memory, where each was seen, `allowed()`, `resolve()`, `display()`, `me()`; `JENI_PII_KEY`, `JENI_USER_EMAIL`. |
+| `recruiter_cli.py` | `_mask_pii(obj, source)`: tokens with a source, redaction without (the audit log, the CLI); `execute()` passes the source (`search-users` is the directory); `_call` resolves tokens before sending. |
+| `jeni_tools.py` | Recipient fields (`emails`, `new_owner_user_email`) accept an address, a colleague's token or "me"; `run()` resolves "me"; `RULES` and the field help say how; card summaries show hints. |
+| `agent_kit.py` | `ToolCallGuard` accepts a user-only value the vault allows. |
+| `db_tools.py` | Directory lookups return colleague tokens; a token or "me" in the input is resolved before the query. |
+| `mock_jeni.py`, `demo/jeni_graph.py` | Sam Lee (804), the demo's signed-in user. |
+| `.env.example` | `JENI_USER_EMAIL`, `JENI_PII_KEY` (optional). |
+| `tests/test_pii.py` | 11 offline tests (section 3). |

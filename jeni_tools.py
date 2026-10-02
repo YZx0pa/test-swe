@@ -36,6 +36,7 @@ from typing import Annotated, Any, Dict, Literal
 
 from pydantic import ConfigDict, Field, ValidationError, create_model
 
+import pii_vault
 import recruiter_cli as vira
 import vira_tools
 
@@ -60,6 +61,8 @@ EMAIL_FIELDS = {"emails", "candidate_email", "new_owner_user_email"}
 LONG_TEXT_FIELDS = {"job_description", "job_requirements", "message"}
 MAX_LONG_TEXT = 2000
 EMAIL_RE = r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$"
+# A share recipient or a new owner may also be a colleague's <email:...> token, or "me".
+RECIPIENT_RE = r"^(?:[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+|<email:[0-9a-f]{12}>|[Mm][Ee])$"
 # Values only the user can give.  Tool results carry them masked, so a value from a
 # result would be "<redacted>" anyway; ToolCallGuard refuses one the user didn't write.
 USER_ONLY = frozenset({"emails", "candidate_email", "candidate_name", "new_owner_user_email"})
@@ -90,8 +93,11 @@ FIELD_HELP = {
     "min_salary": "Minimum salary.",
     "max_salary": "Maximum salary.",
     "vacancy": "Number of openings.",
-    "new_owner_user_email": "The new owner's email, exactly as the user wrote it.",
-    "emails": "Recipients' email addresses, exactly as the user wrote them.",
+    "new_owner_user_email": ("The new owner's email: exactly as the user wrote it, a colleague's "
+                             "<email:...> token from search_users or find_user, or \"me\" for the "
+                             "user themself."),
+    "emails": ("Recipients' emails: each exactly as the user wrote it, a colleague's <email:...> "
+               "token from search_users or find_user, or \"me\" for the user themself."),
     "message": "A short message to send with the shared applications.",
     "candidate_name": "The candidate's name as the user wrote it, capitalised (e.g. 'Maya Lim').",
     "candidate_email": "The candidate's email, exactly as the user wrote it.",
@@ -105,8 +111,11 @@ RULES = """
 Jeni rules:
 - Only transfer job ownership when the user explicitly says "transfer ownership". Assigning a
   job to someone or adding a collaborator is add_job_collaborators.
-- Candidate names and emails, and the email addresses to share applications with, must come
-  from the user. Never take them from a tool result or make them up: ask the user.
+- Candidate names and emails must come from the user. Results show email addresses as
+  <email:...> tokens: a colleague's token (from search_users or find_user) may be a share
+  recipient or a new owner, and "me" means the user themself. Never use a candidate's token,
+  and never make an address up: ask the user. Don't show a token to the user: name the
+  person, or say "you".
 - Sharing an application (a CV) is supported. Sharing a job is not.
 - If no tool does what the user asks, say it isn't supported instead of approximating it.
 - A task result can report status "ok" and still list items in failedArr: read it.
@@ -243,7 +252,9 @@ SUMMARIES = {
 def summary(name: str, args: dict) -> str:
     """One plain sentence for an approval card: what the call would do.  Any other tool gets its
     name and its values in words, never as JSON."""
-    args = tidy_case(args)
+    args = {k: ([pii_vault.VAULT.display(x) for x in v] if isinstance(v, list)
+                else pii_vault.VAULT.display(v)) if k in pii_vault.RECIPIENT_FIELDS else v
+            for k, v in tidy_case(args).items()}
     try:
         if name in SUMMARIES:
             return SUMMARIES[name](args)
@@ -292,7 +303,7 @@ def _annotation(field: str):
     if field in NUMBER_ARRAY_FIELDS:
         return list[vira_tools.Id], {"min_length": 1, "max_length": vira.MAX_IDS}
     if field in STRING_ARRAY_FIELDS:
-        item = (Annotated[str, Field(pattern=EMAIL_RE, max_length=vira.MAX_TEXT)]
+        item = (Annotated[str, Field(pattern=_email_pattern(field), max_length=vira.MAX_TEXT)]
                 if field in EMAIL_FIELDS else vira_tools.Text)
         return list[item], {"min_length": 1, "max_length": vira.MAX_ITEMS}
     if field == "role_id":
@@ -312,9 +323,13 @@ def _annotation(field: str):
     if field in BOOLEAN_FIELDS:
         return bool, {}
     if field in EMAIL_FIELDS:
-        return str, {"pattern": EMAIL_RE, "max_length": vira.MAX_TEXT}
+        return str, {"pattern": _email_pattern(field), "max_length": vira.MAX_TEXT}
     return str, {"min_length": 1,
                  "max_length": MAX_LONG_TEXT if field in LONG_TEXT_FIELDS else vira.MAX_TEXT}
+
+
+def _email_pattern(field: str) -> str:
+    return RECIPIENT_RE if field in pii_vault.RECIPIENT_FIELDS else EMAIL_RE
 
 
 def _field_description(f: dict) -> str:
@@ -432,6 +447,11 @@ def run(name: str, args: dict, session: str | None = None) -> Dict:
         clean = tidy_case(models()[name].model_validate(args).model_dump(exclude_none=True))
     except ValidationError as exc:
         return {"status": "error", "message": f"invalid arguments: {_problems(exc)}"}
+    try:              # "me" as the signed-in user's token; recruiter_cli sends the address
+        clean = {k: pii_vault.resolve_me(k, v) for k, v in clean.items()}
+    except LookupError:
+        return {"status": "error", "message": "The signed-in user's email isn't known here: ask "
+                                              "the user to type it."}
     try:
         result = vira.execute(name.replace("_", "-"), PATH, {},
                               payload(catalog()[name], clean, session),

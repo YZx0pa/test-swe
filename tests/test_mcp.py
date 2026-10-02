@@ -1,6 +1,7 @@
 """vira_mcp: the typed VIRA tools over MCP, masked, with stdout reserved for JSON-RPC."""
 import asyncio
 import json
+import re
 import os
 import select
 import subprocess
@@ -47,7 +48,8 @@ def test_tools_annotations_and_masked_results(monkeypatch, audit_log):
 
     assert result.isError is False
     payload = json.loads(result.content[0].text)
-    assert payload["result"] == {"name": "<redacted>", "email": "<redacted>", "profile_id": 900001}
+    assert payload["result"]["name"] == "<redacted>" and payload["result"]["profile_id"] == 900001
+    assert re.fullmatch(r"<email:[0-9a-f]{12}>", payload["result"]["email"])   # a token, not the address
     assert [a["command"] for a in read_audit(audit_log)] == ["find-talents"]
 
 

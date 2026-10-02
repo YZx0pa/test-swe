@@ -17,11 +17,13 @@ import dataclasses
 
 import agent_kit
 import mock_jeni
+import pii_vault
 import run_langgraph
 import vira_tools
 from db_queries import fake_db_queries
 
 COMPANY_ID = 5143        # the demo's tenant, bound into the db tools; never from the model
+USER_EMAIL = "sam.lee@example.com"   # the signed-in user, for "me": Sam Lee (804) in the mock
 # False: only ALWAYS_CONFIRM tools ask.  True: every write asks, as in real mode.
 GATE_WRITES = False
 
@@ -71,6 +73,7 @@ def build(model=None, gate_writes: bool = GATE_WRITES):
     gate_writes.  `model` is for tests; by default it is $CHAT_MODEL, as in the runners."""
     agent_kit.set_tracing(False)
     vira_tools.configure("mock")
+    pii_vault.VAULT.user_email = USER_EMAIL
     return run_langgraph.build_agent(model=model, toolset=demo_toolset(mock_jeni.remember_changes()),
                                      gate_writes=gate_writes, own_checkpointer=False)
 

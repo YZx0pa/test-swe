@@ -43,6 +43,7 @@ USERS = [
     {"userId": 801, "firstName": "Alice", "lastName": "Johnson", "email": "alice.johnson@example.com"},
     {"userId": 802, "firstName": "Bob", "lastName": "Tan", "email": "bob.tan@example.com"},
     {"userId": 803, "firstName": "Priya", "lastName": "Nair", "email": "priya.nair@example.com"},
+    {"userId": 804, "firstName": "Sam", "lastName": "Lee", "email": "sam.lee@example.com"},   # the demo's user
 ]
 APPLICATIONS = {                       # appId -> (jobId, matchScore, stage)
     5101: (7001, 0.72, "applied"), 5102: (7001, 0.91, "applied"),

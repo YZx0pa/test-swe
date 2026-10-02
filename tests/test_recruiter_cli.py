@@ -1,10 +1,12 @@
 """recruiter_cli: the CLI and the typed actions share one guarded path."""
 import json
+import re
 import os
 import stat
 
 import pytest
 
+import pii_vault
 import recruiter_cli
 from conftest import read_audit
 
@@ -51,10 +53,10 @@ def test_cli_and_typed_action_send_the_same_request(argv, typed, calls, capsys):
 @pytest.mark.parametrize("argv,typed", CASES)
 def test_results_are_masked_on_both_paths(argv, typed, calls, capsys):
     result = typed()
-    assert result["result"] == {"candidate_name": "<redacted>", "email": "<redacted>",
-                                "score": 0.9}
-    recruiter_cli.main(["--mode", "mock", *argv])
-    assert json.loads(capsys.readouterr().out) == result
+    assert result["result"]["candidate_name"] == "<redacted>" and result["result"]["score"] == 0.9
+    assert pii_vault.TOKEN.fullmatch(result["result"]["email"])     # a token, never the address
+    recruiter_cli.main(["--mode", "mock", *argv])         # the CLI redacts: tokens die with its process
+    assert json.loads(capsys.readouterr().out) == {**result, "result": {**result["result"], "email": "<redacted>"}}
 
 
 @pytest.mark.parametrize("key", [
@@ -342,4 +344,4 @@ def test_non_json_replies_are_capped(session):
 def test_non_json_reply_text_is_scrubbed(session):
     session.response = FakeResponse(500, None, "no profile for jane@example.com, +65 9123 4567")
     raw = recruiter_cli.find_talents([123], mode="real")["result"]["raw"]
-    assert raw == "no profile for <redacted-email>, <redacted-phone>"
+    assert re.fullmatch(r"no profile for <email:[0-9a-f]{12}>, <redacted-phone>", raw)

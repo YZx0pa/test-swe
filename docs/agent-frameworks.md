@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 324 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 335 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -455,7 +455,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 324 tests
+.venv/bin/python -m pytest -q                                   # offline, 335 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -528,7 +528,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Failed calls leave no trace | `execute()` audits the exception type, then re-raises | `test_failed_calls_are_audited_and_the_cli_prints_one_json_line` |
 | Other local users read the audit log or `.env` | The audit log is created 0600 (and tightened if older); recruiter_cli warns on stderr when `.env` is group- or world-readable, checking mode bits only | `test_audit_log_is_owner_only`, `test_a_shared_dotenv_is_reported_by_mode_bits_only` |
 | `.env` from a parent directory gets loaded | recruiter_cli loads the `.env` next to it, by path | — |
-| Candidate PII reaches the model (and the model provider) | `_mask_pii`: normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply; uuids are kept whole (their digit groups looked like phone numbers to 6% of random uuids). Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
+| Candidate PII reaches the model (and the model provider) | `_mask_pii`: emails in results become `pii_vault` tokens (`<email:…>`, a keyed hash; the address kept AES-GCM-encrypted in this process only) and other personal values are redacted; normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply; uuids are kept whole (their digit groups looked like phone numbers to 6% of random uuids). Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
 | Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
 | An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the user's messages (any turn) nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
 | An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
@@ -540,6 +540,7 @@ every control sits in code the model can't reach, and each one has a test.
 | A tampered or vulnerable dependency | `requirements.lock.txt` pins all 139 packages with hashes (`--require-hashes` installs); `pip-audit` is in the dev requirements. pyjwt is at 2.15.1 for CVE-2026-101918 (an uncaught `RecursionError` on a deeply nested token); no known vulnerabilities on 2026-10-01 | `pip-audit -r requirements.lock.txt --disable-pip` |
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
 | Jeni: a guessed candidate email or share recipient reaches VIRA (a CV sent to the wrong person) | `ToolCallGuard` refuses a `USER_ONLY` value (candidate name and email, new owner's email, share recipients) that isn't in the user's words, without echoing it; masked values from results fail the email pattern | `test_an_email_the_user_never_gave_is_refused`, `test_an_email_the_user_gave_is_used`, `test_invalid_input_never_reaches_vira` |
+| A token sends a CV or a job to the wrong person (a candidate's email from a result used as a recipient) | Only a colleague's token (from the user directory) or "me" (the signed-in user, set by the host) may stand in for a share recipient or new owner; a candidate's token, an unknown token or "me" with nobody signed in is refused, and candidate fields take a typed address only. Tokens are swapped back to addresses in `recruiter_cli._call`, after the guard and the approval; the audit log stays redacted | `tests/test_pii.py` |
 | Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
 | The engine's `xrtoken` leaks or is sent elsewhere | `VIRA_XRTOKEN` is read from the environment and sent only as the `xrtoken` header to `VIRA_ACTUAL_LOCATION`, never to the other endpoints; the audit log records commands and masked bodies, not headers; no redirects are followed and proxy variables are ignored | `test_task_groups_go_to_the_engine_with_only_the_users_xrtoken` |
 | A task group sent with a missing or wrong engine setting | No location, plain http to a non-loopback host, or an empty token: nothing is sent, and the error names the setting, never the host | `test_the_engine_fails_closed_without_its_settings` |
@@ -604,10 +605,11 @@ How a call works:
   after a failure, to report the reason rather than offer a retry or another tool's workaround.
   To compare or rank applicants it points at `get_applications`, which returns their match
   scores in one call (the rehearsal saw four one-by-one reads otherwise).
+- **Personal values as tokens** (§16): an email in a result reaches the model as `<email:…>`; a colleague's token or "me" may be a recipient, a candidate's may not.
 - **Ids and personal values.** Ids must come from the user or an earlier result and keep their
-  kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails, a
-  new owner's email and share recipients must be exactly what the user wrote. Results carry them
-  masked, so copying one from a result isn't possible anyway.
+  kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails
+  must be exactly what the user wrote. A new owner or share recipient may also be a colleague's
+  `<email:…>` token from the user directory, or "me" (§16); a candidate's token never.
 
 What v1's catalog shows, and what v2 changes (proposals for engineering):
 - Every task has one sub-task, `level: 1` and `task_output: []`, so v1's rule for chaining a
@@ -934,3 +936,35 @@ What engineering needs to provide, in order of preference:
 
 - **The controlled run**, once groups execute: one group, two tasks; in the first, a sub-task that
   fails followed by one that would succeed alone; the second task independent. Read-only tasks.
+
+## 16. Personal data: tokens instead of redaction, and "me"
+
+Until 2026-10-02 every email in a result reached the model as `<redacted-email>`. That kept
+addresses out of the model's context, but it also meant the agent could never act on one: "share
+it with Priya" needed Priya's address typed out, even right after `search_users` had found her.
+`pii_vault.py` makes the masking reversible on our side only.
+
+- **Tokens.** `_mask_pii(result, source)` turns each address in a result, under an email key or
+  inside text, into `<email:3f9a1c2b4d5e>`: the first 12 hex digits of an HMAC-SHA256 of the
+  address under a key the model never sees. The same address gets the same token in a process.
+  The vault keeps the address encrypted with AES-GCM (the token as associated data), in memory
+  only; the key is `JENI_PII_KEY` (32 bytes, base64) or a random one per process. Nothing is
+  written out, and the CLI, one process per command, prints redactions instead.
+- **The decrypt step.** `recruiter_cli._call` swaps tokens back to addresses just before a call
+  is sent, mock or real: after the guard, after the approval card, after the audit entry (which
+  stays redacted). A token the process didn't issue sends nothing.
+- **Where a token may go.** Each token remembers where its address was seen. Only a colleague's
+  (from the user directory: `search_users`, `find_user`, `validate_email(s)`) may stand in for a
+  share recipient or a new owner (`RECIPIENT_FIELDS`). A candidate's, or any other record's, goes
+  nowhere, and candidate fields still take a typed address only. `ToolCallGuard` asks
+  `pii_vault.VAULT.allowed()` where it checks the user's words.
+- **"me".** The signed-in user's own address: `JENI_USER_EMAIL`, or the host's setting (the demo's
+  is Sam Lee, 804). "Share it with me" and "transfer it to me" send that address; with nobody
+  signed in, Jeni asks for it. In production it comes from the authenticated profile, like the
+  company id.
+- **On the card** a token shows as a hint, `p•••r@example.com`, and "me" as "you".
+
+Limits: tokens last as long as the process (or the key); a token's address is visible to anyone
+who can read the process's memory, and the vault keeps every address the process has seen; the
+card's hint (first and last letter, and the domain) is saved with the approval request in the
+thread; names inside free text are still not detected.
