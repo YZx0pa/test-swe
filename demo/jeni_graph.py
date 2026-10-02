@@ -37,17 +37,33 @@ CHAT_RULE = """\
   the tools you called. If the task is only partially done or cannot be fully completed, say
   what succeeded, what failed or is missing, and why.
 """
+# The terminal REPL reads a STATUS line to remember finished tasks (agent_kit.read_status); the
+# server never does, and in a chat window it shows as a stray "STATUS: done".
+STATUS_RULE = """\
+- End EVERY reply that has no tool call with a status line as its LAST line, one of:
+    STATUS: done                 - the task is finished (succeeded or cannot proceed)
+    STATUS: needs_user: <what>   - you must get something from the user to continue
+  Use needs_user only when you are genuinely blocked on the user (e.g. a value no tool
+  can supply). Otherwise, if more tool calls are needed, make them instead of replying.
+"""
+NO_STATUS_RULE = """\
+- If more tool calls are needed, make them instead of replying.
+"""
+CHAT_REPLACEMENTS = ((SUMMARY_RULE, CHAT_RULE), (STATUS_RULE, NO_STATUS_RULE))
 
 
 def demo_toolset(state: mock_jeni.State) -> agent_kit.Toolset:
-    """jeni_db on the kept mock State, with the closing rule written for a chat window."""
+    """jeni_db on the kept mock State, with the closing rules written for a chat window."""
     toolset = agent_kit.toolset("jeni_db",
                                 query_tools=fake_db_queries(state.db_fixtures(COMPANY_ID)),
                                 context={"auth_profile": {"company_id": COMPANY_ID}})
-    if SUMMARY_RULE not in toolset.prompt:
-        raise RuntimeError("agent_kit.SYSTEM_PROMPT's closing rule changed: update CHAT_RULE "
-                           "in demo/jeni_graph.py to match")
-    return dataclasses.replace(toolset, prompt=toolset.prompt.replace(SUMMARY_RULE, CHAT_RULE))
+    prompt = toolset.prompt
+    for rule, replacement in CHAT_REPLACEMENTS:
+        if rule not in prompt:
+            raise RuntimeError("a closing rule of agent_kit.SYSTEM_PROMPT changed: update "
+                               "CHAT_REPLACEMENTS in demo/jeni_graph.py to match")
+        prompt = prompt.replace(rule, replacement)
+    return dataclasses.replace(toolset, prompt=prompt)
 
 
 def build(model=None, gate_writes: bool = GATE_WRITES):

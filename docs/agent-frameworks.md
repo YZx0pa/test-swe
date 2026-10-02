@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 308 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 310 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -448,7 +448,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 308 tests
+.venv/bin/python -m pytest -q                                   # offline, 310 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -742,11 +742,14 @@ What differs from `run_langgraph.py`, and why:
 - **No checkpointer of its own.** `langgraph dev` refuses a graph that brings one ("persistence is
   handled automatically by the platform") and keeps threads itself, in memory, flushed to
   `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
-- **The closing rule is written for a chat window.** `SYSTEM_PROMPT` ends with the grading format
-  `SUMMARY: <what succeeded> | <what failed> | <why>`. The demo replaces only that rule with "the
-  outcome first, in a sentence or two … don't recount the tools you called … say what
-  succeeded, what failed or is missing, and why", and fails at build time if the rule it
-  replaces has changed.
+- **The closing rules are written for a chat window.** `SYSTEM_PROMPT` ends with the grading format
+  `SUMMARY: <what succeeded> | <what failed> | <why>` and a `STATUS: done` / `STATUS: needs_user`
+  last line, which only the terminal REPL reads (to remember finished tasks); in the chat both
+  showed as stray lines. The demo replaces the first with "the outcome first, in a sentence or
+  two … don't recount the tools you called … say what succeeded, what failed or is missing, and
+  why", and the second with its one instruction that isn't about the status line ("if more tool
+  calls are needed, make them instead of replying"). It fails at build time if either rule it
+  replaces has changed (`CHAT_REPLACEMENTS`).
 - **Built off the event loop.** The server calls the factory inside its event loop, and runs
   there under blockbuster, which raises on blocking I/O (reading the catalog, for one). The
   factory is `async` and builds with `asyncio.to_thread` once; the panel's endpoints are plain

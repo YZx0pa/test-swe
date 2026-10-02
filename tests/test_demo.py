@@ -57,11 +57,21 @@ def test_the_demo_agent_is_mock_only_and_brings_no_checkpointer(monkeypatch):
     assert all(os.environ[v] == "false" for v in agent_kit.TRACING_VARS)
 
 
-def test_the_demo_prompt_changes_only_the_closing_rule():
+def test_the_demo_prompt_changes_only_the_closing_rules():
     prompt = jeni_graph.demo_toolset(mock_jeni.State()).prompt
-    assert "SUMMARY:" not in prompt and jeni_graph.CHAT_RULE in prompt
-    assert prompt.replace(jeni_graph.CHAT_RULE, jeni_graph.SUMMARY_RULE) == (
-        agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES)
+    assert "SUMMARY:" not in prompt and "STATUS:" not in prompt and jeni_graph.CHAT_RULE in prompt
+    for rule, replacement in jeni_graph.CHAT_REPLACEMENTS:
+        prompt = prompt.replace(replacement, rule)
+    assert prompt == agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES
+
+
+def test_the_demo_build_fails_if_a_closing_rule_changes(monkeypatch):
+    monkeypatch.setattr(jeni_graph, "STATUS_RULE", "- End every reply with a STATUS line.\n")
+    monkeypatch.setattr(jeni_graph, "CHAT_REPLACEMENTS", (
+        (jeni_graph.SUMMARY_RULE, jeni_graph.CHAT_RULE),
+        (jeni_graph.STATUS_RULE, jeni_graph.NO_STATUS_RULE)))
+    with pytest.raises(RuntimeError, match="CHAT_REPLACEMENTS"):
+        jeni_graph.demo_toolset(mock_jeni.State())
 
 
 def cards_approved(asked):
