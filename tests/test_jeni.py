@@ -55,9 +55,14 @@ SUB_TASK_KEYS = {"agentSubTaskId", "agentSubTaskUuid", "agentTaskId", "agentSubT
                  "failedReason"}
 
 
+def approve(request):
+    """A reviewer who approves every call (shortlist, share and transfer pause in any mode)."""
+    return [{"type": "approve"} for _ in request["action_requests"]]
+
+
 def run(model, task, **build):
     return agent_kit.run_task(run_langgraph.build_agent(model=model, toolset=agent_kit.toolset("jeni"),
-                                                        **build), task)
+                                                        **build), task, decide=approve)
 
 
 def tool_messages(result):
@@ -308,7 +313,7 @@ def test_the_user_answers_the_agents_question_in_the_next_turn(audit_log):
         say("Shared.")), toolset=agent_kit.toolset("jeni"))
     agent_kit.run_task(agent, "Share the CV of applicant 5102 with the hiring manager.",
                        thread_id="t1")
-    result = agent_kit.run_task(agent, "hm@example.com", thread_id="t1")
+    result = agent_kit.run_task(agent, "hm@example.com", thread_id="t1", decide=approve)
     assert tool_messages(result)["c1"].status != "error"
     [entry] = read_audit(audit_log)
     assert entry["command"] == "share-application"
@@ -318,9 +323,10 @@ def test_real_mode_gates_every_task_that_changes_data(monkeypatch):
     jeni = agent_kit.toolset("jeni")
     writes = jeni_tools.names() - jeni_tools.READ_ONLY
     assert len(writes) == 11                        # of the test catalog's 15 (Jeni's real one: 16 of 22)
-    assert agent_kit.interrupt_on(False, "mock", toolset=jeni) == {}
+    assert set(agent_kit.interrupt_on(False, "mock", toolset=jeni)) == {
+        "shortlist_multiple_application", "share_application", "transfer_job_ownership"}
     assert set(agent_kit.interrupt_on(False, "real", toolset=jeni)) == writes
-    assert set(agent_kit.interrupt_on(True, "mock", toolset=jeni)) == jeni_tools.names()
+    assert set(agent_kit.interrupt_on(True, "mock", toolset=jeni)) == writes
 
 
 def test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read(monkeypatch, audit_log):

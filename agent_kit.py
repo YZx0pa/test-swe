@@ -7,7 +7,7 @@ What run_mini.py spells out as bash-era prompt rules becomes structure here:
   * ToolCallGuard refuses exact repeats of a VIRA call (the duplicate real API
     call run_mini.py works around) and turns crashes into error results.
   * ModelCallLimitMiddleware caps model calls per task (mini's step_limit).
-  * --approve-all puts a human in front of every VIRA call (LangGraph interrupt);
+  * --approve-all puts a human in front of every call that changes data (LangGraph interrupt);
     in real mode, calls that change data on VIRA (score, insights, and every Jeni
     task that isn't a read) always pause.
   * A Toolset picks the tools: VIRA (the sample endpoints) or toolset("jeni") (Jeni's tasks).
@@ -690,8 +690,8 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
                        help="authenticated company_id injected into db queries (tenant scope); "
                             "never taken from the model")
     p.add_argument("--approve-all", action="store_true",
-                   help="pause for human approval before every VIRA tool call "
-                        "(in real mode, score/insights always pause)")
+                   help="pause for human approval before every tool call that changes data "
+                        "(in real mode, score/insights always pause; reads never do)")
     p.add_argument("--step-limit", type=int, default=12,
                    help="max model calls per task (run_mini.py uses 12)")
     p.add_argument("--trace", action="store_true",

@@ -5,6 +5,7 @@ import os
 import stat
 
 import pytest
+from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 import agent_kit
@@ -289,7 +290,7 @@ def test_the_repl_keeps_one_conversation_until_new(vira, monkeypatch, capsys):
 
 
 # --- human in the loop -------------------------------------------------------
-def approve_all_run(vira_model_replies, decision):
+def approve_all_run(vira_model_replies, decision, task="Score applicants 11 and 12."):
     requests = []
 
     def decide(request):
@@ -297,21 +298,28 @@ def approve_all_run(vira_model_replies, decision):
         return [decision for _ in request["action_requests"]]
 
     agent = run_langgraph.build_agent(model=scripted(*vira_model_replies), approve_all=True)
-    return agent_kit.run_task(agent, "Find talents for job 123.", decide=decide), requests
+    return agent_kit.run_task(agent, task, decide=decide), requests
 
 
 def test_approve_all_pauses_and_approval_runs_the_call(vira):
     result, requests = approve_all_run(
-        [calls(call("find_talents", {"job_ids": [123]}, "c1")), say("done")],
+        [calls(call("score_candidates", {"app_ids": [11]}, "c1")), say("done")],
         {"type": "approve"})
     [action] = requests[0]["action_requests"]
-    assert action["name"] == "find_talents" and action["args"] == {"job_ids": [123]}
-    assert len(vira) == 1 and vira[0]["body"]["job_ids"] == [123]
+    assert action["name"] == "score_candidates" and action["args"] == {"app_ids": [11]}
+    assert len(vira) == 1 and vira[0]["body"]["app_ids"] == [11]
+
+
+def test_approve_all_does_not_pause_a_read(vira):
+    result, requests = approve_all_run(
+        [calls(call("find_talents", {"job_ids": [123]}, "c1")), say("done")],
+        {"type": "reject", "message": "no"}, task="Find talents for job 123.")
+    assert requests == [] and [v["body"]["job_ids"] for v in vira] == [[123]]
 
 
 def test_rejection_means_vira_is_never_called(vira):
     result, _ = approve_all_run(
-        [calls(call("find_talents", {"job_ids": [123]}, "c1")), say("stopped")],
+        [calls(call("score_candidates", {"app_ids": [11]}, "c1")), say("stopped")],
         {"type": "reject", "message": "not now"})
     assert vira == []
     assert tool_messages(result)["c1"].status == "error"
@@ -319,15 +327,15 @@ def test_rejection_means_vira_is_never_called(vira):
 
 def test_edit_runs_the_reviewers_args(vira):
     approve_all_run(
-        [calls(call("find_talents", {"job_ids": [123]}, "c1")), say("done")],
-        {"type": "edit", "edited_action": {"name": "find_talents", "args": {"job_ids": [999]}}})
-    assert [v["body"]["job_ids"] for v in vira] == [[999]]
+        [calls(call("score_candidates", {"app_ids": [11, 12]}, "c1")), say("done")],
+        {"type": "edit", "edited_action": {"name": "score_candidates", "args": {"app_ids": [12]}}})
+    assert [v["body"]["app_ids"] for v in vira] == [[12]]
 
 
 def test_real_mode_always_gates_the_calls_that_change_vira(monkeypatch):
     assert agent_kit.interrupt_on(False, "mock") == {}
     assert set(agent_kit.interrupt_on(False, "real")) == {"score_candidates", "candidate_insights"}
-    assert set(agent_kit.interrupt_on(True, "mock")) == vira_tools.NAMES
+    assert set(agent_kit.interrupt_on(True, "mock")) == vira_tools.NAMES - vira_tools.READ_ONLY
     monkeypatch.setattr(vira_tools, "_MODE", "real")            # the default follows configure()
     assert set(agent_kit.interrupt_on(False)) == {"score_candidates", "candidate_insights"}
 
@@ -349,15 +357,45 @@ def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, mon
     assert [(v["path"], v["mode"]) for v in vira] == [("fast_retargeting", "real")]
 
 
-def test_a_bad_edit_is_asked_again_not_a_crash(monkeypatch, capsys):
-    answers = iter(["e", "not json", "[124]", '{"job_ids": [124]}'])
+class Interpreter:
+    """Stands in for the confirmation model: replies with these decisions, in order."""
+
+    def __init__(self, *decisions):
+        self.decisions, self.asked = list(decisions), 0
+
+    def invoke(self, history, config=None):
+        self.asked += 1
+        return AIMessage(json.dumps(self.decisions.pop(0)))
+
+
+def confirm(monkeypatch, answers, model, args):
+    answers = iter(answers)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    decisions = agent_kit.ask_human({"action_requests": [{"name": "find_talents",
-                                                          "args": {"job_ids": [123]}}]})
-    assert decisions == [{"type": "edit", "edited_action": {"name": "find_talents",
-                                                            "args": {"job_ids": [124]}}}]
-    out = capsys.readouterr().out
-    assert "not valid JSON" in out and "expected a JSON object" in out
+    return agent_kit.ask_human({"action_requests": [{"name": "score_candidates", "args": args}]},
+                               model=model)
+
+
+def test_enter_approves_and_n_rejects_without_asking_the_interpreter(monkeypatch):
+    model = Interpreter()
+    assert confirm(monkeypatch, [""], model, {"app_ids": [11]}) == [{"type": "approve"}]
+    assert confirm(monkeypatch, ["n"], model, {"app_ids": [11]})[0]["type"] == "reject"
+    assert model.asked == 0
+
+
+def test_a_change_in_words_is_shown_then_runs_as_an_edit(monkeypatch, capsys):
+    # The interpreter repeats 12 and adds 99; only ids the original call offered survive.
+    model = Interpreter({"decision": "update", "args": {"app_ids": [12, 12, 99]}})
+    decisions = confirm(monkeypatch, ["drop 11", ""], model, {"app_ids": [11, 12]})
+    assert decisions == [{"type": "edit", "edited_action": {"name": "score_candidates",
+                                                            "args": {"app_ids": [12]}}}]
+    assert "updated -> score_candidates" in capsys.readouterr().out
+
+
+def test_without_an_interpreter_a_change_in_words_is_asked_again(monkeypatch, capsys):
+    monkeypatch.setattr(agent_kit, "confirm_chat_model", lambda: None)
+    decisions = confirm(monkeypatch, ["drop 11", "y"], None, {"app_ids": [11, 12]})
+    assert decisions == [{"type": "approve"}]
+    assert "couldn't reach the interpreter" in capsys.readouterr().out
 
 
 # --- what reaches your terminal and disk -------------------------------------

@@ -85,7 +85,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
-| `tests/` | 263 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 266 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -119,7 +119,7 @@ How mini's bash-era prompt rules became structure:
 | "match_id, app_id, profile_id, job_id are DISTINCT" | `ToolCallGuard` refuses an id passed as a different kind than it came back as (e.g. a `profile_id` sent as `match_ids`), and points at `get_match_id_from_profile_id`, the one tool that turns profile ids into match ids |
 | "Never invent any field value" (for ids) | `ToolCallGuard` refuses an id found in neither anything the user wrote (any turn) nor an earlier tool result |
 | `step_limit: 12` | `ModelCallLimitMiddleware(run_limit=12)`: 12 model calls per user turn (and per resume after an approval), so a conversation can go on |
-| "Tell the user … retry with `--confirmed`" | A LangGraph interrupt pauses before the call (approve, edit or reject): for score/insights always in real mode, for every tool with `--approve-all` |
+| "Tell the user … retry with `--confirmed`" | A LangGraph interrupt pauses before the call (approve, edit or reject): for score/insights always in real mode, for every tool that changes data with `--approve-all` |
 | Arg validation by argparse (strings) | Pydantic schema: `job_ids` 1–50 positive ids, `job_title` 1–200 characters, `lang` a language code, and so on; the model gets the error and retries. The typed actions check the same limits, so the CLI and mini are covered too |
 
 ## 3. LangGraph
@@ -179,13 +179,18 @@ whiteboard.
 
 ### Human in the loop
 
-`agent_kit.interrupt_on()` decides which tools pause. `--approve-all` gates every VIRA tool. In
-real mode, `score_candidates` and `candidate_insights` are gated even without it, because they
-trigger calculations on VIRA; the reads (`find_talents`, `generate_jd`) run straight through. The
-mode comes from `vira_tools.configure()`, so a real-mode agent can't be built without the gate.
+`agent_kit.interrupt_on()` decides which tools pause. `--approve-all` gates every tool that
+changes data; reads never pause. In real mode, `score_candidates` and `candidate_insights` are
+gated even without it, because they trigger calculations on VIRA; the reads (`find_talents`,
+`generate_jd`) run straight through. Jeni's shortlist, reject, share and transfer-ownership tasks
+(`ALWAYS_CONFIRM`) pause in every mode, mock included. The mode comes from
+`vira_tools.configure()`, so a real-mode agent can't be built without the gate.
 Each model turn raises one interrupt that batches all gated calls. The runner answers with one decision per call (`approve`, `edit` with new args, `reject`)
 via `Command(resume={"decisions": [...]})` on the same thread. A rejected call never reaches VIRA
-(tested). Interrupts need a checkpointer; `InMemorySaver` covers a single process.
+(tested). At the CLI, `ask_human` takes Enter or `y` to approve, `n` to reject, or a change in words
+("only 12"), which a small confirmation model (`CONFIRM_MODEL`, default `gpt-4o-mini`) turns into
+edited args. Only values the original call offered survive, the change is shown, and nothing runs
+until Enter or `y`. Interrupts need a checkpointer; `InMemorySaver` covers a single process.
 
 ## 4. deepagents: `run_deepagent.py`
 
@@ -201,7 +206,7 @@ Our configuration:
 - **Subagents:** `sourcing-analyst` gets find, score and insights; `jd-writer` gets `generate_jd`.
   We also pass our own `general-purpose` spec, replacing the auto-added one.
 - **Middleware:** `TodoListMiddleware` plus the same guard and call cap as the LangGraph agent.
-- **Approval:** `interrupt_on` gates every tool with `--approve-all`, and score/insights in real
+- **Approval:** `interrupt_on` gates every write with `--approve-all`, and score/insights in real
   mode; subagents inherit it (both tested).
 
 Security: keep the default **`StateBackend`**, where files live in graph state per thread and never
@@ -423,11 +428,11 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 263 tests
+.venv/bin/python -m pytest -q                                   # offline, 266 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
-python run_langgraph.py --tools vira --approve-all                        # approve/edit/reject each call
+python run_langgraph.py --tools vira --approve-all                        # approve, change or reject each write
 python run_langgraph.py --tools jeni                                      # one conversation: answer its questions; 'new' starts over
 python run_workflow.py --app-ids 11,12,13 --top 2
 python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents and write /report.md"
@@ -550,7 +555,8 @@ How a call works:
 - **Only the sub-task result reaches the model**: `{status, task_status, failed_reason, result}`.
   The group's uuids, timestamps and creator name stay out. A task can be `completed` with items in
   `failedArr` (one of two collaborators not found), and the prompt says to read it.
-- **Approvals.** Real mode pauses all 16 writes; `--approve-all` pauses all 22.
+- **Approvals.** Real mode and `--approve-all` pause all 16 writes, never the 6 reads.
+  Shortlist, reject, share and transfer ownership pause in mock mode too.
 - **Ids and personal values.** Ids must come from the user or an earlier result and keep their
   kind (a `userId` from `search_users` can't be sent as `app_ids`). Candidate names and emails, a
   new owner's email and share recipients must be exactly what the user wrote. Results carry them
