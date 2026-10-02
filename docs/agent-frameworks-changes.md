@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 320 offline tests (section 3). |
+| `tests/` | 321 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -192,7 +192,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 320 passed
+# 321 passed
 ```
 
 How the tests stay hermetic:
@@ -211,7 +211,7 @@ How the tests stay hermetic:
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_recruiter_cli.py` | 97 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
+| `tests/test_recruiter_cli.py` | 98 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
 | `tests/test_agents.py` | 49 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed, invented ids refused before VIRA, ids from earlier results allowed. The schemas reject oversized or malformed input. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args, and a read doesn't pause. Approval in words: Enter and `n` decide without the confirmation model, a change is shown and runs as an edit keeping only ids the call offered, and with no confirmation model it is asked again. Printed text has no terminal escapes; `--trace-json` files are 0600 and scrubbed. Real mode gates score/insights by default and a real-mode run pauses before scoring but not before a read. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
 | `tests/test_deepagent.py` | 9 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval, including real mode's gate on scoring. Virtual files stay in graph state and nothing is written to disk. |
 | `tests/test_mcp.py` | 6 | Tool list, annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. Real mode lists only the reads unless side effects are allowed. The call budget stops VIRA calls. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
@@ -725,6 +725,7 @@ Jeni's task groups in `--mode real` go to the VIRA engine. Findings and what isn
 
 | File | Change |
 |---|---|
+| `recruiter_cli.py` (uuids) | `_scrub_text` looks for phone numbers between uuids, never inside one: about 6% of random uuids had a digit group masked as a phone (`b5f234c4-<redacted-phone>-…`), which corrupted session and task-group ids in the audit log and in replies. |
 | `recruiter_cli.py` | `TASK_GROUP_PATH` calls go to `VIRA_ACTUAL_LOCATION` (a full URL, or a path under `VIRA_BASE_URL`) with only `xrtoken: $VIRA_XRTOKEN`; the other endpoints keep `VIRA_BASE_URL` and `x-api-key`. `_real_mode_problem(path)` checks the setting the call needs and names it, never the host. |
 | `jeni_tools.py` | `PATH` is `recruiter_cli.TASK_GROUP_PATH`. Every group carries an `agent_session_uuid`, one per conversation (`session_uuid(thread_id)`; tools read the thread from their `RunnableConfig`). `project()` reports the engine's "received" reply as `queued`, and `RULES` says to report it as submitted. |
 | `.env.example`, `tests/conftest.py` | `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` (placeholders); the tests blank both. |

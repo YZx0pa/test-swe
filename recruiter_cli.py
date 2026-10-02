@@ -118,6 +118,8 @@ _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 _PHONE = re.compile(r"(?<![\w+])(?<!\d\.)(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?"
                     r"\d{2,4}(?:[ .-]\d{2,5}){1,4}(?!\w|\.\d)")      # not inside a decimal
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
+# A uuid's digit groups can look like a phone number ("8969-4271"); uuids are ids, not PII.
+_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
 
 
 def _is_pii_key(key: Any) -> bool:
@@ -133,7 +135,12 @@ def _redact_phone(m: re.Match) -> str:
 
 
 def _scrub_text(text: str) -> str:
-    return _PHONE.sub(_redact_phone, _EMAIL.sub("<redacted-email>", text))
+    text = _EMAIL.sub("<redacted-email>", text)
+    parts, last = [], 0
+    for m in _UUID.finditer(text):           # phones are looked for between uuids, never in one
+        parts += [_PHONE.sub(_redact_phone, text[last:m.start()]), m.group(0)]
+        last = m.end()
+    return "".join(parts) + _PHONE.sub(_redact_phone, text[last:])
 
 
 def _mask_pii(obj: Any) -> Any:

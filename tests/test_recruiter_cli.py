@@ -87,6 +87,14 @@ def test_emails_and_phones_inside_text_are_masked():
     assert out.endswith("Call <redacted-phone>.")          # a number ending a sentence
 
 
+def test_uuids_are_kept_whole_and_phones_beside_them_still_masked():
+    import uuid
+    ids = [str(uuid.uuid4()) for _ in range(2000)] + ["b5f234c4-8969-4271-a0f3-7459042f100b"]
+    assert [recruiter_cli._mask_pii({"agentTaskGroupUuid": u})["agentTaskGroupUuid"] for u in ids] == ids
+    out = recruiter_cli._mask_pii({"m": "group b5f234c4-8969-4271-a0f3-7459042f100b, call +65 9123 4567"})["m"]
+    assert out == "group b5f234c4-8969-4271-a0f3-7459042f100b, call <redacted-phone>"
+
+
 @pytest.mark.parametrize("action", [
     lambda: recruiter_cli.find_talents(list(range(1, 52)), mode="mock"),
     lambda: recruiter_cli.find_talents([0], mode="mock"),
