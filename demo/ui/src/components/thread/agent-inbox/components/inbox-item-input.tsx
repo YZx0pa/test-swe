@@ -121,6 +121,8 @@ function EditActionCard({
   ) => Promise<void> | void;
 }) {
   const defaultRows = React.useRef<Record<string, number>>({});
+  // Jeni demo: the call's fields are hidden until the reviewer chooses to change them.
+  const [editing, setEditing] = React.useState(false);
   const editResponse = humanResponse.find(
     (response) => response.type === "edit",
   );
@@ -146,7 +148,7 @@ function EditActionCard({
     return null;
   }
 
-  const header = editResponse.acceptAllowed ? "Edit/Approve" : "Edit";
+  const header = "Change the details";
   const buttonText =
     editResponse.acceptAllowed && !editResponse.editsMade
       ? "Approve"
@@ -184,50 +186,62 @@ function EditActionCard({
 
   return (
     <div className="flex w-full min-w-full flex-col items-start gap-4 rounded-lg border border-gray-300 p-6">
-      <div className="flex w-full items-center justify-between">
-        <p className="text-base font-semibold text-black">{header}</p>
-        <ResetButton handleReset={handleReset} />
-      </div>
-
-      {Object.entries(editResponse.edited_action.args).map(
-        ([key, value], idx) => {
-          const stringValue =
-            typeof value === "string" || typeof value === "number"
-              ? value.toString()
-              : JSON.stringify(value, null);
-
-          if (defaultRows.current[key] === undefined) {
-            defaultRows.current[key] = !stringValue.length
-              ? 3
-              : Math.max(stringValue.length / 30, 7);
-          }
-
-          return (
-            <div
-              className="flex h-full w-full flex-col items-start gap-1 px-[1px]"
-              key={`allow-edit-args--${key}-${idx}`}
-            >
-              <div className="flex w-full flex-col items-start gap-[6px]">
-                <p className="min-w-fit text-sm font-medium">
-                  {prettifyText(key)}
-                </p>
-                <Textarea
-                  disabled={isLoading}
-                  className="h-full w-full max-w-full"
-                  value={stringValue}
-                  onChange={(event) =>
-                    onEditChange(event.target.value, editResponse, key)
-                  }
-                  onKeyDown={handleKeyDown}
-                  rows={defaultRows.current[key] || 8}
-                />
-              </div>
-            </div>
-          );
-        },
+      {editing && (
+        <div className="flex w-full items-center justify-between">
+          <p className="text-base font-semibold text-black">{header}</p>
+          <ResetButton handleReset={handleReset} />
+        </div>
       )}
 
+      {editing &&
+        Object.entries(editResponse.edited_action.args).map(
+          ([key, value], idx) => {
+            const stringValue =
+              typeof value === "string" || typeof value === "number"
+                ? value.toString()
+                : JSON.stringify(value, null);
+
+            if (defaultRows.current[key] === undefined) {
+              defaultRows.current[key] = !stringValue.length
+                ? 3
+                : Math.max(stringValue.length / 30, 7);
+            }
+
+            return (
+              <div
+                className="flex h-full w-full flex-col items-start gap-1 px-[1px]"
+                key={`allow-edit-args--${key}-${idx}`}
+              >
+                <div className="flex w-full flex-col items-start gap-[6px]">
+                  <p className="min-w-fit text-sm font-medium">
+                    {prettifyText(key)}
+                  </p>
+                  <Textarea
+                    disabled={isLoading}
+                    className="h-full w-full max-w-full"
+                    value={stringValue}
+                    onChange={(event) =>
+                      onEditChange(event.target.value, editResponse, key)
+                    }
+                    onKeyDown={handleKeyDown}
+                    rows={defaultRows.current[key] || 8}
+                  />
+                </div>
+              </div>
+            );
+          },
+        )}
+
       <div className="flex w-full items-center justify-end gap-2">
+        {!editing && (
+          <Button
+            variant="ghost"
+            disabled={isLoading}
+            onClick={() => setEditing(true)}
+          >
+            Change details
+          </Button>
+        )}
         <Button
           variant="brand"
           disabled={isLoading}

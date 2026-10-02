@@ -14,8 +14,9 @@ each act in a **new chat** (the pencil icon, top right).
    end `8/8`. It deletes its chats and resets the data when it finishes.
 3. Open <http://localhost:3000>. Zoom the browser to 110–125% so the back row can read it. The
    data panel is on the right; **Show data** / **Hide data** toggles it.
-4. For a business audience, switch on **Hide Tool Calls** under the input box. For engineers,
-   leave the calls showing: they are the point.
+4. The chat never shows tool calls, their payloads or raw results. An approval card says in
+   plain words what Jeni wants to do ("Shortlist applications 5102 and 5103."), and the data
+   panel's "What reached VIRA" shows every call that ran.
 5. If anything looks off, press **Reset data** in the panel. Every act works from the starting
    data.
 6. Approvals: routine changes run straight away and the high-stakes ones (shortlist, reject,
@@ -58,8 +59,9 @@ Point out:
 
 Type: `Transfer ownership of the Product Designer job to alice.johnson@example.com.`
 
-- Jeni finds the job, and may check that Alice is a colleague. Then a card appears for
-  `transfer_job_ownership`. **Reject**, with the reason `Not yet: Alice starts next month.`
+- Jeni finds the job, and may check that Alice is a colleague. Then a card asks: "Transfer
+  ownership of job 7003 to alice.johnson@example.com." Under **Reject**, type the reason
+  `Not yet: Alice starts next month.` and click **Submit rejection**.
 
 Point out:
 - Transferring ownership, shortlisting, rejecting and sharing a CV always wait for a person, in
@@ -71,8 +73,9 @@ Point out:
 
 Type: `Create a Data Engineer job in Singapore needing Python and SQL, with 3 to 5 years of experience, then add Spark to it.`
 
-- Jeni creates the job, reads the new id from VIRA's reply, and adds Spark to that id. Open the
-  two tool calls to show it: `add_job_skills`' `job_id` is the id `create_job` returned.
+- Jeni creates the job, reads the new id from VIRA's reply, and adds Spark to that id. Show it
+  in the panel's feed: "Create job … → job 7105", then "Add job skills · job 7105 · Spark" (the
+  id varies).
 
 Point out:
 - v1 can't do this in one request: its plan is made before the job exists, so it has no id to
@@ -83,9 +86,10 @@ Point out:
 
 Type: `Shortlist the two strongest applicants for the backend engineer job.`
 
-- Jeni reads the applications and their match scores, then proposes
-  `shortlist_multiple_application` for 5102 and 5103 (0.91 and 0.85).
-- At the card, **edit** `app_ids` to `[5102]` and submit. Say: "Only the top one for now."
+- Jeni reads the applications and their match scores, and the card asks: "Shortlist
+  applications 5102 and 5103." (0.91 and 0.85).
+- Click **Change details**, set **App Ids** to `[5102]`, and click **Submit**. Say: "Only the top
+  one for now."
 
 Point out:
 - The pick came from the data, not from a guess.
@@ -117,7 +121,8 @@ Type: `Share application 5102 with the hiring manager.`
 
 Type: `Send it to priya.nair@example.com with a note: strong backend profile, worth a call.`
 
-- Card for `share_application`. **Approve.**
+- The card asks: "Share application 5102 with priya.nair@example.com, with the note …".
+  **Approve.**
 
 Point out:
 - Emails have to be exactly what the user typed. A guessed or copied address is refused in code,

@@ -780,6 +780,13 @@ after the import:
   rehearsal couldn't see it, since it sends JSON.
 - `pnpm.overrides` for two low-severity advisories in build tooling (`@babel/core`,
   `postcss-selector-parser`); `pnpm audit`: no known vulnerabilities on 2026-10-01.
+- **No internal workings on screen** (2026-10-02). Tool calls, their arguments and raw results
+  are never rendered (`messages/ai.tsx`), and the "Hide Tool Calls" switch and the API host badge
+  are gone. The approval card leads with the server's plain-language summary (§3) under "Needs
+  your approval", drops the thread id, Studio, State (the raw thread), Description and Mark as
+  Resolved, and shows the call's fields only after **Change details**. Checked in headless
+  Chromium: the page has no tool names, JSON or default card text; editing the shortlist to
+  `[5102]` shortlists 5102 only; a rejected transfer never reaches the mock.
 
 Security, beyond §11 (each has a test in `tests/test_demo.py` unless noted):
 

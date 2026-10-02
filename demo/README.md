@@ -88,6 +88,11 @@ without `.github/`, and the one after it holds every local change (`git log -- d
   by default (`?data=false` hides it).
 - Starter cards on an empty chat, from `/demo/prompts`. A click fills the input box; the presenter
   sends it.
+- **No internal workings on screen.** Tool calls, their payloads and raw results are never shown,
+  and the "Hide Tool Calls" switch and the API host badge are gone. The approval card shows the
+  server's plain-language summary ("Shortlist applications 5102 and 5103.") instead of the tool
+  name, and has no thread id, Studio link, State or Description panels, or Mark as Resolved; the
+  call's fields appear only after **Change details**.
 - **Edited arguments keep their types.** Upstream sends each edited value as the text in its box,
   so editing `app_ids` to `[5102]` sent the string `"[5102]"` and the tool refused it. Where the
   proposed value wasn't a string, the edit is now parsed back to JSON before the run resumes, and

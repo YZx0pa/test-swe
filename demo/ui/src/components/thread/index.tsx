@@ -28,14 +28,6 @@ import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import ThreadHistory from "./history";
 import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { Label } from "../ui/label";
-import { Switch } from "../ui/switch";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "../ui/tooltip";
 import { useFileUpload } from "@/hooks/use-file-upload";
 import { ContentBlocksPreview } from "./ContentBlocksPreview";
 import {
@@ -151,30 +143,6 @@ function StarterPrompts({
   );
 }
 
-function ConnectedHost({ apiUrl }: { apiUrl: string }) {
-  let host: string;
-  try {
-    host = new URL(apiUrl).host;
-  } catch {
-    host = apiUrl;
-  }
-
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="text-muted-foreground hidden max-w-40 truncate text-xs sm:inline">
-            {host}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          <p>Connected to {apiUrl}</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
 export function Thread() {
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
@@ -182,10 +150,6 @@ export function Thread() {
   const [threadId, _setThreadId] = useQueryState("threadId");
   const [chatHistoryOpen, setChatHistoryOpen] = useQueryState(
     "chatHistoryOpen",
-    parseAsBoolean.withDefault(false),
-  );
-  const [hideToolCalls, setHideToolCalls] = useQueryState(
-    "hideToolCalls",
     parseAsBoolean.withDefault(false),
   );
   const [dataOpen, setDataOpen] = useQueryState(
@@ -442,7 +406,6 @@ export function Thread() {
                     v2 demo · mock data
                   </span>
                 </motion.button>
-                <ConnectedHost apiUrl={stream.apiUrl} />
               </div>
 
               <div className="flex items-center gap-4">
@@ -566,21 +529,6 @@ export function Thread() {
                       />
 
                       <div className="flex items-center gap-6 p-2 pt-4">
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <Switch
-                              id="render-tool-calls"
-                              checked={hideToolCalls ?? false}
-                              onCheckedChange={setHideToolCalls}
-                            />
-                            <Label
-                              htmlFor="render-tool-calls"
-                              className="text-sm text-gray-600"
-                            >
-                              Hide Tool Calls
-                            </Label>
-                          </div>
-                        </div>
                         {stream.isLoading ? (
                           <Button
                             key="stop"

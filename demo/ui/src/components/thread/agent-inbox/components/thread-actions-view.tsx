@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Interrupt } from "@langchain/langgraph-sdk";
 import { Button } from "@/components/ui/button";
-import { ThreadIdCopyable } from "./thread-id";
 import { InboxItemInput } from "./inbox-item-input";
 import useInterruptedActions from "../hooks/use-interrupted-actions";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { useQueryState } from "nuqs";
-import { constructOpenInStudioURL, buildDecisionFromState } from "../utils";
+import { buildDecisionFromState } from "../utils";
 import { Decision, HITLRequest, DecisionType, ActionRequest } from "../types";
 import { useStreamContext } from "@/providers/Stream";
 
@@ -16,45 +14,6 @@ interface ThreadActionsViewProps {
   handleShowSidePanel: (showState: boolean, showDescription: boolean) => void;
   showState: boolean;
   showDescription: boolean;
-}
-
-function ButtonGroup({
-  handleShowState,
-  handleShowDescription,
-  showingState,
-  showingDescription,
-}: {
-  handleShowState: () => void;
-  handleShowDescription: () => void;
-  showingState: boolean;
-  showingDescription: boolean;
-}) {
-  return (
-    <div className="flex flex-row items-center justify-center gap-0">
-      <Button
-        variant="outline"
-        className={cn(
-          "rounded-l-md rounded-r-none border-r-[0px]",
-          showingState ? "text-black" : "bg-white",
-        )}
-        size="sm"
-        onClick={handleShowState}
-      >
-        State
-      </Button>
-      <Button
-        variant="outline"
-        className={cn(
-          "rounded-l-none rounded-r-md border-l-[0px]",
-          showingDescription ? "text-black" : "bg-white",
-        )}
-        size="sm"
-        onClick={handleShowDescription}
-      >
-        Description
-      </Button>
-    </div>
-  );
 }
 
 function isValidHitlRequest(
@@ -80,15 +39,10 @@ function getActionTitle(action?: ActionRequest) {
   return action?.name ?? "Unknown interrupt";
 }
 
-export function ThreadActionsView({
-  interrupt,
-  handleShowSidePanel,
-  showDescription,
-  showState,
-}: ThreadActionsViewProps) {
+// Jeni demo: the card shows the server's plain-language summary of the call, not its payload,
+// the thread's state, its id or Studio.
+export function ThreadActionsView({ interrupt }: ThreadActionsViewProps) {
   const stream = useStreamContext();
-  const [threadId] = useQueryState("threadId");
-  const [apiUrl] = useQueryState("apiUrl");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [addressedActions, setAddressedActions] = useState<
     Map<number, Decision>
@@ -132,10 +86,8 @@ export function ThreadActionsView({
     hasAddedResponse,
     streaming,
     supportsMultipleMethods,
-    streamFinished,
     loading,
     handleSubmit,
-    handleResolve,
     setSelectedSubmitType,
     setHasAddedResponse,
     setHasEdited,
@@ -151,21 +103,6 @@ export function ThreadActionsView({
     setCurrentIndex(0);
     setAddressedActions(new Map());
   }, [interrupt]);
-
-  const handleOpenInStudio = () => {
-    if (!apiUrl) {
-      toast.error("Error", {
-        description: "Please set the LangGraph deployment URL in settings.",
-        duration: 5000,
-        richColors: true,
-        closeButton: true,
-      });
-      return;
-    }
-
-    const studioUrl = constructOpenInStudioURL(apiUrl, threadId ?? undefined);
-    window.open(studioUrl, "_blank");
-  };
 
   const handleApproveAll = useCallback(() => {
     if (!hasMultipleActions) return;
@@ -291,7 +228,8 @@ export function ThreadActionsView({
     }
   };
 
-  const currentTitle = getActionTitle(currentAction);
+  const currentTitle =
+    currentAction?.description || getActionTitle(currentAction);
   const actionsDisabled = loading || streaming || submittingAll;
   const hasAllDecisions =
     hasMultipleActions && addressedActions.size === actionRequests.length;
@@ -310,44 +248,16 @@ export function ThreadActionsView({
 
   return (
     <div className="flex min-h-full w-full max-w-full flex-col gap-9">
-      <div className="flex w-full flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center justify-start gap-3">
-          <p className="text-2xl tracking-tighter text-pretty">
-            {hasMultipleActions
-              ? `${currentTitle} (${currentIndex + 1}/${actionRequests.length})`
-              : currentTitle}
-          </p>
-          {threadId && <ThreadIdCopyable threadId={threadId} />}
-        </div>
-        <div className="flex flex-row items-center justify-start gap-2">
-          {apiUrl && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="flex items-center gap-1 bg-white"
-              onClick={handleOpenInStudio}
-            >
-              Studio
-            </Button>
-          )}
-          <ButtonGroup
-            handleShowState={() => handleShowSidePanel(true, false)}
-            handleShowDescription={() => handleShowSidePanel(false, true)}
-            showingState={showState}
-            showingDescription={showDescription}
-          />
-        </div>
+      <div className="flex w-full flex-col gap-1">
+        <p className="text-sm font-medium text-amber-700">
+          Needs your approval
+          {hasMultipleActions &&
+            ` (${currentIndex + 1} of ${actionRequests.length})`}
+        </p>
+        <p className="text-xl tracking-tight text-pretty">{currentTitle}</p>
       </div>
 
       <div className="flex w-full flex-row flex-wrap items-center justify-start gap-2">
-        <Button
-          variant="outline"
-          className="border-gray-500 bg-white font-normal text-gray-800"
-          onClick={handleResolve}
-          disabled={actionsDisabled}
-        >
-          Mark as Resolved
-        </Button>
         {hasMultipleActions && allAllowApprove && (
           <Button
             variant="outline"
@@ -437,12 +347,6 @@ export function ThreadActionsView({
               : `Submit all ${actionRequests.length} decisions`}
           </Button>
         </div>
-      )}
-
-      {!hasMultipleActions && streamFinished && (
-        <p className="text-base font-medium text-green-600">
-          Successfully finished Graph invocation.
-        </p>
       )}
     </div>
   );
