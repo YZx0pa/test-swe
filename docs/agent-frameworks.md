@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 310 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 317 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -448,7 +448,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 310 tests
+.venv/bin/python -m pytest -q                                   # offline, 317 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -534,6 +534,8 @@ every control sits in code the model can't reach, and each one has a test.
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
 | Jeni: a guessed candidate email or share recipient reaches VIRA (a CV sent to the wrong person) | `ToolCallGuard` refuses a `USER_ONLY` value (candidate name and email, new owner's email, share recipients) that isn't in the user's words, without echoing it; masked values from results fail the email pattern | `test_an_email_the_user_never_gave_is_refused`, `test_an_email_the_user_gave_is_used`, `test_invalid_input_never_reaches_vira` |
 | Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
+| The engine's `xrtoken` leaks or is sent elsewhere | `VIRA_XRTOKEN` is read from the environment and sent only as the `xrtoken` header to `VIRA_ACTUAL_LOCATION`, never to the other endpoints; the audit log records commands and masked bodies, not headers; no redirects are followed and proxy variables are ignored | `test_task_groups_go_to_the_engine_with_only_the_users_xrtoken` |
+| A task group sent with a missing or wrong engine setting | No location, plain http to a non-loopback host, or an empty token: nothing is sent, and the error names the setting, never the host | `test_the_engine_fails_closed_without_its_settings` |
 | An agent redoes what a reviewer removed (the applicant edited off a shortlist, a rejected change with other args) | `agent_kit.overruled()`: until the user writes again, a new call to a tool the reviewer edited or rejected gets no card (HITL's `when`) and `ToolCallGuard` refuses it | `test_a_reviewers_edit_stands_until_the_user_writes_again`, `test_a_rejection_stands_and_gets_no_second_card` |
 | Jeni: candidate names in task payloads reach the audit log, or the creator's name reaches the model | `_mask_pii` masks a `field_value` whose `field_name` is sensitive, and creator/owner names; the model gets only the sub-task result | `test_candidate_details_are_masked_in_the_audit_log`, `test_creator_and_owner_names_are_masked`, `test_the_model_sees_only_the_sub_task_result` |
 | Jeni: a collaborator silently added as administrator | `role_id` has no default and takes only 1 (administrator) or 5 (team member); `is_private` is set by the task | `test_role_has_no_default_and_visibility_is_set_by_the_task` |
@@ -577,9 +579,8 @@ How a call works:
   and no unknown fields. `run()` validates again, so a bad call never reaches VIRA whoever makes it.
 - **One task per group.** A call sends a task group holding only that task, in v1's payload
   format (`handleGenerateViraPayload`), through `recruiter_cli.execute()`: audit log, PII mask,
-  mode set by the host. The path `agent_task_group` is **assumed**: v1 creates groups in-process
-  (`XagentTaskEngine.handleCreateTaskGroup`), so VIRA's HTTP path for it isn't known yet.
-  `mock_jeni.py` answers it in the shape of a real VIRA reply.
+  mode set by the host. Real mode sends it to the VIRA engine (§15); `mock_jeni.py` answers it
+  in the shape of a completed VIRA reply.
 - **Only the sub-task result reaches the model**: `{status, task_status, failed_reason, result}`.
   The group's uuids, timestamps and creator name stay out. A task can be `completed` with items in
   `failedArr` (one of two collaborators not found), and the prompt says to read it.
@@ -702,8 +703,8 @@ four samples of the first turn, all four listed the candidates; three asked only
 also asked the catalog's open-and-public question.
 
 Open points:
-- **Jeni's real-mode path doesn't exist yet.** VIRA answers `POST agent_task_group` with 404, so
-  in real mode the lookups work and every Jeni task fails.
+- **Jeni's tasks on real VIRA** go to the engine now, which queues them and runs them later; see
+  §15 for what works and what doesn't yet.
 
 ## 14. The demo: `demo/` on `langgraph dev`
 
@@ -837,3 +838,61 @@ Open points:
   If sharing outside the company is allowed, the rule should exempt `share_application`.
 - The replies still run long now and then, and sometimes offer to redo what the reviewer removed
   (the code refuses it if asked in the same request).
+
+## 15. The real VIRA engine: Jeni's tasks in `--mode real`
+
+Tried on 2026-10-02 against the staging engine, with read-only task groups only: the engine's own
+`sub_task_get_job_description` and v2's `search_users`.
+
+How a call goes now:
+- **Route and auth.** Task groups (`jeni_tools.PATH`) go to `VIRA_ACTUAL_LOCATION`, the full
+  endpoint URL or a path under `VIRA_BASE_URL`, with one header, `xrtoken: $VIRA_XRTOKEN`. The four
+  sample endpoints keep `VIRA_BASE_URL` and their `x-api-key` headers. The protections are the same
+  for both (`recruiter_cli._target`, `_real_mode_problem`).
+- **The xrtoken is a user's.** v1 makes one per user (`generateXrtokenHelper({ userId })`). Every
+  task group runs with that user's rights, in that user's company, so real mode gates every write
+  (§3).
+- **A session is required.** Without one the engine answers 400: "Missing agent_session_uuid!
+  Required: task_group_name, agent_session_uuid, tasks". v1 sends `null` there. v2 sends one per
+  conversation, a uuid5 of the thread id (the tools get the thread from their `RunnableConfig`;
+  outside a thread, one per process). A fresh uuid was accepted, so the engine doesn't require
+  the session to exist.
+- **The engine is asynchronous.** The POST answers 200 in about 0.3 s with only
+  `{agentTaskGroupUuid, message: "Your tasks have been received. We are processing your tasks.
+  You can see task status on the task panel"}`. `jeni_tools.project()` turns that into
+  `{"status": "queued", ...}`, and `RULES` tells the model to say the task was submitted, not
+  done, and not to use anything it would have returned. Until results can be read back, v2 can't
+  chain steps in real mode (a new job's id into the next call).
+
+What the engine runs, from its tables on staging (`hris.agenttaskgroup`, `agenttask`,
+`agentsubtask`), last 60 days, statuses and counts only:
+- **Vocabulary.** The task and sub-task names in use are v2's catalog names (`task_get_applications`
+  / `sub_task_get_applications`, `task_create_job`, …), plus `sub_task_get_jobs`, which v1's
+  catalog comments out. The sample's `task_setup_job` with `sub_task_job_create`,
+  `sub_task_job_board_linkedin_publish` and a transfer by `new_owner_user_id` appears only in our
+  probe: a newer or planned format.
+- **Speed.** 130 groups completed in 30 days, with a median of 3 s from creation to done.
+- **Failure lives in the sub-tasks.** 404 sub-tasks failed (395 with a `failed_reason`), while every
+  task and group ended `completed`, whatever its sub-tasks did.
+- **Tasks are independent.** In 117 groups where a task had a failed sub-task and more tasks
+  followed, every later task ran: 60 completed fully, 112 had failures of their own, none was left
+  unrun.
+- **Sub-tasks within a task are chained.** Every sub-task of a multi-sub-task task carries a
+  `next_sub_task_payload`, and after a failed sub-task every later one in the same task failed too
+  (42 of 42; no success ever followed a failure). Whether they fail because of the first one or for
+  reasons of their own needs a controlled run: the reasons are free text from real records and
+  weren't read.
+
+So the expected behaviour holds, with one nuance: a failed task shows only in its sub-tasks, and
+the task itself reads `completed`.
+
+Not working yet:
+- **Nothing executes on staging.** No group has finished since 2026-09-24 10:43 UTC. Every group
+  created since, including our three read-only probes, stays `queued` (watched for 4 minutes).
+  Either the engine's worker isn't running there, or groups created through this endpoint wait for
+  a trigger it doesn't send. That needs someone on the VIRA side.
+- **Reading results back.** The POST returns none. Either an engine status call by
+  `agentTaskGroupUuid` (what the task panel uses; preferred), or polling `hris.agentsubtask` for
+  the group, which works today over the TRON tunnel but ties the agent to the engine's tables.
+- **The controlled run**, once groups execute: one group, two tasks; in the first, a sub-task that
+  fails followed by one that would succeed alone; the second task independent. Read-only tasks.

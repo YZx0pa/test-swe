@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 310 offline tests (section 3). |
+| `tests/` | 317 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -192,7 +192,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 310 passed
+# 317 passed
 ```
 
 How the tests stay hermetic:
@@ -211,13 +211,13 @@ How the tests stay hermetic:
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_recruiter_cli.py` | 92 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
+| `tests/test_recruiter_cli.py` | 97 | For all four endpoints, the CLI and the typed action send the identical request, and both mask results. Out-of-limit input is refused before anything is sent, and the CLI reports an id typo. Masking by key name and pattern (28 sensitive keys masked, 19 others kept), and emails and phones inside free text and non-JSON replies. The audit line masks the request body and the query. Neither the typed actions nor the CLI have a default `mode`. Mock mode end to end. The confirm gate blocks before any call, the CLI exits `2`, and `confirmed=True` passes. Failed calls are audited and the CLI prints one JSON line. The audit log is 0600. A shared `.env` is reported from its mode bits. Real mode (with a fake `requests.Session`): no redirects and `trust_env=False`; https unless loopback; empty credentials send nothing; non-JSON replies are capped. |
 | `tests/test_agents.py` | 49 | Tool schemas are typed and described. Tools use the configured mode and never confirm. Scoring with no ids never calls VIRA. VIRA failures become error results with no host. Tracing stays off even with `LANGSMITH_TRACING_V2=true` preset. `build_chat_model` id mapping. The agent sees only masked output. Guard: exact repeats refused, parallel duplicates run once, different args allowed, wrong-kind ids refused before VIRA, ids the user named are allowed, invented ids refused before VIRA, ids from earlier results allowed. The schemas reject oversized or malformed input. A crashing tool doesn't crash the run. Invalid args come back to the model. The model-call cap ends the run. `--approve-all`: approve runs the call, reject never reaches VIRA, edit runs the edited args, and a read doesn't pause. Approval in words: Enter and `n` decide without the confirmation model, a change is shown and runs as an edit keeping only ids the call offered, and with no confirmation model it is asked again. Printed text has no terminal escapes; `--trace-json` files are 0600 and scrubbed. Real mode gates score/insights by default and a real-mode run pauses before scoring but not before a read. Workflow: waits for approval then runs insights on the shortlist, a rejection skips insights, the summary comes from the model, and it stops on a VIRA error. |
 | `tests/test_deepagent.py` | 9 | `StateBackend` only, and `execute` isn't offered. A hallucinated `execute` call runs nothing. The main agent and subagents go through the guarded path, and a subagent returns only its answer. A subagent can't repeat the parent's call. The ledger is per task. Subagents inherit approval, including real mode's gate on scoring. Virtual files stay in graph state and nothing is written to disk. |
 | `tests/test_mcp.py` | 6 | Tool list, annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`) and masked results. Invalid args are an MCP error with no audit line. Confirm-gated tools aren't listed. Real mode lists only the reads unless side effects are allowed. The call budget stops VIRA calls. A real `vira_mcp.py` subprocess over stdio writes only JSON-RPC to stdout and audits to `$EVENTS_LOG`. |
 | `tests/test_grounding.py` | 16 | Values traced to the task or earlier results, and invented values flagged. `lang=en` counts as a default, and percentages match scores. Refusals are marked. Mini commands are parsed and off-policy output hidden, including a VIRA call chained to another command. Typos stay ungroundable. Real ids of the wrong kind count as misuse, while right-kind ids and task ids are fine. `reground()` matches a fresh trace. Mini's `<returncode>` observation is unwrapped. Wrong-kind and invented ids the guard refused count as blocked, not as reaching VIRA. |
 | `tests/test_mini_env.py` | 46 | The policy: allowed commands, and a table of refused ones (`env`, `cat .env`, other programs, `--mode real` under a mock host, `--mo`, repeated `--mode`, `VAR=` prefixes, `;` `&&` `\|` `>`, newlines, `$(…)`, `--confirmed`, bad quoting, overlong input). Its names match the CLI and the tools. The environment: refused commands start no process; `echo` starts none; only `echo` can end the run; recruiter_cli runs as argv with the host's mode and a minimal env; secrets stay out of templates and `serialize()`; a real mock subprocess reaches MockVira and the audit log; argparse errors reach the model but tracebacks don't; real-mode side effects wait for approval (and are refused with no approver); a hung CLI is killed. |
-| `tests/test_jeni.py` | 56 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a read runs again after a write but not twice in a row, a failed write runs again once another write ran but a successful one never repeats, a reviewer's edit or rejection stands (no second card, the call refused) until the user writes again, a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). The mock forgets changes by default; a kept State remembers them (a job made public can be published, stages and teams stick, the fixtures stay untouched), a created job and candidate are found by the db lookups until `reset()`, and the activity log keeps ids, never names or emails. |
+| `tests/test_jeni.py` | 58 | Jeni's tasks (section 8), on the synthetic 15-task catalog in `tests/fixtures/`: the catalog is read from `JENI_TASKS_FILE`, v2's task lists name real v1 tasks, a missing catalog is a clear error that only `--tools jeni` hits, and `catalog_from_js` reads v1's file format. Every tool is typed and described, with v1's mandatory fields required; `role_id` has no default and `is_private` is set by the task. Invalid input (bad or masked emails, a role other than 1 or 5, oversized lists, unknown fields) never reaches VIRA. A call sends one task group in v1's format to the assumed path; the mock answers every task in the shape of a real reply; the model sees only the sub-task result; failures carry a reason and partial success shows in `failedArr`. People are masked in results and in the audit log (field-value pairs, creator and owner names). Agent runs: a read runs again after a write but not twice in a row, a failed write runs again once another write ran but a successful one never repeats, a reviewer's edit or rejection stands (no second card, the call refused) until the user writes again, a user found by search is added by id, a new job's id is used in the next call, invented and wrong-kind ids are refused, an email the user never gave is refused without being echoed, one they gave is used. Real mode gates every write, and a real-mode agent asks before a write but not a read. deepagents gets the tasks behind the guard, subagents included. `--tools` picks the toolset, and deepagents defaults to `jeni` without offering the async `jeni_db`; camelCase result keys count as id kinds. The comparison suite's checks pass on the right calls and fail on near misses (no search first, administrator instead of team member, ownership transferred, the wrong job or the wrong two applicants, any write where the task should only ask). The mock forgets changes by default; a kept State remembers them (a job made public can be published, stages and teams stick, the fixtures stay untouched), a created job and candidate are found by the db lookups until `reset()`, and the activity log keeps ids, never names or emails. |
 | `tests/test_db.py` | 18 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; user labels arrive masked; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus the read-only db tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
 | `tests/test_demo.py` | 18 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt differs only in the two closing rules (no `SUMMARY:`, no `STATUS:`), and the build fails if either changes; routine writes run while a shortlist asks, and the changes show on the panel; with `gate_writes` every write asks; a rejected transfer never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. The script: `SCRIPT.md` has every prompt and `/demo/prompts` serves the first ones; every check fails on the starting data unless the act names its cards; the rehearsal (on the in-process graph with a scripted model) passes an edited shortlist, refuses a second shortlist with no card, fails a reject act whose card never appeared, sends a follow-up only while the check fails, and deletes its threads and resets the data. |
 
@@ -617,7 +617,7 @@ the proposals for engineering are in
 | `jeni_tools.py` | Reads the catalog on first use (`CatalogMissing` if it isn't there) and builds one typed tool per task from it (pydantic models: types, limits, descriptions), sends a call as a one-task group in v1's payload format through `recruiter_cli.execute()`, and hands the model only the sub-task result. `READ_ONLY` (6 tasks), `USER_ONLY` fields, `FIXED_VALUES` (`is_private`), `NO_DEFAULT` (`role_id`), `RULES` for the prompt. `python jeni_tools.py` lists the tasks and flags any the mock can't answer; `--from-js tasks.js` builds the catalog. |
 | `mock_jeni.py` | Mock of VIRA's task-group API: one handler per task over synthetic jobs, users and applications, answering in the shape of a real reply (group → task → sub-task, `agentSubTaskResponse`, `failedReason`). Stateless and deterministic unless `remember_changes()` is called (the demo). |
 | `jeni_eval.py` | Seven Jeni requests for `compare_agents.py --suite jeni`, each with a check over the audit log: writes must match exactly, reads are free. |
-| `tests/test_jeni.py` | 56 offline tests (section 3). |
+| `tests/test_jeni.py` | 58 offline tests (section 3). |
 | `db_lookup.py`, `db_queries.py`, `db_tools.py` | Read-only lookups in Jeni's database ([agent-frameworks.md §13](agent-frameworks.md#13-database-lookups---tools-jeni_db)): v1's Node job and user searches on asyncpg; each lookup as a `QueryTool` (resolved / ambiguous / not_found / validated) on a pool or on fixtures; and the adapter to LangChain tools, with the company bound at build time and results masked. |
 | `tests/test_db.py` | 18 offline tests (section 3). |
 
@@ -649,7 +649,7 @@ Put the shared catalog at `config/jeni_tasks.json` first (or set `JENI_TASKS_FIL
 python jeni_tools.py                                                       # check it: the tasks, read/write and fields
 python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"
 python run_langgraph.py --task "Add python, sql to the backend engineer job and shortlist its applicants"   # jeni_db: looks the job up, then acts
-python run_langgraph.py --mode real        # jeni_db on TRON ($TRON_POSTGRES_DSN): lookups work; every write pauses, and VIRA 404s Jeni's tasks for now
+python run_langgraph.py --mode real        # jeni_db on TRON ($TRON_POSTGRES_DSN): lookups work; every write pauses; Jeni's tasks go to the VIRA engine and come back queued (section 10)
 python run_langgraph.py --tools jeni       # a conversation: e.g. "Share the CV of applicant 5102 with the hiring manager", then give the email it asks for
 python run_langgraph.py --tools jeni --task "Create a Data Engineer job needing Python and SQL with 3 to 5 years of experience, then add Spark to it"
 python run_langgraph.py --tools jeni --approve-all --task "Shortlist the two applicants with the highest match scores for job 7001"
@@ -658,8 +658,7 @@ python compare_agents.py --suite jeni --repeat 3 --out traces/jeni.md    # 7 req
 ```
 
 `cat "$EVENTS_LOG"` shows each call as a one-task group, with candidate names and emails
-redacted. Real mode sends the same payload to `$VIRA_BASE_URL/agent_task_group`, an assumed path
-that VIRA doesn't serve yet.
+redacted. Real mode sends the same payload to the VIRA engine (section 10).
 
 ---
 
@@ -712,3 +711,30 @@ curl -X POST http://127.0.0.1:2024/demo/reset   # back to the starting data (or 
 It needs `OPENAI_API_KEY` (or the key for `CHAT_MODEL`) and the catalog at `config/jeni_tasks.json`,
 as the runners do. Nothing reaches VIRA or a database. The presenter's script is
 [demo/SCRIPT.md](../demo/SCRIPT.md).
+
+---
+
+## 10. The real VIRA engine
+
+Jeni's task groups in `--mode real` go to the VIRA engine. Findings and what isn't working yet:
+[agent-frameworks.md §15](agent-frameworks.md#15-the-real-vira-engine-jenis-tasks-in---mode-real).
+
+### Modified files
+
+| File | Change |
+|---|---|
+| `recruiter_cli.py` | `TASK_GROUP_PATH` calls go to `VIRA_ACTUAL_LOCATION` (a full URL, or a path under `VIRA_BASE_URL`) with only `xrtoken: $VIRA_XRTOKEN`; the other endpoints keep `VIRA_BASE_URL` and `x-api-key`. `_real_mode_problem(path)` checks the setting the call needs and names it, never the host. |
+| `jeni_tools.py` | `PATH` is `recruiter_cli.TASK_GROUP_PATH`. Every group carries an `agent_session_uuid`, one per conversation (`session_uuid(thread_id)`; tools read the thread from their `RunnableConfig`). `project()` reports the engine's "received" reply as `queued`, and `RULES` says to report it as submitted. |
+| `.env.example`, `tests/conftest.py` | `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` (placeholders); the tests blank both. |
+| `tests/test_recruiter_cli.py`, `tests/test_jeni.py` | Task groups go to the engine with only the xrtoken, and the other endpoints keep their auth; a relative location is under `VIRA_BASE_URL`; a missing location or token, or plain http, sends nothing; each conversation is one session; a queued reply is reported as queued. |
+
+### Run it
+
+Set `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` in `.env` (the token decides whose rights the tasks
+run with), then:
+
+```bash
+python run_langgraph.py --mode real --tools jeni --task "Show me the details of job <id>"   # a read: answers "submitted"
+```
+
+On staging today the group stays queued: see §15 of the design doc.

@@ -275,6 +275,49 @@ def test_plain_http_only_to_loopback(session, monkeypatch, url, allowed):
     assert "vira.example.test" not in json.dumps(result)
 
 
+@pytest.fixture
+def engine(session, monkeypatch):
+    monkeypatch.setattr(recruiter_cli, "VIRA_ACTUAL_LOCATION", "https://engine.example.test/agent/task-group")
+    monkeypatch.setattr(recruiter_cli, "VIRA_XRTOKEN", "xr-test")
+    return session
+
+
+def task_group(**kwargs):
+    return recruiter_cli.execute("probe", recruiter_cli.TASK_GROUP_PATH, {}, {"tasks": [1]},
+                                 mode="real", **kwargs)
+
+
+def test_task_groups_go_to_the_engine_with_only_the_users_xrtoken(engine):
+    assert task_group()["status"] == "ok"
+    recruiter_cli.find_talents([123], mode="real")
+    (url, kwargs), = engine.made[0].posts
+    assert url == "https://engine.example.test/agent/task-group"
+    assert kwargs["headers"] == {"xrtoken": "xr-test", "Content-Type": "application/json"}
+    assert kwargs["allow_redirects"] is False and engine.made[0].trust_env is False
+    (url, kwargs), = engine.made[1].posts            # the other endpoints keep their own auth
+    assert url == "https://vira.example.test/v1/fast_retargeting"
+    assert "xrtoken" not in kwargs["headers"] and kwargs["headers"]["x-api-key"] == "k"
+
+
+def test_a_relative_engine_location_is_under_vira_base_url(engine, monkeypatch):
+    monkeypatch.setattr(recruiter_cli, "VIRA_ACTUAL_LOCATION", "/agent/task-group")
+    task_group()
+    (url, _), = engine.made[0].posts
+    assert url == "https://vira.example.test/v1/agent/task-group"
+
+
+@pytest.mark.parametrize("setting,value,named", [
+    ("VIRA_ACTUAL_LOCATION", "", "VIRA_ACTUAL_LOCATION"),
+    ("VIRA_ACTUAL_LOCATION", "http://engine.example.test/agent", "VIRA_ACTUAL_LOCATION must be https"),
+    ("VIRA_XRTOKEN", "", "VIRA_XRTOKEN"),
+])
+def test_the_engine_fails_closed_without_its_settings(engine, monkeypatch, setting, value, named):
+    monkeypatch.setattr(recruiter_cli, setting, value)
+    result = task_group()
+    assert result["status"] == "error" and named in result["result"]["message"]
+    assert engine.made == [] and "engine.example.test" not in json.dumps(result)
+
+
 def test_missing_credentials_fail_closed(session, monkeypatch):
     monkeypatch.setitem(recruiter_cli.HEADERS, "x-api-key", "")
     result = recruiter_cli.find_talents([123], mode="real")

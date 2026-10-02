@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Dict, Literal
 
@@ -40,9 +41,11 @@ import vira_tools
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CATALOG = HERE / "config" / "jeni_tasks.json"
-# ASSUMED endpoint: v1 creates and runs the group in-process (XagentTaskEngine), so the
-# HTTP path VIRA will expose for it isn't known yet.  Mock mode answers it (mock_jeni.py).
-PATH = "agent_task_group"
+# The task-group route: real mode sends it to the VIRA engine at VIRA_ACTUAL_LOCATION with the
+# user's VIRA_XRTOKEN (recruiter_cli._target); mock mode answers it (mock_jeni.py).
+PATH = vira.TASK_GROUP_PATH
+SESSION_NS = uuid.UUID("8d1f6a3e-2b47-4c55-9e0a-7a1d6c2f0b91")
+_PROCESS_SESSION = str(uuid.uuid4())
 PLACEHOLDER = re.compile(r"^\{\{.*\}\}$")
 
 # Field types, as tasks.js declares them for v1's response schema.
@@ -106,6 +109,8 @@ Jeni rules:
 - Sharing an application (a CV) is supported. Sharing a job is not.
 - If no tool does what the user asks, say it isn't supported instead of approximating it.
 - A task result can report status "ok" and still list items in failedArr: read it.
+- A task can come back "queued": VIRA accepted it and runs it in the background. Say it was
+  submitted, not that it is done, and don't use anything it would have returned in a later step.
 - get_applications returns a job's applications with their match scores and stages in one
   call: use it to compare or rank applicants, rather than reading them one by one.
 - Ask the user only for what no tool can give you, and don't ask them to confirm values they
@@ -215,7 +220,13 @@ def description(task: dict) -> str:
     return f"{text} (Changes data: in real mode a person approves each call.)"
 
 
-def payload(task: dict, args: dict) -> dict:
+def session_uuid(thread_id: str | None = None) -> str:
+    """The agent_session_uuid VIRA requires on every task group: one per conversation (thread),
+    as v1 has one per chat; without a thread, one for this process."""
+    return str(uuid.uuid5(SESSION_NS, thread_id)) if thread_id else _PROCESS_SESSION
+
+
+def payload(task: dict, args: dict, session: str | None = None) -> dict:
     """One task group holding just this task, in v1's format (handleGenerateViraPayload)."""
     name, sub = tool_name(task), task["sub_tasks"][0]
     values = {**args, **FIXED_VALUES.get(name, {})}
@@ -225,7 +236,7 @@ def payload(task: dict, args: dict) -> dict:
         if values.get(f["field_name"]) is not None:
             entry["field_value"] = values[f["field_name"]]
         fields.append(entry)
-    return {"agent_session_uuid": None, "task_group_name": f"Jeni v2 - {name}",
+    return {"agent_session_uuid": session or session_uuid(), "task_group_name": f"Jeni v2 - {name}",
             "tasks": [{"task_name": task["task_name"], "description": task["description"],
                        "level": task["level"],
                        "sub_tasks": [{"sub_task_name": sub["sub_task_name"],
@@ -240,6 +251,12 @@ def project(result: Dict) -> Dict:
     """
     if result.get("status") != "ok":
         return result
+    reply = result.get("result") or {}
+    if isinstance(reply, dict) and reply.get("agentTaskGroupUuid") and "tasks" not in reply:
+        # The VIRA engine queues the group and runs it later: nothing is known yet.
+        return {"status": "queued", "task_status": "queued", "failed_reason": None,
+                "result": {"message": "VIRA accepted the task and runs it in the background; "
+                                      "its outcome isn't known yet."}}
     try:
         sub = result["result"]["tasks"][0]["subTasks"][0]
     except (KeyError, IndexError, TypeError):
@@ -274,7 +291,7 @@ def _problems(exc: ValidationError) -> str:
                      for e in exc.errors()[:5])
 
 
-def run(name: str, args: dict) -> Dict:
+def run(name: str, args: dict, session: str | None = None) -> Dict:
     """Validate, send the one-task group through the guarded path, and project the reply."""
     if name not in catalog():
         return {"status": "error", "message": f"unknown task {name}"}
@@ -283,7 +300,8 @@ def run(name: str, args: dict) -> Dict:
     except ValidationError as exc:
         return {"status": "error", "message": f"invalid arguments: {_problems(exc)}"}
     try:
-        result = vira.execute(name.replace("_", "-"), PATH, {}, payload(catalog()[name], clean),
+        result = vira.execute(name.replace("_", "-"), PATH, {},
+                              payload(catalog()[name], clean, session),
                               mode=vira_tools.current_mode(), confirmed=False)
     except Exception as exc:        # e.g. VIRA unreachable; the message may name hosts
         return {"status": "error", "message": f"VIRA call failed ({type(exc).__name__})"}
@@ -292,11 +310,16 @@ def run(name: str, args: dict) -> Dict:
 
 def langchain_tools() -> list:
     """The tasks as LangChain StructuredTools (LangGraph, deepagents)."""
+    from langchain_core.runnables import RunnableConfig
     from langchain_core.tools import StructuredTool
 
     def tool(name: str):
+        def call(config: RunnableConfig, **kwargs):     # config is injected, not in the schema
+            thread = (config.get("configurable") or {}).get("thread_id")
+            return run(name, kwargs, session_uuid(thread))
+
         return StructuredTool.from_function(
-            func=lambda **kwargs: run(name, kwargs), name=name,
+            func=call, name=name,
             description=description(catalog()[name]), args_schema=models()[name])
 
     return [tool(name) for name in catalog()]

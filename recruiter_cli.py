@@ -68,6 +68,11 @@ HEADERS = {
     "x-user-id": os.environ.get("VIRA_USER_ID", ""),
     "Content-Type": "application/json",
 }
+# Jeni's task groups go to the VIRA engine instead: its own location (the full endpoint URL, or
+# a path under VIRA_BASE_URL), authenticated as one user by that user's xrtoken.
+TASK_GROUP_PATH = "agent_task_group"
+VIRA_ACTUAL_LOCATION = os.environ.get("VIRA_ACTUAL_LOCATION", "")
+VIRA_XRTOKEN = os.environ.get("VIRA_XRTOKEN", "")
 EVENTS_LOG = os.environ.get("EVENTS_LOG", "events.jsonl")
 # A private CA for VIRA, since the environment's REQUESTS_CA_BUNDLE is ignored (trust_env=False).
 VIRA_CA_BUNDLE = os.environ.get("VIRA_CA_BUNDLE") or None
@@ -205,12 +210,40 @@ def _is_loopback(host: str | None) -> bool:
         return False
 
 
-def _real_mode_problem() -> str | None:
-    """Why a real call must not be sent, or None.  Never names the host."""
-    parts = urlsplit(VIRA_BASE_URL)
+def _url_problem(url: str, setting: str) -> str | None:
+    parts = urlsplit(url)
     if not parts.hostname or not (parts.scheme == "https"
                                   or (parts.scheme == "http" and _is_loopback(parts.hostname))):
-        return "VIRA_BASE_URL must be https:// (plain http only to localhost)"
+        return f"{setting} must be https:// (plain http only to localhost)"
+    return None
+
+
+def _task_group_url() -> str:
+    location = VIRA_ACTUAL_LOCATION.strip()
+    if urlsplit(location).scheme:
+        return location
+    return f"{VIRA_BASE_URL.rstrip('/')}/{location.lstrip('/')}"
+
+
+def _target(path: str) -> tuple[str, Dict[str, str]]:
+    """(url, headers) of a real call: the engine for task groups, VIRA_BASE_URL otherwise."""
+    if path == TASK_GROUP_PATH:
+        return _task_group_url(), {"xrtoken": VIRA_XRTOKEN, "Content-Type": "application/json"}
+    return f"{VIRA_BASE_URL}/{path}", HEADERS
+
+
+def _real_mode_problem(path: str = "") -> str | None:
+    """Why a real call to `path` must not be sent, or None.  Never names the host."""
+    if path == TASK_GROUP_PATH:
+        if not VIRA_ACTUAL_LOCATION.strip():
+            return "VIRA engine not configured: VIRA_ACTUAL_LOCATION"
+        problem = _url_problem(_task_group_url(), "VIRA_ACTUAL_LOCATION")
+        if problem:
+            return problem
+        return None if VIRA_XRTOKEN else "VIRA credentials not configured: VIRA_XRTOKEN"
+    problem = _url_problem(VIRA_BASE_URL, "VIRA_BASE_URL")
+    if problem:
+        return problem
     missing = [name for name, header in (("VIRA_API_KEY", "x-api-key"),
                                          ("VIRA_CLIENT_NAME", "x-client-name"),
                                          ("VIRA_USER_ID", "x-user-id")) if not HEADERS[header]]
@@ -228,18 +261,19 @@ def _call(path: str, query: Dict[str, Any], body: Dict[str, Any], mode: str) -> 
         from mock_vira import MockVira
         return MockVira.call(path, query, body)
     # real mode
-    problem = _real_mode_problem()
+    problem = _real_mode_problem(path)
     if problem:
         return _error(problem)
     import requests  # imported lazily so mock mode needs no dependency
+    url, headers = _target(path)
     # decrypt_pii(body) would go here in your deployment (vault -> real values)
     with requests.Session() as session:
         # No proxies, .netrc or CA bundle from the environment (or from .env via it).
         session.trust_env = False
         session.verify = VIRA_CA_BUNDLE or True
         # No redirects: requests strips only `Authorization` on a cross-host redirect, so
-        # x-api-key / x-user-id (and, on 307/308, the body) would follow one anywhere.
-        resp = session.post(f"{VIRA_BASE_URL}/{path}", headers=HEADERS, params=query,
+        # x-api-key / x-user-id / xrtoken (and, on 307/308, the body) would follow one anywhere.
+        resp = session.post(url, headers=headers, params=query,
                             json=body, timeout=30, allow_redirects=False)
     if 300 <= resp.status_code < 400:
         return _error("VIRA answered with a redirect, which is not followed", resp.status_code)

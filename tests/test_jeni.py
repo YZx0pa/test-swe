@@ -178,6 +178,29 @@ def test_a_call_sends_one_task_group_in_v1s_format(audit_log, monkeypatch):
         {"field_name": "job_id", "mandatory": True, "field_value": 7001},
         {"field_name": "user_ids", "mandatory": True, "field_value": [802]},
         {"field_name": "role_id", "mandatory": True, "field_value": 5}]
+    assert entry["body"]["agent_session_uuid"] == jeni_tools.session_uuid()     # VIRA requires one
+
+
+def test_each_conversation_is_one_vira_session(audit_log):
+    def agent():
+        return run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
+            calls(call("get_single_job_details", {"job_id": 7001}, "c1")), say("Done.")))
+    for thread in ("t1", "t1", "t2"):
+        agent_kit.run_task(agent(), "Show job 7001.", thread_id=thread)
+    sessions = [a["body"]["agent_session_uuid"] for a in read_audit(audit_log)]
+    assert sessions[0] == sessions[1] == jeni_tools.session_uuid("t1") != sessions[2]
+    assert sessions[2] == jeni_tools.session_uuid("t2") and len(set(sessions)) == 2
+
+
+def test_a_queued_task_is_reported_as_queued_not_done():
+    received = {"status": "ok", "http_status": 200, "result": {
+        "agentTaskGroupUuid": "6f1c2a52-0000-4000-8000-000000000001",
+        "message": "Your tasks have been received. We are processing your tasks."}}
+    assert jeni_tools.project(received) == {
+        "status": "queued", "task_status": "queued", "failed_reason": None,
+        "result": {"message": "VIRA accepted the task and runs it in the background; "
+                              "its outcome isn't known yet."}}
+    assert "queued" in jeni_tools.RULES
 
 
 def test_the_mock_answers_every_task_in_the_real_reply_shape():

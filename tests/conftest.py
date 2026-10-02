@@ -14,7 +14,7 @@ os.environ["MSWEA_SILENT_STARTUP"] = "1"                # mini_env imports minis
 os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = tempfile.mkdtemp(prefix="mswea-")   # not ~/.config
 os.environ["JENI_MODE"] = "mock"
 os.environ["VIRA_BASE_URL"] = "http://127.0.0.1:9/v1"    # dead port: real mode can't reach VIRA
-for _key in ("VIRA_API_KEY", "VIRA_CLIENT_NAME", "VIRA_USER_ID"):
+for _key in ("VIRA_API_KEY", "VIRA_CLIENT_NAME", "VIRA_USER_ID", "VIRA_ACTUAL_LOCATION", "VIRA_XRTOKEN"):
     os.environ[_key] = ""
 os.environ["EVENTS_LOG"] = os.devnull                   # the fixture below points it at tmp_path
 os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
