@@ -144,8 +144,12 @@ def _poll_api(group_uuid: str, timeout: float, session_factory: Callable | None 
                     body = None
                 if isinstance(body, dict) and isinstance(body.get("tasks"), list):
                     group = {"status": "ok", "http_status": 200, "result": body}
+            if time.monotonic() >= deadline-2:
+                session.post(result_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
+                               timeout=20, allow_redirects=False)                  ### For demo only ###
+    
             if finished(group) or time.monotonic() >= deadline:
-                return group
+                return group            
             time.sleep(POLL_SECONDS)
 
 
