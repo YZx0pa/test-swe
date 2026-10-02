@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 317 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 318 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -448,7 +448,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 317 tests
+.venv/bin/python -m pytest -q                                   # offline, 318 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default

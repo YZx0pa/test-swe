@@ -568,6 +568,19 @@ def judge(audit_log, key, *steps):
     return jeni_eval.TASKS[key][1](Judged(read_audit(audit_log)))[0]
 
 
+def test_unattended_runs_approve_on_mock_vira_so_the_shortlist_check_can_pass(audit_log, monkeypatch):
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
+        calls(call("get_applications", {"job_id": 7001}, "c1")),
+        calls(call("shortlist_multiple_application", {"app_ids": [5102, 5103]}, "c2")),
+        say("Shortlisted 5102 and 5103.")))
+    assert "shortlist_multiple_application" in agent_kit.interrupt_on(False, "mock", agent_kit.toolset("jeni"))
+    agent_kit.run_task(agent, jeni_eval.TASKS["shortlist_top2"][0], decide=agent_kit.unattended)
+    assert jeni_eval.check_shortlist(Judged(read_audit(audit_log)))[0]
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    assert agent_kit.unattended({"action_requests": [{}, {}]}) == [
+        {"type": "reject", "message": "Nobody is here to approve this."}] * 2
+
+
 def test_every_check_has_a_task_and_a_note():
     assert set(jeni_eval.TASKS) == {"job_details", "create_then_skill", "assign_team_member",
                                     "shortlist_top2", "add_candidate", "share_no_email",

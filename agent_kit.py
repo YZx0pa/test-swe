@@ -450,6 +450,16 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     return {name: {**DECISIONS, "when": _ask_unless_overruled} for name in sorted(names)}
 
 
+def unattended(request: dict) -> list[dict]:
+    """Decisions when nobody is at the card (compare_agents): approve on mock VIRA, where nothing
+    real changes, so a task that needs a card (a shortlist always does) can finish; reject in any
+    other mode."""
+    if vira_tools.current_mode() == "mock":
+        return [{"type": "approve"} for _ in request["action_requests"]]
+    return [{"type": "reject", "message": "Nobody is here to approve this."}
+            for _ in request["action_requests"]]
+
+
 # --- running a task ----------------------------------------------------------
 def write_private(path, text: str) -> None:
     """A trace or report: owner-only (0600), with emails and phone numbers scrubbed.

@@ -47,6 +47,7 @@ def _fix_environment() -> None:
         "JENI_MODE": "mock",
         "VIRA_BASE_URL": "http://127.0.0.1:9/v1",
         "VIRA_API_KEY": "", "VIRA_CLIENT_NAME": "", "VIRA_USER_ID": "",
+        "VIRA_ACTUAL_LOCATION": "", "VIRA_XRTOKEN": "",
         "EVENTS_LOG": os.devnull,               # each run points it at its own file
         "MSWEA_SILENT_STARTUP": "1",
         "LANGSMITH_TRACING_V2": "false", "LANGSMITH_TRACING": "false",
@@ -230,8 +231,7 @@ def run_langchain(name: str, build, task: str, audit_path: Path,
     counter = agent_kit.UsageCounter()
     t0 = time.monotonic()
     try:
-        result = agent_kit.run_task(build(), task, callbacks=[counter],
-                                    decide=lambda req: [{"type": "reject"}] * len(req["action_requests"]))
+        result = agent_kit.run_task(build(), task, callbacks=[counter], decide=agent_kit.unattended)
         run.final = agent_kit.final_text(result)
         run.steps = grounding.trace_from_messages(result["messages"], task, tools)
         run.trajectory = [f"{tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"
