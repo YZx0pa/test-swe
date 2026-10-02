@@ -51,7 +51,7 @@ servers. Logs are in `demo/.run/`.
 ## Rehearse
 
 ```bash
-.venv/bin/python -m demo.rehearse                 # the whole script once: about 2½ minutes, about $0.05
+.venv/bin/python -m demo.rehearse                 # the whole script once: about 2 minutes, about $0.05
 .venv/bin/python -m demo.rehearse --repeat 3      # how reliably each act lands
 .venv/bin/python -m demo.rehearse --act shortlist
 ```
@@ -66,7 +66,7 @@ vary a little from run to run.
 | File | What it is |
 |---|---|
 | `../langgraph.json` | The server's config: graph `jeni`, the panel's routes, `.env`. |
-| `jeni_graph.py` | The demo agent: mock mode, the mock remembers changes, every write pauses for approval, replies written for a chat window. |
+| `jeni_graph.py` | The demo agent: mock mode, the mock remembers changes, replies written for a chat window. Routine writes run straight away and the high-stakes ones (shortlist, reject, share, transfer ownership) wait for a card; `GATE_WRITES = True` puts every write behind one, as on real VIRA. |
 | `app.py`, `panel.html` | The data panel and its routes, and `/demo/prompts` for the chat's starter cards. |
 | `script.py` | The acts: prompts, what to do at each card, and what the data must show afterwards. |
 | `SCRIPT.md` | The presenter's copy: what to type, what to click, what to point out. A test keeps its prompts identical to `script.py`. |

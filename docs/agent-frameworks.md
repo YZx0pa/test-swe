@@ -721,7 +721,7 @@ browser ─ chat UI ───────────── langgraph dev (127.0
 | File | Role |
 |---|---|
 | `langgraph.json` | Graph `jeni` from `demo/jeni_graph.py:make_graph`, the panel's routes from `demo/app.py:app`, env from `.env` (the model key; nothing reaches VIRA). |
-| `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=True, own_checkpointer=False)`. `make_graph()` is the async factory: it builds once, on a worker thread. |
+| `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=GATE_WRITES, own_checkpointer=False)`, with `GATE_WRITES = False`. `make_graph()` is the async factory: it builds once, on a worker thread. |
 | `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. `/demo/prompts` gives the chat its starter cards. |
 | `demo/script.py`, `demo/SCRIPT.md` | The script: eight acts, each with its prompts, what to do at each approval card, and a check over the data. `SCRIPT.md` is the presenter's copy, with talking points and recovery; a test keeps its prompts identical. |
 | `demo/rehearse.py` | Plays the script against the running server through `langgraph_sdk`, the API the chat uses, and checks the data after each act. |
@@ -733,9 +733,12 @@ What differs from `run_langgraph.py`, and why:
   from the mock's own data, so their ids agree with the tasks (§13). `remember_changes()` makes
   "make it public", then "publish it" work, and puts a created job where `find_job_by_title`
   finds it (§12).
-- **Every write pauses, reads don't**, as in real mode: `build_agent(gate_writes=True)` passes
-  `mode="real"` to `interrupt_on()`. The audience sees 16 of the 22 tasks as approval cards and
-  the lookups run straight through.
+- **Routine writes run straight away; high-stakes ones ask.** With `GATE_WRITES = False` the demo
+  gets mock mode's rule: only the `ALWAYS_CONFIRM` tools (shortlist, reject, share an
+  application, transfer ownership) pause, as they do in every mode, and reads and lookups never
+  do. The script needs nothing more: its two cards with a decision (a rejected transfer, an
+  edited shortlist) are both `ALWAYS_CONFIRM`. `GATE_WRITES = True` makes `build_agent(gate_writes=True)`
+  pass `mode="real"` to `interrupt_on()`, so all 16 writes pause, as on real VIRA.
 - **No checkpointer of its own.** `langgraph dev` refuses a graph that brings one ("persistence is
   handled automatically by the platform") and keeps threads itself, in memory, flushed to
   `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
@@ -790,7 +793,7 @@ and resets the data at the end.
 | Act | Shows | Check |
 |---|---|---|
 | lookup | the job found by name; the write waits for a card | 7001 gains Kubernetes and Terraform, one write |
-| reject | a person says no | the close card appeared and was rejected; nothing reached VIRA |
+| reject | high-stakes changes wait for a person, who can say no | the transfer card appeared and was rejected; nothing reached VIRA |
 | chain | a result used in the next step | `add_job_skills` on the id `create_job` returned |
 | shortlist | the pick from match scores; the reviewer's edit is what runs | 5102 shortlisted, 5103 not, one write |
 | ask | only what can't be looked up is asked | Bob (802) joins 7001 as a team member |
@@ -799,8 +802,11 @@ and resets the data at the end.
 | unsupported | no approximation | nothing changed |
 
 `python -m demo.rehearse --repeat 3` on 2026-10-01 with gpt-5-mini, after everything below was
-fixed: **24/24**. Medians per act: 1–6 model calls, 5–27k tokens, 8–30 s including the
-approvals; per pass about 135k tokens, about 2½ minutes and about $0.05 (litellm's price table).
+fixed, with every write gated: **24/24**. Medians per act: 1–6 model calls, 5–27k tokens, 8–30
+s including the approvals; per pass about 135k tokens, about 2½ minutes and about $0.05
+(litellm's price table). Again on 2026-10-02 with `GATE_WRITES = False` (three cards a pass:
+the transfer, the shortlist, the share): **24/24**, medians of 1–5 model calls, 5–23k tokens and
+8–22 s per act; per pass about 145k tokens, about 2 minutes and about $0.05.
 
 What the rehearsals found, and what changed:
 - **The agent went around the reviewer.** Told to shortlist the top two and edited down to one,

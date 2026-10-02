@@ -674,7 +674,7 @@ and every write gated, plus a live data panel. Design and security notes are in
 | File | What it is |
 |---|---|
 | `langgraph.json` | The server's config: graph `jeni` (`demo/jeni_graph.py:make_graph`), the panel's routes (`demo/app.py:app`), `.env`, Python 3.11. |
-| `demo/jeni_graph.py` | `build()`: mock mode, tracing off, the mock's kept State, `jeni_db` on its fixtures, writes gated, no checkpointer, and a closing rule for a chat window instead of `SUMMARY: a \| b \| c`. `make_graph()`: the async factory, building once on a worker thread. |
+| `demo/jeni_graph.py` | `build()`: mock mode, tracing off, the mock's kept State, `jeni_db` on its fixtures, `GATE_WRITES = False` (only `ALWAYS_CONFIRM` tools ask; `True` gates every write), no checkpointer, and a closing rule for a chat window instead of `SUMMARY: a \| b \| c`. `make_graph()`: the async factory, building once on a worker thread. |
 | `demo/app.py`, `demo/panel.html` | `GET /demo` (the panel), `GET /demo/state`, `POST /demo/reset`. The panel shows jobs, teams and applicants, and every sub-task that reached the mock; it polls every second and highlights changes. |
 | `requirements-demo.txt`, `requirements-demo.lock.txt` | `langgraph-cli[inmem]==0.4.32` on top of `requirements.txt`; the hashed lock keeps every pin of `requirements.lock.txt` (147 packages). |
 | `demo/script.py`, `demo/SCRIPT.md` | The demo's eight acts: prompts, the decision at each approval card, and a check over the data; `SCRIPT.md` is the presenter's copy (what to type, click and point out, questions, recovery). |
@@ -704,8 +704,8 @@ Then:
 
 ```bash
 demo/run.sh                                  # chat on http://localhost:3000, data panel beside it (and on :2024/demo)
-.venv/bin/python -m demo.rehearse            # the script once against it: about 2½ minutes, about $0.05
-.venv/bin/python -m demo.rehearse --repeat 3 # 24/24 on 2026-10-01 with gpt-5-mini
+.venv/bin/python -m demo.rehearse            # the script once against it: about 2 minutes, about $0.05
+.venv/bin/python -m demo.rehearse --repeat 3 # 24/24 on 2026-10-02 with gpt-5-mini
 curl -X POST http://127.0.0.1:2024/demo/reset   # back to the starting data (or "Reset data" in the panel)
 ```
 

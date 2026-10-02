@@ -53,7 +53,7 @@ def _lookup(jobs, activity):
 
 
 def _reject(jobs, activity):
-    return jobs[7003]["status"] == "open" and writes(activity, completed=False) == []
+    return jobs[7003]["owner"] is None and writes(activity, completed=False) == []
 
 
 def _chain(jobs, activity):
@@ -95,15 +95,15 @@ def _unsupported(jobs, activity):
 
 
 ACTS = (
-    Act("lookup", "Finds the job by name, and asks before it changes anything",
+    Act("lookup", "Finds the job by name and makes a routine change",
         (Turn("Add Kubernetes and Terraform to the backend engineer job."),),
         _lookup, "job 7001 gains Kubernetes and Terraform; one write"),
-    Act("reject", "A person can say no",
-        (Turn("Close the Product Designer job, we've filled it."),),
-        _reject, "the close is rejected at the card: nothing reaches VIRA, job 7003 stays open",
-        decide={"make_job_closed": {"type": "reject",
-                                    "message": "Not yet: the hiring manager is still interviewing."}},
-        cards=("make_job_closed",)),
+    Act("reject", "High-stakes changes wait for a person, who can say no",
+        (Turn("Transfer ownership of the Product Designer job to alice.johnson@example.com."),),
+        _reject, "the transfer is rejected at its card: nothing reaches VIRA, job 7003 keeps its owner",
+        decide={"transfer_job_ownership": {"type": "reject",
+                                           "message": "Not yet: Alice starts next month."}},
+        cards=("transfer_job_ownership",)),
     Act("chain", "Uses what one step returns in the next",
         (Turn("Create a Data Engineer job in Singapore needing Python and SQL, with 3 to 5 years "
               "of experience, then add Spark to it."),),

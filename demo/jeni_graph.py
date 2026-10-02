@@ -5,10 +5,12 @@
 
 Mock VIRA and the mock database only.  The mock remembers changes
 (mock_jeni.remember_changes), so a change shows when it is read back and in the data panel
-(demo/app.py).  Every write pauses for approval as in real mode, so the audience sees each
-one approved, edited or rejected.  The server keeps the threads, so the graph has no
-checkpointer of its own.  The mode is fixed to mock before any tool exists, so nothing here
-reaches VIRA or a real database.
+(demo/app.py).  Routine writes run as soon as the agent calls them; the high-stakes ones in
+agent_kit.ALWAYS_CONFIRM (shortlist, reject, share, transfer ownership) wait for an approval
+card, as they do in every mode.  GATE_WRITES = True puts every write behind a card, as real
+mode does.  The server keeps the threads, so the graph has no checkpointer of its own.  The
+mode is fixed to mock before any tool exists, so nothing here reaches VIRA or a real
+database.
 """
 import asyncio
 import dataclasses
@@ -20,6 +22,8 @@ import vira_tools
 from db_queries import fake_db_queries
 
 COMPANY_ID = 5143        # the demo's tenant, bound into the db tools; never from the model
+# False: only ALWAYS_CONFIRM tools ask.  True: every write asks, as in real mode.
+GATE_WRITES = False
 
 # A chat window shows the reply as written; the SUMMARY: a | b | c format is for grading.
 SUMMARY_RULE = """\
@@ -46,13 +50,13 @@ def demo_toolset(state: mock_jeni.State) -> agent_kit.Toolset:
     return dataclasses.replace(toolset, prompt=toolset.prompt.replace(SUMMARY_RULE, CHAT_RULE))
 
 
-def build(model=None):
-    """The demo agent: mock mode, changes kept, writes gated, no checkpointer.  `model` is
-    for tests; by default it is $CHAT_MODEL, as in the runners."""
+def build(model=None, gate_writes: bool = GATE_WRITES):
+    """The demo agent: mock mode, changes kept, no checkpointer; every write gated only with
+    gate_writes.  `model` is for tests; by default it is $CHAT_MODEL, as in the runners."""
     agent_kit.set_tracing(False)
     vira_tools.configure("mock")
     return run_langgraph.build_agent(model=model, toolset=demo_toolset(mock_jeni.remember_changes()),
-                                     gate_writes=True, own_checkpointer=False)
+                                     gate_writes=gate_writes, own_checkpointer=False)
 
 
 _graph = None

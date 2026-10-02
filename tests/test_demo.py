@@ -31,9 +31,10 @@ def stateless_after():
     vira_tools.configure("mock")
 
 
-def demo_agent(*replies):
+def demo_agent(*replies, gate_writes=jeni_graph.GATE_WRITES):
     """The demo graph with a checkpointer of its own: the server supplies one in the demo."""
-    return jeni_graph.build(model=scripted(*replies)).copy(update={"checkpointer": InMemorySaver()})
+    return jeni_graph.build(model=scripted(*replies), gate_writes=gate_writes).copy(
+        update={"checkpointer": InMemorySaver()})
 
 
 def test_langgraph_json_serves_the_demo_graph_and_panel():
@@ -63,38 +64,59 @@ def test_the_demo_prompt_changes_only_the_closing_rule():
         agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES)
 
 
-def test_writes_pause_reads_do_not_and_changes_show_on_the_panel(audit_log):
+def cards_approved(asked):
+    """A decide() that approves every card, recording which tools asked."""
+    def approve(request):
+        asked.extend(a["name"] for a in request["action_requests"])
+        return [{"type": "approve"} for _ in request["action_requests"]]
+    return approve
+
+
+def test_routine_writes_run_high_stakes_ones_ask_and_changes_show_on_the_panel(audit_log):
     agent = demo_agent(
         calls(call("find_job_by_title", {"title": "backend engineer"}, "c1")),
         calls(call("get_single_job_details", {"job_id": 7001}, "c2")),
         calls(call("make_job_public", {"job_id": 7001}, "c3")),
         calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c4")),
-        say("It's public and on LinkedIn."))
+        calls(call("shortlist_multiple_application", {"app_ids": [5102]}, "c5")),
+        say("It's public, on LinkedIn, and 5102 is shortlisted."))
     asked = []
-
-    def approve(request):
-        asked.extend(a["name"] for a in request["action_requests"])
-        return [{"type": "approve"} for _ in request["action_requests"]]
-
-    asyncio.run(agent_kit.arun_task(agent, "Make the backend engineer job public and publish it "
-                                           "to LinkedIn.", decide=approve))
-    assert asked == ["make_job_public", "publish_job_to_linkedin"]
+    asyncio.run(agent_kit.arun_task(agent, "Make the backend engineer job public, publish it to "
+                                           "LinkedIn and shortlist application 5102.",
+                                    decide=cards_approved(asked)))
+    assert asked == ["shortlist_multiple_application"]          # ALWAYS_CONFIRM only
     snap = TestClient(demo_app.app).get("/demo/state").json()
     [job] = [j for j in snap["jobs"] if j["jobId"] == 7001]
     assert job["isPrivate"] is False and job["linkedIn"] is True
+    assert {a["appId"]: a["stage"] for a in job["applications"]}[5102] == "shortlisted"
     assert [(e["task"], e["kind"], e["status"]) for e in snap["activity"]] == [
         ("get_single_job_details", "read", "completed"),
         ("make_job_public", "write", "completed"),
-        ("publish_job_to_linkedin", "write", "completed")]
+        ("publish_job_to_linkedin", "write", "completed"),
+        ("shortlist_multiple_application", "write", "completed")]
 
 
-def test_a_rejected_write_never_reaches_the_mock(audit_log):
-    agent = demo_agent(calls(call("make_job_closed", {"job_id": 7003}, "c1")),
-                       say("Okay, I left it open."))
-    asyncio.run(agent_kit.arun_task(agent, "Close job 7003.", decide=lambda r: [
-        {"type": "reject", "message": "Not yet."} for _ in r["action_requests"]]))
+def test_with_gate_writes_every_write_asks(audit_log):
+    agent = demo_agent(calls(call("make_job_public", {"job_id": 7001}, "c1")), say("Done."),
+                       gate_writes=True)
+    asked = []
+    asyncio.run(agent_kit.arun_task(agent, "Make job 7001 public.", decide=cards_approved(asked)))
+    assert asked == ["make_job_public"] and jeni_graph.GATE_WRITES is False
+
+
+def test_a_rejected_transfer_never_reaches_the_mock(audit_log):
+    agent = demo_agent(calls(call("transfer_job_ownership",
+                                  {"job_id": 7003, "new_owner_user_email": "alice.johnson@example.com"},
+                                  "c1")),
+                       say("Okay, the ownership stays as it is."))
+    cards = []
+    asyncio.run(agent_kit.arun_task(
+        agent, "Transfer ownership of job 7003 to alice.johnson@example.com.",
+        decide=lambda r: cards.append(r) or [{"type": "reject", "message": "Not yet."}
+                                             for _ in r["action_requests"]]))
     snap = TestClient(demo_app.app).get("/demo/state").json()
-    assert snap["activity"] == [] and {j["jobId"]: j["status"] for j in snap["jobs"]}[7003] == "open"
+    assert len(cards) == 1 and snap["activity"] == []
+    assert {j["jobId"]: j["owner"] for j in snap["jobs"]}[7003] is None
 
 
 def test_the_panel_shows_resets_and_never_writes_html_from_data():
@@ -186,7 +208,7 @@ def test_every_check_fails_on_the_starting_data_unless_its_cards_are_named():
     jobs = {j["jobId"]: j for j in snap["jobs"]}
     for a in script.ACTS:
         assert a.check(jobs, []) is (a.key in {"reject", "unsupported"}), a.key
-    assert act("reject").cards == ("make_job_closed",)
+    assert act("reject").cards == ("transfer_job_ownership",)
 
 
 def test_an_edited_shortlist_passes_when_the_edit_is_what_ran(audit_log):
@@ -216,7 +238,7 @@ def test_going_around_the_reviewer_gets_no_card_and_is_refused(audit_log):
 
 def test_a_reject_act_fails_if_the_card_never_appeared(audit_log):
     result, lines = rehearsed(InProcess(say("Which job do you mean?")), "reject")
-    assert not result["ok"] and "  no approval card for make_job_closed" in lines
+    assert not result["ok"] and "  no approval card for transfer_job_ownership" in lines
 
 
 @pytest.mark.parametrize("asks_first", [True, False])
