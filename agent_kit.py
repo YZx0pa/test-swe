@@ -415,6 +415,12 @@ def overruled(messages) -> set[str]:
 def _ask_unless_overruled(request) -> bool:
     return request.tool_call["name"] not in overruled(request.state.get("messages", []))
 
+
+def _describe(tool_call, state, runtime) -> str:
+    """An approval card's text: what the call would do, in plain words (jeni_tools.summary),
+    instead of the middleware's "Tool: … Args: {…}"."""
+    return jeni_tools.summary(tool_call["name"], tool_call.get("args") or {})
+
 # Tools that ALWAYS pause for a human, in any mode and even without --approve-all, because
 # acting on the wrong ones is costly/irreversible (bulk actions on candidates, ownership, etc.).
 # Only names that exist in the active toolset are gated, so this is safe for vira/jeni/jeni_db.
@@ -447,7 +453,8 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     else:
         names = set()
     names |= (ALWAYS_CONFIRM & toolset.names)      # always-confirm, whatever the mode
-    return {name: {**DECISIONS, "when": _ask_unless_overruled} for name in sorted(names)}
+    return {name: {**DECISIONS, "when": _ask_unless_overruled, "description": _describe}
+            for name in sorted(names)}
 
 
 def unattended(request: dict) -> list[dict]:

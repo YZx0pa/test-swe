@@ -568,6 +568,34 @@ def judge(audit_log, key, *steps):
     return jeni_eval.TASKS[key][1](Judged(read_audit(audit_log)))[0]
 
 
+def test_an_approval_card_says_what_the_call_would_do_in_plain_words(audit_log):
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
+        calls(call("shortlist_multiple_application", {"app_ids": [5102, 5103]}, "c1"),
+              call("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]}, "c2")),
+        say("Done.")))
+    cards = []
+    agent_kit.run_task(agent, "Shortlist 5102 and 5103, and add Kafka to job 7001.",
+                       decide=lambda r: cards.extend(a["description"] for a in r["action_requests"])
+                       or [{"type": "approve"}] * len(r["action_requests"]))
+    assert cards == ["Shortlist applications 5102 and 5103.", "Add Kafka to job 7001."]
+
+
+def test_every_write_has_a_plain_summary_and_other_tools_a_fallback():
+    for name, args in VALID.items():
+        text = jeni_tools.summary(name, args)
+        assert text.endswith(".") and not any(c in text for c in "{}[]"), (name, text)
+        assert "_" not in text.replace("@", ""), (name, text)       # no field names
+    assert jeni_tools.summary("share_application", VALID["share_application"]) == (
+        "Share application 5102 with hm@example.com, with the note “Please review”.")
+    assert jeni_tools.summary("add_job_collaborators", VALID["add_job_collaborators"]) == (
+        "Add user 802 to the hiring team of job 7001 as a team member.")
+    assert jeni_tools.summary("score_candidates", {"app_ids": [11, 12], "match_ids": None}) == (
+        "Score candidates: app ids 11 and 12.")
+    assert jeni_tools.summary("add_job_skills", {"job_id": 7001, "skills": 5}) == "Add 5 to job 7001."
+    assert len(jeni_tools.summary("share_application", {"app_ids": [1], "emails": ["a@b.co"],
+                                                        "message": "x" * 2000})) < 200
+
+
 def test_unattended_runs_approve_on_mock_vira_so_the_shortlist_check_can_pass(audit_log, monkeypatch):
     agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
         calls(call("get_applications", {"job_id": 7001}, "c1")),

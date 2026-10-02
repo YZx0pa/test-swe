@@ -122,6 +122,93 @@ Jeni rules:
 """
 
 
+ROLE_NAMES = {1: "an administrator", 5: "a team member"}
+EDIT_WORDS = {"job_title": "the title", "skills": "the skills", "job_description": "the description",
+              "job_requirements": "the requirements", "country_name": "the country",
+              "region": "the region", "min_exp": "the experience", "max_exp": "the experience",
+              "min_salary": "the salary", "max_salary": "the salary", "vacancy": "the openings"}
+
+
+def _words(values) -> str:
+    items = [str(v) for v in (values if isinstance(values, list) else [values]) if v not in (None, "")]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
+
+
+def _numbered(word: str, ids) -> str:
+    ids = ids if isinstance(ids, list) else [ids]
+    return f"{word}{'' if len(ids) == 1 else 's'} {_words(ids)}"
+
+
+def _short(text, limit: int = 120) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _new_job(a: dict) -> str:
+    parts = [f"Create the job “{_short(a.get('job_title'), 80)}”"]
+    if a.get("skills"):
+        parts.append(f"needing {_words(a['skills'])}")
+    lo, hi = a.get("min_exp"), a.get("max_exp")
+    if lo is not None or hi is not None:
+        parts.append(f"with {lo}–{hi} years of experience" if lo is not None and hi is not None
+                     else f"with at least {lo} years of experience" if lo is not None
+                     else f"with up to {hi} years of experience")
+    if a.get("country_name"):
+        parts.append(f"in {a['country_name']}")
+    return " ".join(parts) + "."
+
+
+def _edit(a: dict) -> str:
+    changed = sorted({EDIT_WORDS.get(k, k.replace("_", " ")) for k, v in a.items()
+                      if k != "job_id" and v not in (None, "", [])})
+    return f"Change {_words(changed) or 'nothing'} of job {a.get('job_id')}."
+
+
+def _share(a: dict) -> str:
+    text = f"Share {_numbered('application', a.get('app_ids') or [])} with {_words(a.get('emails') or [])}"
+    return text + (f", with the note “{_short(a['message'])}”." if a.get("message") else ".")
+
+
+# What each task would do, as an approval card says it: plain words, no field names or JSON.
+SUMMARIES = {
+    "create_job": _new_job,
+    "edit_job": _edit,
+    "add_job_skills": lambda a: f"Add {_words(a.get('skills'))} to job {a.get('job_id')}.",
+    "remove_job_skills": lambda a: f"Remove {_words(a.get('skills'))} from job {a.get('job_id')}.",
+    "clone_job": lambda a: f"Make a copy of job {a.get('job_id')}.",
+    "transfer_job_ownership": lambda a: (f"Transfer ownership of job {a.get('job_id')} to "
+                                         f"{a.get('new_owner_user_email')}."),
+    "add_job_collaborators": lambda a: (f"Add {_numbered('user', a.get('user_ids') or [])} to the hiring "
+                                        f"team of job {a.get('job_id')} as "
+                                        f"{ROLE_NAMES.get(a.get('role_id'), 'an unknown role')}."),
+    "publish_job_to_linkedin": lambda a: f"Publish job {a.get('job_id')} to LinkedIn.",
+    "make_job_private": lambda a: f"Make job {a.get('job_id')} private.",
+    "make_job_public": lambda a: f"Make job {a.get('job_id')} public.",
+    "make_job_closed": lambda a: (f"Close job {a.get('job_id')}"
+                                  + (f" (“{_short(a['reason_for_closure'])}”)." if a.get("reason_for_closure") else ".")),
+    "make_job_open": lambda a: f"Reopen job {a.get('job_id')}.",
+    "reject_multiple_application": lambda a: f"Reject {_numbered('application', a.get('app_ids') or [])}.",
+    "shortlist_multiple_application": lambda a: f"Shortlist {_numbered('application', a.get('app_ids') or [])}.",
+    "share_application": _share,
+    "create_application_to_job": lambda a: (f"Add {a.get('candidate_name')} ({a.get('candidate_email')}) "
+                                            f"as a candidate for job {a.get('job_id')}."),
+}
+
+
+def summary(name: str, args: dict) -> str:
+    """One plain sentence for an approval card: what the call would do.  Any other tool gets its
+    name and its values in words, never as JSON."""
+    try:
+        if name in SUMMARIES:
+            return SUMMARIES[name](args or {})
+    except Exception:          # an odd value must not break the card; fall back to the words
+        pass
+    values = "; ".join(f"{k.replace('_', ' ')} {_short(_words(v), 60)}"
+                       for k, v in (args or {}).items() if v not in (None, "", []))
+    title = name.replace("_", " ").capitalize()
+    return f"{title}: {values}." if values else f"{title}."
+
+
 def catalog_from_js(text: str) -> Dict:
     """v1's tasks.js -> {"tasks": [...]}: the object literal, without comments or trailing commas."""
     start = text.index("{", text.index("XAGENT_SUBTASK_API_CONFIG_SCHEMA ="))
