@@ -908,26 +908,32 @@ What the engine runs, from its tables on staging (`hris.agenttaskgroup`, `agentt
 So the expected behaviour holds, with one nuance: a failed task shows only in its sub-tasks, and
 the task itself reads `completed`.
 
-Why nothing executes (checked 2026-10-02):
-- **The endpoint only creates the group.** In v1 the chat controller runs a group itself, in the
-  same request (`BhishmaStreamController` → `XagentTaskEngine.handleCreateTaskGroup`, then
-  `handleProcesViraTasksAsync`: `getQueuedSubTasks`, `handleSubTask` for each sub-task in order,
-  `handleGetTaskGroupInfo` for the result). The engine's reply to us, "We are processing your
-  tasks. You can see task status on the task panel", is the progress text v1 shows before that
-  loop. Nothing runs the loop for groups created through the endpoint.
-- **No worker or Celery.** The engine is v1's Node backend; the staging database has no
-  Celery or kombu tables, and 119 groups (back to 2025-01-25, our three probes included) sit
-  `queued` forever, most created by the same user as our token, who also has 659 completed ones.
-  Having a session or a chat history doesn't decide it (116 of the 119 have a chat history).
-- **Not the tunnel or the database.** The tunnel connects in 0.1 s, and the engine wrote our probe
-  groups to the same database. No group was created between 2026-09-24 and 2026-10-02 at all,
-  which is why the last completed one is from 2026-09-24.
+Why nothing executes (checked 2026-10-02, statuses and counts only):
+- **The endpoint did run groups, unreliably, and stopped on 2026-08-10.** Groups created
+  through it with the sample's names ("May 4 - …", `task_setup_job`) did execute in May and June;
+  others with the same payload stayed `queued`, sometimes a minute apart ("May 4 - 013233" queued at
+  08:41, completed at 08:42). For the token's user, endpoint-created groups completed 45 in May
+  (59 stuck), 16 in June, 3 in July and 159 in August; the last finished on 2026-08-10 07:13 UTC.
+  Every endpoint-created group since has stayed `queued`: 9 in August, 2 in September, our 3.
+  Groups made through v1's chat kept running until 2026-09-24, when chat use stopped.
+- **So it isn't our payload or the location.** Our groups land in the same tables as the curl
+  ones, from the same user; a session row isn't needed (the sample's session has none and its
+  groups ran). The reply "We are processing your tasks. You can see task status on the task panel"
+  is the progress text v1 shows before its run loop (`handleProcesViraTasksAsync`: `handleSubTask`
+  for each queued sub-task, then `handleGetTaskGroupInfo`), which v1's chat calls in the same
+  request. For endpoint groups something else must start that loop, and since 2026-08-10 it
+  doesn't; the flakiness before suggests a fire-and-forget job, or one started by the task panel.
+- **No Celery and not the tunnel.** The engine is v1's Node backend, the staging database has no
+  Celery or kombu tables, and the tunnel connects in 0.1 s; 119 groups (back to 2025-01-25) sit
+  `queued`.
 - **Reading results back:** `handleGetTaskGroupInfo` already builds the group with each
   sub-task's status, response and `failedReason`. Exposed as a call by `agentTaskGroupUuid`, it is
   what v2 should read. Until then the same data is in `hris.agentsubtask` for testing.
 
 What engineering needs to provide, in order of preference:
-1. Run the group on create (the endpoint calls `handleProcesViraTasksAsync` before it answers, as
+0. What starts the run for an endpoint-created group, and its logs since 2026-08-10 07:13 UTC
+   (our groups today are named "Jeni v2 probe …" and "Jeni v2 - search_users"); then either
+1. run the group on create (the endpoint calls `handleProcesViraTasksAsync` before it answers, as
    v1's chat does) and return `handleGetTaskGroupInfo`, or
 2. a "process" call for an `agentTaskGroupUuid` plus a "get" call for its info, or a worker that
    picks up queued groups;
