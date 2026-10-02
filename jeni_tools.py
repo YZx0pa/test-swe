@@ -220,7 +220,8 @@ def _edit(a: dict) -> str:
 
 def _share(a: dict) -> str:
     text = f"Share {_numbered('application', a.get('app_ids') or [])} with {_words(a.get('emails') or [])}"
-    return text + (f", with the note “{_short(a['message'])}”." if a.get("message") else ".")
+    note = _short(a.get("message") or "").rstrip(" .!?")
+    return text + (f", with the note “{note}”." if note else ".")
 
 
 # What each task would do, as an approval card says it: plain words, no field names or JSON.

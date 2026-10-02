@@ -594,6 +594,8 @@ def test_every_write_has_a_plain_summary_and_other_tools_a_fallback():
     assert jeni_tools.summary("score_candidates", {"app_ids": [11, 12], "match_ids": None}) == (
         "Score candidates: app ids 11 and 12.")
     assert jeni_tools.summary("add_job_skills", {"job_id": 7001, "skills": 5}) == "Add 5 to job 7001."
+    assert jeni_tools.summary("share_application", {"app_ids": [1], "emails": ["a@b.co"],
+                                                    "message": "Worth a look."}).endswith("“Worth a look”.")
     assert len(jeni_tools.summary("share_application", {"app_ids": [1], "emails": ["a@b.co"],
                                                         "message": "x" * 2000})) < 200
 
