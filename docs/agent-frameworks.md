@@ -692,8 +692,8 @@ How a call works:
   Jeni task mock knows; a DSN is ignored, with a note. Real mode connects to `--dsn` (default
   `$TRON_POSTGRES_DSN`) and stops with a message without one. Mixing them fails every write: a
   staging job the database confirms is "not found" by the mock.
-- **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates, each labelled with its name and id and, when known, its open date ("Senior Backend Engineer (job 7001, opened 2026-08-21)"); the rules say to list them that way, since a copy of a job has the same title, and to accept an answer by name, detail or id. Before, the agent asked "tell me the job_id: 7001 or 8001" with no names. Otherwise `ambiguous` keeps the candidates,
-  and the prompt says to ask the user rather than pick. A search with more than 10 matches says
+- **What the model sees.** `resolved` is flattened to the id; `ambiguous` keeps the candidates, each labelled with its name and id and, when known, its open date ("Senior Backend Engineer (job 7001, opened 2026-08-21)"); the rules say to list them that way, since a copy of a job has the same title, and to accept an answer by name, detail or id. Before, the agent asked "tell me the job_id: 7001 or 8001" with no names. The prompt says
+  to ask the user rather than pick. A search with more than 10 matches says
   so and asks for the id or a narrower title. Results go through `_mask_pii`. `%` and `_` in a
   search term match literally. A title that finds nothing is tried once more without a trailing
   "job", "role" or "position" (models often search for "data scientist job").
@@ -906,13 +906,31 @@ What the engine runs, from its tables on staging (`hris.agenttaskgroup`, `agentt
 So the expected behaviour holds, with one nuance: a failed task shows only in its sub-tasks, and
 the task itself reads `completed`.
 
-Not working yet:
-- **Nothing executes on staging.** No group has finished since 2026-09-24 10:43 UTC. Every group
-  created since, including our three read-only probes, stays `queued` (watched for 4 minutes).
-  Either the engine's worker isn't running there, or groups created through this endpoint wait for
-  a trigger it doesn't send. That needs someone on the VIRA side.
-- **Reading results back.** The POST returns none. Either an engine status call by
-  `agentTaskGroupUuid` (what the task panel uses; preferred), or polling `hris.agentsubtask` for
-  the group, which works today over the TRON tunnel but ties the agent to the engine's tables.
+Why nothing executes (checked 2026-10-02):
+- **The endpoint only creates the group.** In v1 the chat controller runs a group itself, in the
+  same request (`BhishmaStreamController` → `XagentTaskEngine.handleCreateTaskGroup`, then
+  `handleProcesViraTasksAsync`: `getQueuedSubTasks`, `handleSubTask` for each sub-task in order,
+  `handleGetTaskGroupInfo` for the result). The engine's reply to us, "We are processing your
+  tasks. You can see task status on the task panel", is the progress text v1 shows before that
+  loop. Nothing runs the loop for groups created through the endpoint.
+- **No worker or Celery.** The engine is v1's Node backend; the staging database has no
+  Celery or kombu tables, and 119 groups (back to 2025-01-25, our three probes included) sit
+  `queued` forever, most created by the same user as our token, who also has 659 completed ones.
+  Having a session or a chat history doesn't decide it (116 of the 119 have a chat history).
+- **Not the tunnel or the database.** The tunnel connects in 0.1 s, and the engine wrote our probe
+  groups to the same database. No group was created between 2026-09-24 and 2026-10-02 at all,
+  which is why the last completed one is from 2026-09-24.
+- **Reading results back:** `handleGetTaskGroupInfo` already builds the group with each
+  sub-task's status, response and `failedReason`. Exposed as a call by `agentTaskGroupUuid`, it is
+  what v2 should read. Until then the same data is in `hris.agentsubtask` for testing.
+
+What engineering needs to provide, in order of preference:
+1. Run the group on create (the endpoint calls `handleProcesViraTasksAsync` before it answers, as
+   v1's chat does) and return `handleGetTaskGroupInfo`, or
+2. a "process" call for an `agentTaskGroupUuid` plus a "get" call for its info, or a worker that
+   picks up queued groups;
+3. and a word on the 119 stuck groups (and our three probes) on staging: run them or archive them.
+
+
 - **The controlled run**, once groups execute: one group, two tasks; in the first, a sub-task that
   fails followed by one that would succeed alone; the second task independent. Read-only tasks.
