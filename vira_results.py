@@ -4,13 +4,15 @@ The engine answers a task group at once ("We are processing your tasks…") and 
 background, so jeni_tools.run waits here for the outcome and then answers as if VIRA had replied
 with it.  VIRA_RESULT_SOURCE says where the outcome is read:
 
+  api     the engine's own info call (what its task panel reads, handleGetTaskGroupInfo):
+          GET VIRA_RESULT_LOCATION with "{uuid}" filled in, with the xrtoken, only on the
+          engine's own host;
   db      the engine's own tables (hris.agenttaskgroup, agenttask, agentsubtask) on
           TRON_POSTGRES_DSN, by the group's uuid: read-only, and only the group just sent;
   (unset) nothing is read, and the task is reported as queued.
 
-When the engine offers a call for a group's result (its handleGetTaskGroupInfo), it belongs here
-as another source.  VIRA_RESULT_WAIT is how long to wait, in seconds (default 30; the engine
-used to finish a group in about 3).
+VIRA_RESULT_WAIT is how long to wait, in seconds (default 30; the engine used to finish a group
+in about 3).
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import os
 import threading
 import time
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 UNFINISHED = {"queued", "pending", "processing", "in_progress", "running"}
 POLL_SECONDS = 1.0
@@ -101,6 +104,51 @@ async def _poll_db(group_uuid: str, timeout: float, connect: Callable | None = N
         await conn.close()
 
 
+def result_url(group_uuid: str) -> str:
+    return os.environ.get("VIRA_RESULT_LOCATION", "").strip().replace("{uuid}", group_uuid)
+
+
+def api_problem(group_uuid: str = "00000000-0000-0000-0000-000000000000") -> str | None:
+    """Why the info call must not be made, or None.  The xrtoken goes only to the engine's host."""
+    import recruiter_cli as vira
+    url = result_url(group_uuid)
+    if "{uuid}" not in os.environ.get("VIRA_RESULT_LOCATION", ""):
+        return "VIRA_RESULT_LOCATION must be the info URL with {uuid} where the group's uuid goes"
+    problem = vira._url_problem(url, "VIRA_RESULT_LOCATION")
+    if problem:
+        return problem
+    if urlsplit(url).hostname != urlsplit(vira._task_group_url()).hostname:
+        return "VIRA_RESULT_LOCATION must be on the engine's host (VIRA_ACTUAL_LOCATION)"
+    return None if vira.VIRA_XRTOKEN else "VIRA credentials not configured: VIRA_XRTOKEN"
+
+
+def _poll_api(group_uuid: str, timeout: float, session_factory: Callable | None = None) -> dict | None:
+    import recruiter_cli as vira
+    problem = api_problem(group_uuid)
+    if problem:
+        raise ValueError(problem)
+    if session_factory is None:
+        import requests
+        session_factory = requests.Session
+    deadline, group = time.monotonic() + timeout, None
+    with session_factory() as session:
+        session.trust_env = False                 # no proxies or .netrc, as for every VIRA call
+        session.verify = vira.VIRA_CA_BUNDLE or True
+        while True:
+            resp = session.get(result_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
+                               timeout=20, allow_redirects=False)
+            if resp.status_code == 200:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict) and isinstance(body.get("tasks"), list):
+                    group = {"status": "ok", "http_status": 200, "result": body}
+            if finished(group) or time.monotonic() >= deadline:
+                return group
+            time.sleep(POLL_SECONDS)
+
+
 def _run(coro):
     """Run a coroutine to completion from sync code, on a thread of its own when this thread
     already runs an event loop (asyncpg needs a loop it owns)."""
@@ -124,9 +172,13 @@ def _run(coro):
     return out.get("value")
 
 
-def wait_for(group_uuid: str, timeout: float | None = None) -> dict | None:
+def wait_for(group_uuid: str, timeout: float | None = None, via: str | None = None) -> dict | None:
     """The group in the engine's reply shape, as far as it got within the wait, or None when no
     source is set up.  Unmasked: the caller masks it like any VIRA reply."""
-    if source() != "db":
-        return None
-    return _run(_poll_db(group_uuid, wait_seconds() if timeout is None else timeout))
+    via = via or source()
+    timeout = wait_seconds() if timeout is None else timeout
+    if via == "api":
+        return _poll_api(group_uuid, timeout)
+    if via == "db":
+        return _run(_poll_db(group_uuid, timeout))
+    return None

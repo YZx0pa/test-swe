@@ -168,3 +168,84 @@ def test_the_check_needs_its_settings_before_it_sends_anything(monkeypatch, caps
     monkeypatch.delenv("VIRA_ACTUAL_LOCATION", raising=False)
     monkeypatch.setattr(recruiter_cli, "execute", lambda *a, **k: pytest.fail("sent without settings"))
     assert vira_check.main([]) == 2 and "VIRA_ACTUAL_LOCATION" in capsys.readouterr().out
+
+
+# --- the engine's info call (VIRA_RESULT_SOURCE=api) ------------------------------
+class FakeResponse:
+    def __init__(self, status, body):
+        self.status_code, self._body = status, body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not JSON")
+        return self._body
+
+
+def info_body(status):
+    return {"agentTaskGroupUuid": UUID, "agentTaskGroupStatus": status, "creatorName": "A Person",
+            "tasks": [{"agentTaskKey": "task_search_users", "agentTaskStatus": status,
+                       "subTasks": [{"agentSubTaskKey": "sub_task_search_users", "agentSubTaskStatus": status,
+                                     "agentSubTaskResponse": {"users": []}, "failedReason": None}]}]}
+
+
+@pytest.fixture
+def info_api(monkeypatch):
+    monkeypatch.setattr(recruiter_cli, "VIRA_ACTUAL_LOCATION", "https://engine.example.test/agent/task-group")
+    monkeypatch.setattr(recruiter_cli, "VIRA_XRTOKEN", "xr-test")
+    monkeypatch.setenv("VIRA_RESULT_LOCATION", "https://engine.example.test/agent/info/{uuid}")
+    monkeypatch.setattr(vira_results, "POLL_SECONDS", 0.01)
+
+    class Session:
+        made, replies = [], []
+
+        def __init__(self):
+            self.trust_env, self.gets = True, []
+            Session.made.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, **kwargs):
+            self.gets.append((url, kwargs))
+            return Session.replies.pop(0) if len(Session.replies) > 1 else Session.replies[0]
+    return Session
+
+
+def test_the_info_call_is_polled_until_the_group_has_run(info_api):
+    info_api.replies = [FakeResponse(404, None), FakeResponse(200, info_body("queued")),
+                        FakeResponse(200, info_body("completed"))]
+    group = vira_results._poll_api(UUID, 5, info_api)
+    assert vira_results.finished(group) and group["result"]["agentTaskGroupStatus"] == "completed"
+    [session] = info_api.made
+    url, kwargs = session.gets[0]
+    assert url == f"https://engine.example.test/agent/info/{UUID}" and len(session.gets) == 3
+    assert kwargs["headers"] == {"xrtoken": "xr-test"} and kwargs["allow_redirects"] is False
+    assert session.trust_env is False
+
+
+@pytest.mark.parametrize("location,problem", [
+    ("https://elsewhere.example.test/info/{uuid}", "on the engine's host"),
+    ("http://engine.example.test/agent/info/{uuid}", "must be https"),
+    ("https://engine.example.test/agent/info/", "with {uuid}"),
+])
+def test_the_token_goes_only_to_the_engines_host_over_https(info_api, monkeypatch, location, problem):
+    monkeypatch.setenv("VIRA_RESULT_LOCATION", location)
+    assert problem in vira_results.api_problem()
+    with pytest.raises(ValueError, match="VIRA_RESULT_LOCATION"):
+        vira_results._poll_api(UUID, 0, info_api)
+    assert info_api.made == []
+
+
+def test_an_info_reply_is_masked_and_projected_like_any_other(audit_log, engine, info_api, monkeypatch):
+    monkeypatch.setenv("VIRA_RESULT_SOURCE", "api")
+    body = info_body("completed")
+    body["tasks"][0]["subTasks"][0]["agentSubTaskResponse"] = {"users": [{"userId": 801, "email": "alice.johnson@example.com"}]}
+    info_api.replies = [FakeResponse(200, body)]
+    import requests
+    monkeypatch.setattr(requests, "Session", info_api)
+    result = jeni_tools.run("search_users", {"search_key": "Alice"})
+    assert result["status"] == "ok" and "@" not in json.dumps(result)
+    assert pii_vault.VAULT.sources(result["result"]["users"][0]["email"]) >= {"colleague"}

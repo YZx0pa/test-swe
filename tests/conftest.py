@@ -20,6 +20,7 @@ os.environ["EVENTS_LOG"] = os.devnull                   # the fixture below poin
 os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
 os.environ.pop("TRON_POSTGRES_DSN", None)               # jeni_db never reaches a real database
 os.environ.pop("VIRA_RESULT_SOURCE", None)              # nor does reading a task group back
+os.environ.pop("VIRA_RESULT_LOCATION", None)
 # Jeni's real task catalog is internal (config/README.md): tests use a synthetic one.
 os.environ["JENI_TASKS_FILE"] = os.path.join(os.path.dirname(__file__), "fixtures", "jeni_tasks.json")
 for _key in ("LANGSMITH_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"):

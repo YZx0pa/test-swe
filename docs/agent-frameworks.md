@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 347 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 352 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -455,7 +455,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 347 tests
+.venv/bin/python -m pytest -q                                   # offline, 352 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -885,14 +885,17 @@ How a call goes now:
   You can see task status on the task panel"}`. `jeni_tools.project()` turns that into
   `{"status": "queued", ...}`, and `RULES` tells the model to say the task was submitted, not
   done, and not to use anything it would have returned.
-- **Reading the outcome back** (`vira_results.py`). With `VIRA_RESULT_SOURCE=db`, `jeni_tools.run`
-  waits for the group (up to `VIRA_RESULT_WAIT`, 30 s) by reading the engine's own tables on
-  `TRON_POSTGRES_DSN`, read-only and by the group's uuid only, then masks the outcome like any
-  reply, audits the read (`read-result`) and answers with the sub-task's result. So once the
+- **Reading the outcome back** (`vira_results.py`). `jeni_tools.run` waits for the group (up to
+  `VIRA_RESULT_WAIT`, 30 s), then masks the outcome like any reply, audits the read
+  (`read-result`) and answers with the sub-task's result. `VIRA_RESULT_SOURCE=api` reads it
+  through the engine's info call, what its task panel uses: `GET …/xagent/taskgroup/info/{uuid}`
+  (`VIRA_RESULT_LOCATION`) with the xrtoken, which goes only to the engine's own host over https,
+  with no redirects. Checked live on a completed group. `=db` reads the engine's tables on
+  `TRON_POSTGRES_DSN` instead, read-only and by the group's uuid only. So once the
   engine runs groups again, v2 chains steps in real mode as it does on the mock. Checked against a
   real completed group (statuses, parsed responses, no address left after masking). Still queued at
   the deadline, or with the database unreachable, the task is reported queued. When the engine
-  offers a result call (`handleGetTaskGroupInfo`), it replaces the database as the source.
+  (The info call exists, so `api` is the source to use; `db` is the fallback.)
 - **`python vira_check.py`** sends three read-only groups (v2's `search_users`, the sample's job
   description, and a group whose first task has a sub-task that must fail before one that would
   succeed, followed by a second task), waits, and reports what ran: whether sub-tasks are chained
@@ -942,7 +945,7 @@ Why nothing executes (checked 2026-10-02, statuses and counts only):
   `queued`.
 - **Reading results back:** `handleGetTaskGroupInfo` already builds the group with each
   sub-task's status, response and `failedReason`. Exposed as a call by `agentTaskGroupUuid`, it is
-  what v2 should read; until then v2 reads `hris.agentsubtask` (`VIRA_RESULT_SOURCE=db`).
+  what v2 reads (`VIRA_RESULT_SOURCE=api`); only the run itself is missing.
 
 What engineering needs to provide, in order of preference:
 0. What starts the run for an endpoint-created group, and its logs since 2026-08-10 07:13 UTC

@@ -5,8 +5,8 @@
     python vira_check.py --wait 60
 
 It sends three task groups through recruiter_cli.execute (real mode: VIRA_ACTUAL_LOCATION with
-VIRA_XRTOKEN, audited) and reads each one back from the engine's own tables (vira_results, on
-TRON_POSTGRES_DSN):
+VIRA_XRTOKEN, audited) and reads each one back (vira_results): through the engine's info call
+when VIRA_RESULT_LOCATION is set, from its tables on TRON_POSTGRES_DSN otherwise:
 
   runs        v2's own payload for search_users: does a group run at all?
   engine      the engine's sample vocabulary: sub_task_get_job_description for a title (text only).
@@ -88,10 +88,18 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Check the real VIRA engine with read-only task groups.")
     p.add_argument("--wait", type=float, default=30, help="seconds to wait for each group (default 30)")
     args = p.parse_args(argv)
-    missing = [n for n in ("VIRA_ACTUAL_LOCATION", "VIRA_XRTOKEN", "TRON_POSTGRES_DSN") if not os.environ.get(n)]
+    via = vira_results.source() or ("api" if os.environ.get("VIRA_RESULT_LOCATION") else "db")
+    needed = ("VIRA_ACTUAL_LOCATION", "VIRA_XRTOKEN",
+              "VIRA_RESULT_LOCATION" if via == "api" else "TRON_POSTGRES_DSN")
+    missing = [n for n in needed if not os.environ.get(n)]
     if missing:
         print(f"not set up: {', '.join(missing)} missing from .env")
         return 2
+    problem = vira_results.api_problem() if via == "api" else None
+    if problem:
+        print(f"not set up: {problem}")
+        return 2
+    print(f"reading results back through the engine's {'info call' if via == 'api' else 'tables'}")
     stamp, ok = time.strftime("%Y%m%d-%H%M%S"), True
     sent = []
     for label, body in checks(stamp):
@@ -109,7 +117,7 @@ def main(argv=None) -> int:
         print(f"{label:8} accepted (http {reply.get('http_status')})")
         sent.append((label, group_uuid))
     for label, group_uuid in sent:
-        group = vira_results._run(vira_results._poll_db(group_uuid, args.wait))
+        group = vira_results.wait_for(group_uuid, args.wait, via=via)
         state = "ran" if vira_results.finished(group) else f"still queued after {args.wait:g}s"
         print(f"\n{label}: {state}")
         for task, subs in statuses(group):
