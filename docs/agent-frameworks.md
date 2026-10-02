@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 352 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 358 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -455,7 +455,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 352 tests
+.venv/bin/python -m pytest -q                                   # offline, 358 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
@@ -469,6 +469,7 @@ python run_langgraph.py --task "Add Kubernetes to the backend engineer job"     
 demo/run.sh                                                               # the demo (§14): chat on :3000, data panel beside it
 .venv/bin/python -m demo.rehearse                                         # play the demo script against it and check the data
 python vira_check.py                                                      # real VIRA engine, read-only: does it run task groups?
+python vira_check.py --writes                                             # then a write test on a job of its own, if they ran
 python vira_mcp.py --mode mock                                            # for MCP clients
 python vira_mcp.py --mode real --max-calls 20                             # reads only; add --allow-side-effects for score/insights
 python compare_agents.py --out traces/report.md                           # live LLM, mock VIRA only
@@ -894,12 +895,24 @@ How a call goes now:
   `TRON_POSTGRES_DSN` instead, read-only and by the group's uuid only. So once the
   engine runs groups again, v2 chains steps in real mode as it does on the mock. Checked against a
   real completed group (statuses, parsed responses, no address left after masking). Still queued at
-  the deadline, or with the database unreachable, the task is reported queued. When the engine
-  (The info call exists, so `api` is the source to use; `db` is the fallback.)
+  the deadline, or with the database unreachable, the task is reported queued. The info call
+  exists, so `api` is the source to use; `db` is the fallback.
 - **`python vira_check.py`** sends three read-only groups (v2's `search_users`, the sample's job
   description, and a group whose first task has a sub-task that must fail before one that would
   succeed, followed by a second task), waits, and reports what ran: whether sub-tasks are chained
   and tasks independent. On 2026-10-02 all three were accepted and stayed queued.
+- **`python vira_check.py --writes`** adds a write test on staging, sent only when the read-only
+  groups have just run, because otherwise its writes would queue and run later with nobody
+  watching. The agent creates "Jeni v2 test <time>" (Python, 1–2 years) and adds Kafka to it.
+  Cards are approved only for that title and for Kafka on the id `create_job` returned (a
+  callback records it), and every other card is rejected. Then the test makes the job private,
+  checks Kafka is on it, removes Kafka, edits the description, checks again, and finally closes
+  the job whatever happened. No LinkedIn, shares, candidates, collaborators or ownership changes.
+  On 2026-10-02 the reads stayed queued, so no write was sent. With the dev-mode cut-queue
+  switched on (`cutqueque` and `VIRA_result_trigger`, in `vira_results._poll_api`), every
+  read-back also asks the engine to run its group 10 s before the wait ends. That applies to the
+  check's reads and then to each write, so the gate can open without the engine fix. Each
+  group, read-only or write, goes in a VIRA session of its own (`jeni_tools.session_uuid`).
   A real `job_create` response is the whole job record (dozens of fields), so real replies cost
   more tokens than the mock's.
 

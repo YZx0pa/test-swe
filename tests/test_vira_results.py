@@ -161,6 +161,7 @@ def test_the_checks_only_read_and_name_their_groups():
     assert subs == {"sub_task_search_users", "sub_task_get_job_description", "sub_task_get_job_skills"}
     assert all(body["agent_session_uuid"] and body["task_group_name"].startswith("Jeni v2 check ")
                for _, body in sent)
+    assert len({body["agent_session_uuid"] for _, body in sent}) == 3       # one session per group
 
 
 def test_the_check_needs_its_settings_before_it_sends_anything(monkeypatch, capsys):
@@ -249,3 +250,146 @@ def test_an_info_reply_is_masked_and_projected_like_any_other(audit_log, engine,
     result = jeni_tools.run("search_users", {"search_key": "Alice"})
     assert result["status"] == "ok" and "@" not in json.dumps(result)
     assert pii_vault.VAULT.sources(result["result"]["users"][0]["email"]) >= {"colleague"}
+
+
+# --- vira_check --writes: the write test -------------------------------------------
+@pytest.fixture
+def check_settings(monkeypatch):
+    """vira_check's settings present (reading back from the tables), with nothing really sent:
+    every group is acknowledged, and `sent` lists the commands that went out."""
+    import vira_check
+    for name, value in (("VIRA_ACTUAL_LOCATION", "https://engine.example.test/agent/task-group"),
+                        ("VIRA_XRTOKEN", "xr-test"), ("TRON_POSTGRES_DSN", "postgresql://test")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("VIRA_RESULT_SOURCE", "db")
+    monkeypatch.delenv("VIRA_RESULT_LOCATION", raising=False)
+    sent = []
+    monkeypatch.setattr(vira_check.vira, "execute", lambda cmd, *a, **k: sent.append(cmd) or RECEIVED)
+    return sent
+
+
+def test_no_write_is_sent_while_the_engine_leaves_reads_queued(check_settings, monkeypatch, capsys):
+    import vira_check
+    monkeypatch.setattr(vira_results, "wait_for", lambda uuid, *a, **k: group(
+        ("task_search_users", [("sub_task_search_users", "queued")])))
+    monkeypatch.setattr(vira_check, "run_writes", lambda *a, **k: pytest.fail("wrote while reads queue"))
+    assert vira_check.main(["--writes", "--wait", "0"]) == 1
+    assert check_settings == ["check-runs", "check-engine", "check-failure"]
+    assert "Write test not sent" in capsys.readouterr().out
+
+
+def test_the_write_test_follows_only_once_the_reads_have_run(check_settings, monkeypatch):
+    import vira_check
+    ran = group(("task_setup_job", [("sub_task_get_job_description", "failed"),
+                                    ("sub_task_get_job_skills", "failed")]),
+                ("task_search_users", [("sub_task_search_users", "completed")]))
+    monkeypatch.setattr(vira_results, "wait_for", lambda uuid, *a, **k: ran)
+    writes = []
+    monkeypatch.setattr(vira_check, "run_writes", lambda stamp, **k: writes.append(stamp) or True)
+    assert vira_check.main(["--wait", "0"]) == 0 and writes == []          # not without --writes
+    assert vira_check.main(["--writes", "--wait", "0"]) == 0 and len(writes) == 1
+
+
+def test_only_the_planned_cards_are_approved():
+    import vira_check
+    title, created, cards = "Jeni v2 test 1", vira_check.CreatedJobs(), []
+    decide = vira_check.planned_decisions(title, created, cards)
+
+    def card(name, **args):
+        return decide({"action_requests": [{"name": name, "args": args}]})[0]["type"]
+    assert card("create_job", job_title="Something else") == "reject"
+    assert card("add_job_skills", job_id=7001, skills=["Kafka"]) == "reject"     # before any job exists
+    assert card("create_job", job_title="jeni v2 test 1 ") == "approve"
+    created.ids.append(7123)
+    assert card("create_job", job_title=title) == "reject"                        # one job only
+    assert card("add_job_skills", job_id=7001, skills=["Kafka"]) == "reject"     # not the new job
+    assert card("add_job_skills", job_id=7123, skills=["Kafka", "Spark"]) == "reject"
+    assert card("transfer_job_ownership", job_id=7123, new_owner_user_email="me") == "reject"
+    assert card("add_job_skills", job_id=7123, skills=["kafka"]) == "approve"
+    assert [ok for _, ok in cards] == [False, False, True, False, False, False, False, True]
+
+
+def test_the_callback_keeps_the_id_create_job_returned():
+    import uuid as uuid_lib
+    from langchain_core.messages import ToolMessage
+    import vira_check
+    created = vira_check.CreatedJobs()
+    for name, reply in (("search_users", {"request_status": "ok", "subtasks": [{"result": {"jobId": 1}}]}),
+                        ("create_job", {"request_status": "failed", "message": "no"}),
+                        ("create_job", {"request_status": "ok", "group_status": "completed",
+                                        "subtasks": [{"status": "completed", "result": {"jobId": 7123}}]})):
+        run = uuid_lib.uuid4()
+        created.on_tool_start({"name": name}, "{}", run_id=run)
+        created.on_tool_end(ToolMessage(json.dumps(reply), tool_call_id="c"), run_id=run)
+    assert created.ids == [7123]
+    def details(reply):
+        return {"request_status": "ok", "group_status": "completed",
+                "subtasks": [{"status": "completed", "result": reply}]}
+    assert vira_check.has_skill(details({"skills": ["Python", "Kafka"]}), "kafka")
+    assert vira_check.has_skill(details({"skillsText": "Python, Kafka"}), "Kafka")
+    assert not vira_check.has_skill(details({"skills": [{"name": "Python"}]}), "Kafka")
+    assert vira_check.succeeded(details({})) and not vira_check.succeeded(jeni_tools.QUEUED)
+    failed = {**details({}), "subtasks": [{"status": "failed", "failed_reason": "Job not found"}]}
+    assert not vira_check.succeeded(failed) and "Job not found" in vira_check.outcome(failed)
+
+
+def stand_in(name, description, *fields):
+    """A catalog entry in the fixture's style; fields are (name, mandatory)."""
+    return {"task_name": f"task_{name}", "description": description, "level": 1, "task_output": [],
+            "sub_tasks": [{"sub_task_name": f"sub_task_{name}", "description": description, "fields": [
+                {"field_name": f, "mandatory": m, "field_value": "{{to_be_filled}}"} for f, m in fields]}]}
+
+
+@pytest.fixture
+def kept_mock(monkeypatch, tmp_path):
+    """The mock remembering changes, and a catalog with the three tasks the write test needs
+    that the shared fixture leaves out."""
+    import os
+    import mock_jeni
+    catalog = json.loads(open(os.environ["JENI_TASKS_FILE"], encoding="utf-8").read())
+    catalog["tasks"] += [
+        stand_in("remove_job_skills", "Remove skills from a job.", ("job_id", True), ("skills", True)),
+        stand_in("edit_job", "Edit a job.", ("job_id", True), ("job_title", False), ("job_description", False)),
+        stand_in("make_job_closed", "Close a job.", ("job_id", True), ("reason_for_closure", False))]
+    (tmp_path / "jeni_tasks.json").write_text(json.dumps(catalog), encoding="utf-8")
+    monkeypatch.setenv("JENI_TASKS_FILE", str(tmp_path / "jeni_tasks.json"))
+    state = mock_jeni.remember_changes()
+    state.reset()
+    yield state
+    mock_jeni.forget_changes()
+
+
+def write_agent(title, job_for_skill=None):
+    import mock_jeni
+    from fakes import call, calls, say, scripted
+    job = mock_jeni.created_job_id(title)
+    return job, scripted(
+        calls(call("create_job", {"job_title": title, "skills": ["Python"], "min_exp": 1, "max_exp": 2}, "c1")),
+        calls(call("add_job_skills", {"job_id": job_for_skill or job, "skills": ["Kafka"]}, "c2")),
+        say("Created the job and added Kafka."))
+
+
+def test_the_write_test_runs_through_on_the_mock_and_closes_its_job(audit_log, kept_mock):
+    import vira_check
+    job, model = write_agent("Jeni v2 test 20261002-120000")
+    lines = []
+    assert vira_check.run_writes("20261002-120000", lines.append, model=model, mode="mock")
+    assert lines[0] == "agent: cards [('create_job', True), ('add_job_skills', True)]"
+    assert any("steps chain" in line for line in lines)
+    assert not any("NOT as expected" in line for line in lines)
+    record = kept_mock.jobs[job]
+    assert record["status"] == "closed" and "Kafka" not in record["skills"] and record["jobDescription"]
+    assert [a["command"] for a in read_audit(audit_log)] == [
+        "create-job", "add-job-skills", "make-job-private", "get-single-job-details", "remove-job-skills",
+        "edit-job", "get-single-job-details", "make-job-closed"]
+
+
+def test_a_skill_aimed_at_another_job_is_refused_and_the_test_fails(audit_log, kept_mock):
+    import mock_jeni
+    import vira_check
+    job, model = write_agent("Jeni v2 test 20261002-130000", job_for_skill=7001)
+    lines = []
+    assert not vira_check.run_writes("20261002-130000", lines.append, model=model, mode="mock")
+    assert "Kafka" not in kept_mock.jobs[7001]["skills"] and kept_mock.jobs[job]["status"] == "closed"
+    assert "add-job-skills" not in [a["command"] for a in read_audit(audit_log)]
+    assert mock_jeni.JOBS[7001]["skills"] == ["Python", "Go", "PostgreSQL"]
