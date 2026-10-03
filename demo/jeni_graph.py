@@ -54,10 +54,10 @@ NO_STATUS_RULE = """\
 CHAT_REPLACEMENTS = ((SUMMARY_RULE, CHAT_RULE), (STATUS_RULE, NO_STATUS_RULE))
 
 
-def demo_toolset(state: mock_jeni.State) -> agent_kit.Toolset:
+def demo_toolset(state: mock_jeni.State, query_tools=None) -> agent_kit.Toolset:
     """jeni_db on the kept mock State, with the closing rules written for a chat window."""
-    toolset = agent_kit.toolset("jeni_db",
-                                query_tools=fake_db_queries(state.db_fixtures(COMPANY_ID)),
+    query_tools = query_tools or fake_db_queries(state.db_fixtures(COMPANY_ID))
+    toolset = agent_kit.toolset("jeni_db", query_tools=query_tools,
                                 context={"auth_profile": {"company_id": COMPANY_ID}})
     prompt = toolset.prompt
     for rule, replacement in CHAT_REPLACEMENTS:
@@ -74,8 +74,12 @@ def build(model=None, gate_writes: bool = GATE_WRITES):
     agent_kit.set_tracing(False)
     vira_tools.configure("mock")
     pii_vault.VAULT.user_email = USER_EMAIL
-    return run_langgraph.build_agent(model=model, toolset=demo_toolset(mock_jeni.remember_changes()),
-                                     gate_writes=gate_writes, own_checkpointer=False)
+    state = mock_jeni.remember_changes()
+    context = {"auth_profile": {"company_id": COMPANY_ID}}
+    query_tools = fake_db_queries(state.db_fixtures(COMPANY_ID))
+    return run_langgraph.build_agent(model=model, toolset=demo_toolset(state, query_tools),
+                                     gate_writes=gate_writes, own_checkpointer=False,
+                                     query_tools=query_tools, context=context)
 
 
 _graph = None
