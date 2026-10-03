@@ -10,14 +10,22 @@ if TYPE_CHECKING:          # only for the annotations: the caller's pool brings 
 async def handle_search_users(
     conn: asyncpg.Connection,
     company_id: int,
-    search_keys: List[str],
+    search_keys: Optional[List[str]] = None,
+    xuser_ids: Optional[List[int]] = None,
+    xemails: Optional[List[str]] = None,
     limit: int = 10,
 ) -> List[Dict]:
     """
-    Equivalent to Node handleSearchUsers
-    Search active role-4 users in given company by partial name / email.
+    Search eligible active role-4 users in a company.
+
+    ``search_keys`` is the LLM-facing partial name/email search. ``xuser_ids``
+    and ``xemails`` are exact validation modes used by entity validation; they
+    reuse this same eligibility population rather than duplicating user SQL.
     returns list: [{"userId":int,"firstname":str,"lastname":str,"email":str}]
     """
+    search_keys = search_keys or []
+    xuser_ids = xuser_ids or []
+    xemails = [str(email).lower() for email in (xemails or [])]
     base_sql = """
         SELECT ui.user_id, ui.firstname, ui.lastname, ui.email
         FROM hris.userinfo ui
@@ -40,6 +48,12 @@ async def handle_search_users(
         or_parts.append(frag.strip())
     if or_parts:
         base_sql += f" AND ({' OR '.join(or_parts)})"
+    if xuser_ids:
+        params.append([int(user_id) for user_id in xuser_ids])
+        base_sql += f" AND ui.user_id = ANY(${len(params)}::bigint[])"
+    if xemails:
+        params.append(xemails)
+        base_sql += f" AND lower(ui.email) = ANY(${len(params)}::text[])"
     params.append(limit)
     base_sql += f" ORDER BY ui.email ASC LIMIT ${len(params)};"
 
@@ -55,6 +69,28 @@ async def handle_search_users(
     ]
 
 
+async def handle_find_candidate_by_email(
+    conn: asyncpg.Connection,
+    company_id: int,
+    email: str,
+) -> List[Dict]:
+    """Candidate profiles with an application in the authenticated company.
+
+    A profile can have several applications, so the result is distinct by
+    profile.  Candidate-name comparison is intentionally not included until
+    the canonical profile name columns are confirmed.
+    """
+    rows = await conn.fetch(
+        "SELECT DISTINCT p.profile_id, p.email FROM hris.profile p "
+        "JOIN hris.application a ON a.profile_id = p.profile_id "
+        "JOIN hris.job j ON j.job_id = a.job_id "
+        "WHERE j.recuiter_company_id = $1 AND lower(p.email) = lower($2) "
+        "LIMIT 2;",
+        company_id, str(email),
+    )
+    return [{"profileId": r["profile_id"], "email": r["email"]} for r in rows]
+
+
 async def handle_search_jobs(
     conn: asyncpg.Connection,
     company_id: int,
@@ -66,12 +102,13 @@ async def handle_search_jobs(
     Equivalent Node handleSearchJobs
     Search jobs: filter by company_id, from_resume=false.
     Can filter by partial job-name keywords OR list of job_ids.
-    returns list: [{"jobId":int, "jobName":str, "openDate":datetime|None}], newest first
+    returns list: [{"jobId":int, "jobName":str, "openDate":datetime|None,
+                   "isPrivate":bool|None, "closeDate":datetime|None}], newest first
     """
     search_keys = search_keys or []
     xjob_ids = xjob_ids or []
     base_sql = """
-        SELECT j.job_id, jn.name_name AS job_name, j.open_date
+        SELECT j.job_id, jn.name_name AS job_name, j.open_date, j.is_private, j.close_date
         FROM hris.job j
         INNER JOIN hris.jobname jn ON jn.name_id = j.name_id
         WHERE j.recuiter_company_id = $1
@@ -106,6 +143,8 @@ async def handle_search_jobs(
             "jobId": r["job_id"],
             "jobName": r["job_name"],
             "openDate": r["open_date"],
+            "isPrivate": r["is_private"],
+            "closeDate": r["close_date"],
         }
         for r in rows
     ]

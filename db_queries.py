@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Mapping
+from zoneinfo import ZoneInfo
 
 
 @dataclass
@@ -75,6 +77,35 @@ def _job_label(row: Mapping[str, Any]) -> str:
 
 def _user_label(row: Mapping[str, Any]) -> str:
     return row.get("email", "")
+
+
+def _candidate_label(row: Mapping[str, Any]) -> str:
+    return row.get("email", "")
+
+
+def _is_open(close_date: Any) -> bool:
+    """The canonical job-state rule: no close date, or a close date today/later, is open."""
+    if close_date is None:
+        return True
+    if isinstance(close_date, datetime):
+        close_date = close_date.date()
+    elif isinstance(close_date, str):
+        close_date = date.fromisoformat(close_date[:10])
+    if not isinstance(close_date, date):
+        raise ValueError(f"unsupported close_date value {close_date!r}")
+    return close_date >= datetime.now(ZoneInfo("Asia/Singapore")).date()
+
+
+def _job_detail(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Map db_lookup/mock row names to the canonical Jeni validation contract."""
+    detail = {"job_id": row["jobId"], "job_title": row["jobName"]}
+    is_private = row.get("isPrivate", row.get("is_private"))
+    close_date = row.get("closeDate", row.get("close_date"))
+    if is_private is not None:
+        detail["is_private"] = bool(is_private)
+    if close_date is not None or "closeDate" in row or "close_date" in row:
+        detail["is_open"] = _is_open(close_date)
+    return detail
 
 
 # "the data scientist job": models often search with the word "job" left on.
@@ -179,6 +210,15 @@ def build_db_queries(pool) -> Dict[str, QueryTool]:
                 limit=SEARCH_LIMIT + 1)
         return _resolve_one(rows, "userId", "user_id", _user_label, "user")
 
+    async def _get_job_detail(inputs, context):
+        cid = _company_id(context)
+        async with pool.acquire() as conn:
+            rows = await db_lookup.handle_search_jobs(
+                conn, cid, xjob_ids=[int(inputs["job_id"])], limit=1)
+        if not rows:
+            return {"status": "not_found", "message": "no job matched"}
+        return {"status": "resolved", "resolved_fields": _job_detail(rows[0])}
+
     async def _list_job_applications(inputs, context):
         cid = _company_id(context)
         async with pool.acquire() as conn:
@@ -212,13 +252,27 @@ def build_db_queries(pool) -> Dict[str, QueryTool]:
     async def _validate_emails(inputs, context):
         cid, requested = _company_id(context), [str(v).lower() for v in inputs["emails"]]
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT lower(email) AS email FROM hris.userinfo WHERE company_id = $1 "
-                "AND active IS TRUE AND lower(email) = ANY($2::text[]);", cid, requested)
-        return _validated(requested, [r["email"] for r in rows], "emails")
+            rows = await db_lookup.handle_search_users(
+                conn, cid, xemails=requested, limit=len(requested))
+        return _validated(requested, [str(r["email"]).lower() for r in rows],
+                          "eligible internal emails")
 
-    return _registry(_find_job_by_title, _find_user, _list_job_applications,
-                     _validate_job_ids, _validate_app_ids, _validate_emails)
+    async def _validate_user_ids(inputs, context):
+        cid, requested = _company_id(context), [int(v) for v in inputs["user_ids"]]
+        async with pool.acquire() as conn:
+            rows = await db_lookup.handle_search_users(
+                conn, cid, xuser_ids=requested, limit=len(requested))
+        return _validated(requested, [r["userId"] for r in rows], "eligible user IDs")
+
+    async def _find_candidate_by_email(inputs, context):
+        cid = _company_id(context)
+        async with pool.acquire() as conn:
+            rows = await db_lookup.handle_find_candidate_by_email(conn, cid, inputs["email"])
+        return _resolve_one(rows, "profileId", "profile_id", _candidate_label, "candidate")
+
+    return _registry(_find_job_by_title, _get_job_detail, _find_user, _list_job_applications,
+                     _validate_job_ids, _validate_app_ids, _validate_emails,
+                     _validate_user_ids, _find_candidate_by_email)
 
 
 # --- FAKE: backed by in-memory fixtures -------------------------------------
@@ -229,10 +283,12 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
                    "openDate": datetime(...) (optional)}, ...],
         "users": [{"userId":9,"firstname":"A","lastname":"B","email":"a@x.com","company_id":1}, ...],
         "applications": [{"app_id":11,"job_id":501}, ...],
+        "candidates": [{"profileId":20,"email":"a@example.com","company_id":1}, ...],
     }  All rows are filtered by the fixture company_id, mirroring the real WHERE."""
     jobs = fixtures.get("jobs", [])
     users = fixtures.get("users", [])
     apps = fixtures.get("applications", [])
+    candidates = fixtures.get("candidates", [])
 
     def _tenant(rows, cid):
         return [r for r in rows if r.get("company_id", cid) == cid]
@@ -255,6 +311,13 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
                 or kw in f"{r['firstname']} {r['lastname']}".lower()][:SEARCH_LIMIT + 1]
         return _resolve_one(rows, "userId", "user_id", _user_label, "user")
 
+    async def _get_job_detail(inputs, context):
+        cid, job_id = _company_id(context), int(inputs["job_id"])
+        rows = [r for r in _tenant(jobs, cid) if r["jobId"] == job_id]
+        if not rows:
+            return {"status": "not_found", "message": "no job matched"}
+        return {"status": "resolved", "resolved_fields": _job_detail(rows[0])}
+
     async def _list_job_applications(inputs, context):
         job_ids = {r["jobId"] for r in _tenant(jobs, _company_id(context))}
         ids = [a["app_id"] for a in apps
@@ -276,24 +339,44 @@ def fake_db_queries(fixtures: Mapping[str, Any]) -> Dict[str, QueryTool]:
     async def _validate_emails(inputs, context):
         cid, requested = _company_id(context), [str(v).lower() for v in inputs["emails"]]
         found = [str(r["email"]).lower() for r in _tenant(users, cid)
-                 if str(r["email"]).lower() in set(requested)]
-        return _validated(requested, found, "emails")
+                 if r.get("role_id", 4) == 4 and r.get("active", True) is True
+                 and str(r["email"]).lower() in set(requested)]
+        return _validated(requested, found, "eligible internal emails")
 
-    return _registry(_find_job_by_title, _find_user, _list_job_applications,
-                     _validate_job_ids, _validate_app_ids, _validate_emails)
+    async def _validate_user_ids(inputs, context):
+        cid, requested = _company_id(context), [int(v) for v in inputs["user_ids"]]
+        found = [r["userId"] for r in _tenant(users, cid)
+                 if r.get("role_id", 4) == 4 and r.get("active", True) is True
+                 and r["userId"] in set(requested)]
+        return _validated(requested, found, "eligible user IDs")
+
+    async def _find_candidate_by_email(inputs, context):
+        cid, email = _company_id(context), str(inputs["email"]).lower()
+        rows = [r for r in _tenant(candidates, cid) if str(r["email"]).lower() == email][:2]
+        return _resolve_one(rows, "profileId", "profile_id", _candidate_label, "candidate")
+
+    return _registry(_find_job_by_title, _get_job_detail, _find_user, _list_job_applications,
+                     _validate_job_ids, _validate_app_ids, _validate_emails,
+                     _validate_user_ids, _find_candidate_by_email)
 
 
-def _registry(find_job, find_user, list_apps, validate_jobs, validate_apps, validate_emails) -> Dict[str, QueryTool]:
+def _registry(find_job, get_job_detail, find_user, list_apps, validate_jobs, validate_apps,
+              validate_emails, validate_user_ids, find_candidate_by_email) -> Dict[str, QueryTool]:
     return {
         "find_job_by_title": QueryTool(
             "Find jobs whose title contains this text. Search the title words only, e.g. "
             "'data scientist' for 'the data scientist job'.",
             {"title": "str"}, {"job_id": "int"}, _guard(find_job)),
+        "get_job_detail": QueryTool(
+            "Get one job's canonical title and available state fields by id.",
+            {"job_id": "int"},
+            {"job_id": "int", "job_title": "str", "is_private": "bool", "is_open": "bool"},
+            _guard(get_job_detail)),
         "find_user": QueryTool(
             "Find an active recruiter user by name or email.",
             {"search_key": "str"}, {"user_id": "int"}, _guard(find_user)),
         "list_job_applications": QueryTool(
-            "List all applicants for a given job.",
+            "Get all applicants for a given job.",
             {"job_id": "int"}, {"app_ids": "list[int]"}, _guard(list_apps)),
         "validate_job_id": QueryTool(
             "Validate one user-supplied job ID in the authenticated company.",
@@ -304,10 +387,16 @@ def _registry(find_job, find_user, list_apps, validate_jobs, validate_apps, vali
         "validate_app_ids": QueryTool(
             "Validate user-supplied application IDs in the authenticated company.",
             {"app_ids": "list[int]"}, {}, _guard(validate_apps)),
+        "validate_user_ids": QueryTool(
+            "Validate user IDs of active role-4 users in the authenticated company.",
+            {"user_ids": "list[int]"}, {}, _guard(validate_user_ids)),
         "validate_email": QueryTool(
             "Validate one user-supplied active email in the authenticated company.",
             {"email": "str"}, {}, _guard(lambda inputs, context: validate_emails({"emails": [inputs["email"]]}, context))),
         "validate_emails": QueryTool(
-            "Validate user-supplied active emails in the authenticated company.",
+            "Validate emails of active role-4 users in the authenticated company.",
             {"emails": "list[str]"}, {}, _guard(validate_emails)),
+        "find_candidate_by_email": QueryTool(
+            "Find one candidate profile with this email in the authenticated company.",
+            {"email": "str"}, {"profile_id": "int"}, _guard(find_candidate_by_email)),
     }

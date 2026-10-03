@@ -149,7 +149,29 @@ def _jeni_db(query_tools, context) -> Toolset:
     )
 
 
-def toolset(name: str, *, query_tools=None, context=None) -> Toolset:
+def _without_tools(toolset: Toolset, disabled: tuple[str, ...] | list[str]) -> Toolset:
+    """Development-only filter that keeps the exposed tool list and its metadata aligned."""
+    disabled_names = frozenset(disabled)
+    if not disabled_names:
+        return toolset
+
+    exposed = {tool.name for tool in toolset.tools()}
+    unknown = disabled_names - exposed
+    if unknown:
+        raise ValueError(f"cannot disable tool(s) not exposed by {toolset.name}: {sorted(unknown)}")
+
+    return Toolset(
+        toolset.name,
+        lambda: [tool for tool in toolset.tools() if tool.name not in disabled_names],
+        toolset.names - disabled_names,
+        toolset.read_only - disabled_names,
+        toolset.user_only - disabled_names,
+        toolset.prompt,
+    )
+
+
+def toolset(name: str, *, query_tools=None, context=None,
+            disabled_tools: tuple[str, ...] | list[str] = ()) -> Toolset:
     """VIRA (the sample endpoints), Jeni's own tasks, or jeni+db combined.
 
     jeni / jeni_db read the internal catalog (config/README.md) on first use.
@@ -158,22 +180,25 @@ def toolset(name: str, *, query_tools=None, context=None) -> Toolset:
     supplied by the runner's main() -- never by the model.
     """
     if name == "vira":
-        return VIRA
-    if name == "jeni":
-        return _jeni()
-    if name in ("db", "jeni_db"):
+        base = VIRA
+    elif name == "jeni":
+        base = _jeni()
+    elif name in ("db", "jeni_db"):
         if query_tools is None or context is None:
             raise SystemExit(f"toolset {name!r} needs a db pool/context; the runner must "
                              f"pass query_tools and context (see run_langgraph.py).")
-        return _db(query_tools, context) if name == "db" else _jeni_db(query_tools, context)
-    raise ValueError(f"unknown toolset {name!r}")
+        base = _db(query_tools, context) if name == "db" else _jeni_db(query_tools, context)
+    else:
+        raise ValueError(f"unknown toolset {name!r}")
+    return _without_tools(base, disabled_tools)
 
 
 def cli_toolset(args: argparse.Namespace, *, query_tools=None, context=None) -> Toolset:
     """toolset(args.tools) for a runner's main(): a missing catalog is a message, not a traceback."""
     try:
         return toolset(getattr(args, "tools", "vira"),
-                       query_tools=query_tools, context=context)
+                       query_tools=query_tools, context=context,
+                       disabled_tools=getattr(args, "disable_tool", ()))
     except jeni_tools.CatalogMissing as exc:
         raise SystemExit(str(exc)) from None
 
@@ -379,14 +404,17 @@ class ToolCallGuard(AgentMiddleware):
 
 
 def middleware(step_limit: int = 12, ledger: CallLedger | None = None,
-               toolset: Toolset = VIRA) -> list:
-    """Guard + a cap on model calls per run.
+               toolset: Toolset = VIRA, execution_validation: AgentMiddleware | None = None) -> list:
+    """Execution validation, guard, and a cap on model calls per run.
 
     A run is one user turn, or one resume after an approval, so a person starts each one.
     A per-thread cap would end a conversation after `step_limit` calls in total.  Pass one
-    shared ledger to an agent and all its subagents.
+    shared ledger to an agent and all its subagents.  ``execution_validation`` is the
+    post-approval entity DB validator for Jeni; it must run before ToolCallGuard so a
+    reviewer-edited payload is checked before grounding/provenance and VIRA execution.
     """
-    return [ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only,
+    checks = [execution_validation] if execution_validation is not None else []
+    return [*checks, ToolCallGuard(names=toolset.names, ledger=ledger, user_only=toolset.user_only,
                           read_only=toolset.read_only),
             ModelCallLimitMiddleware(run_limit=step_limit, exit_behavior="end")]
 
@@ -517,10 +545,10 @@ def _ask_args() -> dict:
 
 
 def ask_human(request: dict) -> list[dict]:
-    """Terminal fallback: approve or reject each pending tool call.
+    """Terminal approval fallback: approve, reject, or explicitly replace arguments.
 
-    The demo UI owns parameter editing. This runner does not use a second confirmation
-    model or interpret free-text changes in the terminal.
+    Edits use the same HITL ``edited_action`` decision as the demo UI.  The terminal accepts
+    a complete JSON object only; it intentionally does not interpret free-text changes.
     """
     decisions = []
     for action in request["action_requests"]:
@@ -528,14 +556,19 @@ def ask_human(request: dict) -> list[dict]:
         print(printable(f"\n[approval] {base['name']}"
                         f"({json.dumps(base['args'], ensure_ascii=False)})"))
         while True:
-            low = input("approve? [Enter/y]es  [n]o > ").strip().lower()
+            low = input("approve? [Enter/y]es  [e]dit JSON  [n]o > ").strip().lower()
             if low in {"", "y", "yes"}:
                 decisions.append({"type": "approve"})
+                break
+            if low in {"e", "edit"}:
+                args = _ask_args()
+                decisions.append({"type": "edit",
+                                  "edited_action": {"name": base["name"], "args": args}})
                 break
             if low in {"n", "no"}:
                 decisions.append({"type": "reject", "message": "The user declined this call."})
                 break
-            print("  enter y to approve or n to reject. Parameter edits are available in the demo UI.")
+            print("  enter y to approve, e to replace all arguments as JSON, or n to reject.")
     return decisions
 
 
@@ -597,6 +630,8 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
     p.add_argument("--tools", choices=toolsets, default=default_tools,
                    help="; ".join(f"{name}{' (default)' if name == default_tools else ''}: "
                                   f"{TOOLS_HELP[name]}" for name in toolsets))
+    p.add_argument("--disable-tool", action="append", default=[], metavar="TOOL",
+                   help="development only: omit one exposed tool; repeat for more than one")
     if "jeni_db" in toolsets:
         p.add_argument("--dsn", default=os.environ.get("TRON_POSTGRES_DSN"),
                        help="Postgres DSN for jeni_db in --mode real (default: "

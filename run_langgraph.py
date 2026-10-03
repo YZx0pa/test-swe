@@ -28,19 +28,30 @@ ASYNC_TOOLSETS = {"db", "jeni_db"}
 
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
                 toolset: agent_kit.Toolset = agent_kit.VIRA, gate_writes: bool = False,
-                own_checkpointer: bool = True):
+                own_checkpointer: bool = True, query_tools=None, context=None):
     """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
     demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
     refuses a graph that brings its own checkpointer."""
     gated = agent_kit.interrupt_on(approve_all, mode="real" if gate_writes else None,
                                    toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
+    import entities_db_validation
+    entity_pre, entity_execute = entities_db_validation.stages(
+        query_tools, context,
+        action_names=toolset.names,
+        read_only=toolset.read_only,
+        pre_approval_names=gated,
+    )
     return create_agent(
         model or agent_kit.build_chat_model(),
         toolset.tools(),
         system_prompt=toolset.prompt,
-        # HITL first = outermost, so the guard sees a reviewer's edited args
-        middleware=[*approval, *agent_kit.middleware(step_limit, toolset=toolset)],
+        # Pre-card validation is outermost; execution validation is inside HITL so it
+        # sees reviewer-edited arguments, then ToolCallGuard performs provenance checks.
+        middleware=[*entity_pre, *approval,
+                    *agent_kit.middleware(step_limit, toolset=toolset,
+                                          execution_validation=(entity_execute[0]
+                                                                if entity_execute else None))],
         # needed to pause at an interrupt and resume
         checkpointer=InMemorySaver() if own_checkpointer else None,
         name="vira-langgraph",
@@ -98,7 +109,7 @@ async def amain(args):
     try:
         toolset = agent_kit.cli_toolset(args, query_tools=query_tools, context=context)
         agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
-                            toolset=toolset)
+                            toolset=toolset, query_tools=query_tools, context=context)
         await agent_kit.arepl("LangGraph", agent, args, toolset)
     finally:
         if pool is not None:

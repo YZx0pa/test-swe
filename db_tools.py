@@ -40,15 +40,13 @@ import recruiter_cli
 # describes, mirroring jeni_tools.RULES.
 RULES = """
 Database lookup rules:
-- If the user names a job or person by title/name instead of a numeric id, call
-  find_job_by_title or find_user FIRST to get the id, then use it. Do not ask the user
-  for an id you can look up.
-- Before any action that changes data, validate every user-supplied id or email with the
-  matching validate_* tool (validate_job_id(s), validate_app_ids, validate_email(s)).
-  Proceed only when the status is "resolved". Ids a tool returned are valid already, and so
-  are a colleague's <email:...> token and "me".
-- "The applicants" of a job means all of them: get their ids with list_job_applications.
-  Ask which ones only if the user said "some" without saying which.
+- If the user names a job by title instead of a numeric id, call find_job_by_title FIRST
+  to get the id, then use it. Do not ask the user for an id you can look up.  For people,
+  use Jeni's search_users tool.
+- Entity existence, tenant scope and eligible-recipient checks run automatically before a
+  Jeni write tool executes. Do not call a separate validation tool.
+- "The applicants" of a job means all of them: use Jeni's get_applications tool to get
+  their ids. Ask which ones only if the user said "some" without saying which.
 - On status "ambiguous", list every candidate by its label, which has the name and the id
   (e.g. "Senior Backend Engineer (job 7001, opened 2026-08-21)"), so the user can compare
   them, and ask which one; they may answer with the name, a detail or the id. Never choose
@@ -58,17 +56,28 @@ Database lookup rules:
   tool argument.
 """
 
-# All db_queries tools are reads; none change data.
+# All db_queries tools are reads; none change data.  This is the complete registry,
+# including queries retained for deterministic middleware (not necessarily LLM tools).
 READ_ONLY = frozenset({
-    "find_job_by_title", "find_user", "list_job_applications",
+    "find_job_by_title", "get_job_detail", "find_user", "list_job_applications",
     "validate_job_id", "validate_job_ids", "validate_app_ids",
-    "validate_email", "validate_emails",
+    "validate_user_ids", "validate_email", "validate_emails",
+    "find_candidate_by_email",
 })
 
-# Identifiers that must come from the USER, so ToolCallGuard refuses a value the user
-# didn't write (consistent with jeni_tools.USER_ONLY: emails are user-supplied).
-USER_ONLY = frozenset({"email", "emails"})
-# Lookups in the company's user directory: emails in their results are colleagues'.
+# Tools exposed in the jeni_db LLM toolset.  Jeni's VIRA read tasks already cover
+# job/application/user information; entity validation is middleware-only.  The sole
+# direct DB discovery tool left to the LLM is title -> job-id resolution.
+LLM_TOOL_NAMES = frozenset({"find_job_by_title",
+                            "list_job_applications"
+                                        
+                            
+                            })
+
+# Entity validation runs internally, so this adapter currently exposes no DB user-only
+# argument.  Jeni's own USER_ONLY set still protects action emails and candidate details.
+USER_ONLY = frozenset()
+# Kept for the adapter's masking logic if a directory lookup is exposed again later.
 DIRECTORY_TOOLS = frozenset({"find_user", "validate_email", "validate_emails"})
 
 # db_queries declares inputs as these type strings; map them to Python types for the schema.
@@ -118,7 +127,7 @@ def langchain_tools(query_tools: Mapping[str, Any], context: Mapping[str, Any]) 
 
     tools = []
     for name, qt in query_tools.items():
-        if name not in READ_ONLY:
+        if name not in LLM_TOOL_NAMES:
             continue
         description, inputs, handler = _qt_parts(qt)
 
@@ -144,4 +153,5 @@ def langchain_tools(query_tools: Mapping[str, Any], context: Mapping[str, Any]) 
 
 
 def names(query_tools: Mapping[str, Any]) -> frozenset:
-    return frozenset(n for n in query_tools if n in READ_ONLY)
+    """Names exposed to the LLM, not every query registered for middleware use."""
+    return frozenset(n for n in query_tools if n in LLM_TOOL_NAMES)
