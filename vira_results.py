@@ -107,6 +107,8 @@ async def _poll_db(group_uuid: str, timeout: float, connect: Callable | None = N
 def result_url(group_uuid: str) -> str:
     return os.environ.get("VIRA_RESULT_LOCATION", "").strip().replace("{uuid}", group_uuid)
 
+def result_trigger_url(group_uuid: str) -> str:
+    return os.environ.get("VIRA_result_trigger", "").strip().replace("{uuid}", group_uuid)
 
 def api_problem(group_uuid: str = "00000000-0000-0000-0000-000000000000") -> str | None:
     """Why the info call must not be made, or None.  The xrtoken goes only to the engine's host."""
@@ -144,9 +146,9 @@ def _poll_api(group_uuid: str, timeout: float, session_factory: Callable | None 
                     body = None
                 if isinstance(body, dict) and isinstance(body.get("tasks"), list):
                     group = {"status": "ok", "http_status": 200, "result": body}
-            if time.monotonic() >= deadline-2:
-                session.post(result_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
-                               timeout=20, allow_redirects=False)                  ### For demo only ###
+            # if time.monotonic() >= deadline-5:
+            #     session.post(result_trigger_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
+            #                    timeout=20, allow_redirects=False)                  ### For demo only ###
     
             if finished(group) or time.monotonic() >= deadline:
                 return group            
