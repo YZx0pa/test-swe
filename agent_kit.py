@@ -516,189 +516,27 @@ def _ask_args() -> dict:
         print('expected a JSON object, e.g. {"job_ids": [124]}')
 
 
-_INTERPRET_PROMPT = (
-    "Interpret the user's latest reply about a pending action. Return ONLY one JSON object, "
-    "one of these shapes:\n"
-    '  {"decision":"approve"}\n'
-    '  {"decision":"reject"}\n'
-    '  {"decision":"update","args":{...}}\n'
-    '  {"decision":"clarify","message":"..."}\n'
-    "Context you are given: `action`, `original_args` (the ONLY allowed values), "
-    "`current_args` (the proposed selection so far), and `latest_user_reply`.\n"
-    "Rules:\n"
-    "- approve: accept current_args unchanged (e.g. 'yes', 'looks good'). If nothing changes, approve.\n"
-    "- reject: cancel the action (e.g. 'no', 'cancel').\n"
-    "- update: return the COMPLETE replacement args (same arg names).\n"
-    "- clarify: ask only if the instruction is unclear, or names a value not in original_args.\n"
-    "- List values are ORDERED SETS: never repeat a value.\n"
-    "- 'add <ids>' adds values not already selected; 'remove/drop/except <ids>' removes values.\n"
-    "- 'only/keep/select/first N/last N/top N' REPLACES the list (first/last/top use "
-    "original_args order).\n"
-    "- Every value must come from original_args; never invent one.\n"
-    "- Do NOT perform the action. The script handles confirmation and execution.")
+def ask_human(request: dict) -> list[dict]:
+    """Terminal fallback: approve or reject each pending tool call.
 
-
-def _confirm_payload(action: dict, original_args: dict, current_args: dict, reply: str) -> str:
-    """The user-message payload for the confirm model: action, allowed set, current, reply."""
-    return json.dumps({"action": action, "original_args": original_args,
-                       "current_args": current_args, "latest_user_reply": reply},
-                      ensure_ascii=False)
-
-
-CONFIRM_USAGE = None        # UsageCounter for the CURRENT confirmation (set per [approval])
-CONFIRM_TURN = None         # UsageCounter summing all confirmations in the whole turn
-
-
-def _interpret(history: list, model) -> dict | None:
-    """Send the confirmation conversation to the model; return its decision dict or None.
-
-    `history` is the running message list for THIS confirmation only (system prompt, the
-    original call, and each instruction/result since) -- so the model has the original ids
-    and the changes so far in context, and validates against them itself (no code guard).
-
-    On failure prints a short reason (set JENI_DEBUG=0 to silence) and returns None."""
-    if model is None:
-        if os.environ.get("JENI_DEBUG", "1") != "0":
-            print("  [interpret] no confirmation model (build failed or CHAT_MODEL unset)")
-        return None
-    cfg = {"callbacks": [CONFIRM_USAGE]} if CONFIRM_USAGE is not None else {}
-    try:
-        reply = model.invoke(history, config=cfg)
-        # LangChain chat reply -> text. .text is a property; fall back to .content.
-        raw = getattr(reply, "text", "") or ""
-        if not raw:
-            content = getattr(reply, "content", reply)
-            if isinstance(content, list):      # content parts -> join the text pieces
-                content = "".join(p.get("text", "") if isinstance(p, dict) else str(p)
-                                  for p in content)
-            raw = str(content)
-        raw = raw.strip()
-        brace = raw[raw.find("{"): raw.rfind("}") + 1] if "{" in raw else ""
-        out = json.loads(brace) if brace else None
-        if isinstance(out, dict) and "decision" in out:
-            return out
-        if os.environ.get("JENI_DEBUG", "1") != "0":
-            print(f"  [interpret] reply had no usable decision; got: {raw[:200]!r}")
-        return None
-    except Exception as exc:
-        if os.environ.get("JENI_DEBUG", "1") != "0":
-            print(f"  [interpret] {type(exc).__name__}: {exc}")
-        return None
-
-
-def ask_human(request: dict, model=None) -> list[dict]:
-    """One decision per pending tool call: approve, reject, or edit its args.
-
-    Fast paths (no model): press Enter or 'y' to approve, 'n' to reject.  Any other text is
-    a free-text instruction sent -- with this confirmation's history -- to the interpreter
-    model, which applies it to the current proposal (add/remove/select) or asks back if a
-    value isn't in the original call.  Each change is shown; nothing runs until Enter/y.
+    The demo UI owns parameter editing. This runner does not use a second confirmation
+    model or interpret free-text changes in the terminal.
     """
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-    global CONFIRM_USAGE, CONFIRM_TURN
-    model = model or confirm_chat_model()
     decisions = []
     for action in request["action_requests"]:
         base = {"name": action["name"], "args": action.get("args", {})}
-        proposal = dict(base["args"])
-        # history for THIS confirmation only: system rules + the original call
-        history = [SystemMessage(_INTERPRET_PROMPT)]   # per-turn payloads carry the args + reply
-        conf = UsageCounter()          # tokens/calls for THIS confirmation
-        CONFIRM_USAGE = conf           # _interpret counts into the current confirmation
-        calls = 0                      # interpreter calls so far, this confirmation (cap 5)
-        MAX_CALLS = 5
         print(printable(f"\n[approval] {base['name']}"
-                        f"({json.dumps(proposal, ensure_ascii=False)})"))
+                        f"({json.dumps(base['args'], ensure_ascii=False)})"))
         while True:
-            answer = input("approve? [Enter/y]es  [n]o  or say what to change > ").strip()
-            low = answer.lower()
+            low = input("approve? [Enter/y]es  [n]o > ").strip().lower()
             if low in {"", "y", "yes"}:
-                decisions.append({"type": "approve"} if proposal == base["args"] else
-                                 {"type": "edit",
-                                  "edited_action": {"name": base["name"], "args": proposal}})
+                decisions.append({"type": "approve"})
                 break
             if low in {"n", "no"}:
                 decisions.append({"type": "reject", "message": "The user declined this call."})
                 break
-            if calls >= MAX_CALLS:     # cap reached without a yes/no -> bail to the main agent
-                print(f"  reached {MAX_CALLS} attempts without a decision; abandoning this call.")
-                decisions.append({"type": "reject",
-                                  "message": f"Approval abandoned: the change could not be "
-                                             f"confirmed after {MAX_CALLS} attempts."})
-                break
-            # free text -> interpreter, with the running history as context
-            history.append(HumanMessage(_confirm_payload(
-                base["name"], base["args"], proposal, answer)))
-            out = _interpret(history, model)
-            calls += 1
-            if out is None:
-                print("  (couldn't reach the interpreter) -- press Enter to run, 'n' to reject.")
-                history.pop()
-                continue
-            history.append(AIMessage(json.dumps(out, ensure_ascii=False)))
-            decision = out.get("decision")
-            if decision == "reject":
-                decisions.append({"type": "reject", "message": "The user declined this call."})
-                break
-            if decision == "approve":
-                decisions.append({"type": "approve"} if proposal == base["args"] else
-                                 {"type": "edit",
-                                  "edited_action": {"name": base["name"], "args": proposal}})
-                break
-            if decision == "clarify":                   # the model needs the user to clarify
-                print(printable(f"  {out.get('message', 'please clarify')}"))
-                continue
-            if decision == "update" and isinstance(out.get("args"), dict):
-                # safety net: drop duplicates (order-preserving) and any value not in the
-                # ORIGINAL call -- the model should already do this, but guarantee it.
-                cleaned = {}
-                for k, v in out["args"].items():
-                    if isinstance(v, list):
-                        orig = base["args"].get(k)
-                        allowed = list(orig) if isinstance(orig, list) else None
-                        seen, out_list = set(), []
-                        for x in v:
-                            if x in seen:
-                                continue
-                            if allowed is not None and x not in allowed:
-                                continue          # not offered in the original call -> drop
-                            seen.add(x)
-                            out_list.append(x)
-                        cleaned[k] = out_list
-                    else:
-                        cleaned[k] = v
-                proposal = cleaned
-                print(printable(f"  updated -> {base['name']}"
-                                f"({json.dumps(proposal, ensure_ascii=False)})"))
-                print("  press Enter to run this, 'n' to reject, or say another change.")
-                continue
-            print("  couldn't apply that -- press Enter to run, 'n' to reject, or rephrase.")
-        if conf.calls:                 # per-confirmation usage line, when this [approval] closes
-            print(f"  (confirmation {_confirm_model_id()}: {conf.calls} call(s), "
-                  f"tokens in/out: {conf.input_tokens}/{conf.output_tokens})")
-            if CONFIRM_TURN is not None:          # add into the whole-turn total
-                CONFIRM_TURN.calls += conf.calls
-                CONFIRM_TURN.input_tokens += conf.input_tokens
-                CONFIRM_TURN.output_tokens += conf.output_tokens
+            print("  enter y to approve or n to reject. Parameter edits are available in the demo UI.")
     return decisions
-
-
-CONFIRM_MODEL = os.environ.get("CONFIRM_MODEL", "gpt-4o-mini")  # small model for confirmations
-
-
-@functools.lru_cache(maxsize=1)
-def confirm_chat_model():
-    """The dedicated chat model for interrupt confirmations (no tools). Small/cheap by
-    default (CONFIRM_MODEL, e.g. gpt-5-mini or gpt-4o-mini), separate from the agent model."""
-    try:
-        return build_chat_model(CONFIRM_MODEL)
-    except Exception:
-        return None
-
-
-def _confirm_model_id() -> str:
-    """The confirmation model's id, for the usage line."""
-    return CONFIRM_MODEL
 
 
 def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_human,
@@ -753,7 +591,7 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
            default_tools: str = "jeni_db") -> argparse.ArgumentParser:
     """The runners' shared flags.  A runner without async tools passes toolsets without jeni_db."""
     p = argparse.ArgumentParser(description=description)
-    p.add_argument("--mode", choices=["real", "mock"], default="mock",
+    p.add_argument("--mode", choices=["real", "mock"], default="real",
                    help="mock (default): local fake VIRA; real: call VIRA at $VIRA_BASE_URL")
     p.add_argument("--task", help="run this one task and exit (default: interactive prompt)")
     p.add_argument("--tools", choices=toolsets, default=default_tools,
@@ -808,9 +646,6 @@ def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
         after(result)
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
           f"{counter.input_tokens}/{counter.output_tokens})")
-    if CONFIRM_TURN is not None and CONFIRM_TURN.calls:
-        print(f"(confirmation model {_confirm_model_id()} total: {CONFIRM_TURN.calls} call(s), "
-              f"tokens in/out: {CONFIRM_TURN.input_tokens}/{CONFIRM_TURN.output_tokens})")
     if trace is not None:
         trace["runs"].append(_trace_run(label, task, result, counter, time.monotonic() - t0,
                                         tools))
@@ -824,9 +659,6 @@ def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
 def run_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                  trace: dict | None = None, label: str = "",
                  tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
-    global CONFIRM_USAGE, CONFIRM_TURN
-    CONFIRM_USAGE = UsageCounter()        # current confirmation (reset again per [approval])
-    CONFIRM_TURN = UsageCounter()         # fresh per turn; sums all confirmations this turn
     counter = UsageCounter()
     t0 = time.monotonic()
     result = run_task(agent, task, callbacks=[counter], thread_id=thread_id)
@@ -858,9 +690,6 @@ async def arun_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = 
 async def arun_and_show(agent, task: str, after: Callable[[dict], None] | None = None,
                         trace: dict | None = None, label: str = "",
                         tools=grounding.VIRA_TOOLS, thread_id: str | None = None) -> dict:
-    global CONFIRM_USAGE, CONFIRM_TURN
-    CONFIRM_USAGE = UsageCounter()        # current confirmation (reset again per [approval])
-    CONFIRM_TURN = UsageCounter()         # fresh per turn; sums all confirmations this turn
     counter = UsageCounter()
     t0 = time.monotonic()
     result = await arun_task(agent, task, callbacks=[counter], thread_id=thread_id)
