@@ -133,6 +133,7 @@ def _poll_api(group_uuid: str, timeout: float, session_factory: Callable | None 
         import requests
         session_factory = requests.Session
     deadline, group = time.monotonic() + timeout, None
+    cutqueque_post = os.environ.get("cutqueque", False)
     with session_factory() as session:
         session.trust_env = False                 # no proxies or .netrc, as for every VIRA call
         session.verify = vira.VIRA_CA_BUNDLE or True
@@ -146,9 +147,11 @@ def _poll_api(group_uuid: str, timeout: float, session_factory: Callable | None 
                     body = None
                 if isinstance(body, dict) and isinstance(body.get("tasks"), list):
                     group = {"status": "ok", "http_status": 200, "result": body}
-            # if time.monotonic() >= deadline-5:
-            #     session.post(result_trigger_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
-            #                    timeout=20, allow_redirects=False)                  ### For demo only ###
+            if time.monotonic() >= deadline-10:
+                if cutqueque_post:
+                    session.post(result_trigger_url(group_uuid), headers={"xrtoken": vira.VIRA_XRTOKEN},
+                                timeout=20, allow_redirects=False)                
+                    cutqueque_post = False
     
             if finished(group) or time.monotonic() >= deadline:
                 return group            
