@@ -105,36 +105,125 @@ def _action_result(text: str) -> dict:
             "group_status": group_status or None, "failure_reason": reason}
 
 
-def _resolver_result(text: str) -> dict:
-    """Compact, structural result of a read-only resolver call."""
-    data = _tool_json(text)
+_OUTPUT_FIELD_ALIASES = {
+    "jobid": "job_id", "appid": "app_id", "profileid": "profile_id",
+    "userid": "user_id", "companyid": "company_id", "candidateid": "candidate_id",
+    "jobids": "job_ids", "appids": "app_ids", "profileids": "profile_ids",
+    "userids": "user_ids", "candidateids": "candidate_ids",
+}
+_COMPACT_OUTPUT_FIELDS = frozenset({
+    "job_id", "app_id", "profile_id", "user_id", "company_id", "candidate_id",
+    "job_ids", "app_ids", "profile_ids", "user_ids", "candidate_ids",
+    "job_status", "app_status", "is_private",
+})
+
+
+def _canonical_output_field(key: str) -> str:
+    """Convert VIRA camelCase identifiers to the names used by Jeni tools."""
+    compact = re.sub(r"[^a-z0-9]", "", key.lower())
+    if compact in _OUTPUT_FIELD_ALIASES:
+        return _OUTPUT_FIELD_ALIASES[compact]
+    return re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", key).lower()
+
+
+def _normalise_output_value(field: str, value):
+    if field.endswith("_id") and isinstance(value, str) and value.isdigit():
+        return int(value)
+    if field.endswith("_ids") and isinstance(value, list):
+        return [int(item) if isinstance(item, str) and item.isdigit() else item for item in value]
+    return value
+
+
+def _unwrap_resolver_result(data: dict) -> tuple[dict, bool]:
+    """Unwrap direct resolvers and VIRA's one-task group response consistently."""
     result = data.get("result", data)
     if not isinstance(result, dict):
-        return {}
+        return {}, False
     while isinstance(result.get("result"), dict):
         result = result["result"]
+    subtasks = result.get("subtasks")
+    if not isinstance(subtasks, list):
+        return result, False
+    outputs = [sub.get("result") for sub in subtasks if isinstance(sub, dict)
+               and str(sub.get("status", "")).lower() == "completed"
+               and isinstance(sub.get("result"), dict)]
+    return (outputs[0], True) if len(outputs) == 1 else (result, bool(outputs))
 
-    values = dict(result.get("resolved_fields") or {})
+
+def _returned_compact_values(result: dict, input_args: dict) -> dict:
+    """Keep declared-safe identifiers/statuses from a resolver's returned payload only."""
+    values = {}
+
+    def add(key: str, value) -> None:
+        field = _canonical_output_field(key)
+        if field not in _COMPACT_OUTPUT_FIELDS or value in (None, "", []):
+            return
+        value = _normalise_output_value(field, value)
+        # Query inputs are already visible in ``Resolve: tool(args)``.  Retain
+        # only information fetched from the response, not a duplicated input.
+        if field in input_args and input_args[field] == value:
+            return
+        values.setdefault(field, value)
+
+    def visit(value, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if isinstance(key, str):
+                    add(key, nested)
+                visit(nested, depth + 1)
+        elif isinstance(value, list):
+            for nested in value[:30]:
+                visit(nested, depth + 1)
+
+    for key, value in (result.get("resolved_fields") or {}).items():
+        if isinstance(key, str):
+            add(key, value)
+    visit(result)
+    return values
+
+
+def _resolver_result(text: str, input_args: dict | None = None) -> dict:
+    """Compact, structural result of a read-only resolver call.
+
+    Supports direct resolver payloads and VIRA task-group envelopes while only
+    retaining recognised, non-PII outputs fetched by the resolver.
+    """
+    data = _tool_json(text)
+    result, from_task_group = _unwrap_resolver_result(data)
+    if not result:
+        return {}
+    input_args = input_args or {}
+
+    values = _returned_compact_values(result, input_args)
     for key, value in result.items():
         if key not in {"status", "message", "resolved_fields", "selection", "candidates",
                        "invalid_values", "valid_values", "applications", "result"} and (
                        key.endswith("_id") or key.endswith("_ids")):
-            values[key] = value
+            if key not in input_args or input_args[key] != value:
+                values[key] = value
     selection = result.get("selection")
     if isinstance(selection, dict) and isinstance(selection.get("candidates"), list):
         ids = [row[key] for row in selection["candidates"] if isinstance(row, dict)
                for key in row if key.endswith("_id") and isinstance(row[key], int)]
-        if ids:
-            values[selection.get("target_field", "candidate_ids")] = ids
+        target = selection.get("target_field", "candidate_ids")
+        if isinstance(target, str):
+            # An empty candidate list is useful evidence too: it prevents the
+            # next task from re-running the same lookup without new criteria.
+            values[target] = ids
     for key in ("applications", "valid_values"):
         value = result.get(key)
-        if isinstance(value, list) and value and all(isinstance(item, int) for item in value):
+        if isinstance(value, list) and all(isinstance(item, int) for item in value):
             values.setdefault("app_ids" if key == "applications" else key, value)
     if result.get("status") == "ambiguous" and isinstance(result.get("candidates"), list):
         candidates = [row for row in result["candidates"][:10] if isinstance(row, dict)]
         if candidates:
             values["candidates"] = candidates
-    return {"status": result.get("status"), "values": values}
+    status = result.get("status") or ("resolved" if from_task_group
+                                        and str(data.get("request_status", "")).lower() == "ok"
+                                        else None)
+    return {"status": status, "values": values}
 
 
 def _input_origins(args: dict, prior_messages: list) -> dict:
@@ -147,7 +236,7 @@ def _input_origins(args: dict, prior_messages: list) -> dict:
         if "task" in found:
             origins[field] = "user-provided"
         elif found:
-            origins[field] = "looked up"
+            origins[field] = "tool-response"
     return origins
 
 
@@ -181,15 +270,21 @@ def extract_record(messages, read_only: frozenset) -> dict:
             if call["name"] in read_only:
                 events.append({"kind": "resolve", "tool": call["name"], "args": args,
                                "input_origins": _input_origins(args, messages[:index]),
-                               "result": _resolver_result(result.text) if result else {}})
+                               "result": _resolver_result(result.text, args) if result else {}})
                 continue
             executed = _executed_args(result.text) if result else None
+            input_origins = _input_origins(args, messages[:index])
             if executed is not None:
                 args = executed
+                # The reviewer supplied the effective payload.  Preserve that
+                # fact for both the selection and the resulting action.
+                input_origins = {field: "reviewer-selected" for field in args}
                 events.append({"kind": "selection", "tool": call["name"], "args": args,
+                               "input_origins": input_origins,
                                "from": "reviewer-selected"})
             actions.append({"tool": call["name"], "args": args})
             events.append({"kind": "action", "tool": call["name"], "args": args,
+                           "input_origins": input_origins,
                            "result": _action_result(result.text) if result else {"status": "unknown"}})
 
     # ``resolved`` is retained for compatibility with existing trace callers.
@@ -202,7 +297,7 @@ def extract_record(messages, read_only: frozenset) -> dict:
                     continue
                 seen.add(key)
                 origin = "user" if "task" in entry["sources"] else (
-                    "system (looked up)" if entry["sources"] else "unknown")
+                    "tool-response" if entry["sources"] else "unknown")
                 resolved.append({"field": field, "value": entry["value"], "from": origin})
     return {"instruction": instruction, "events": events, "resolved": resolved,
             "actions": actions, "outcome": last_ai_text(messages)}
@@ -214,7 +309,12 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
     now = time.time()
     kept = [record for index, record in enumerate(records)
             if now - record.get("ts", 0) <= max_age_sec or index >= len(records) - keep_last]
-    kept = [record for record in kept[-hard_cap:] if record.get("actions")]
+    # A completed read-only lookup can be decisive (for example, "0
+    # applications for job 674347").  Keep it for the next task even though
+    # no write action ran; records with neither actions nor resolver events
+    # contain no useful state and remain excluded.
+    kept = [record for record in kept[-hard_cap:]
+            if record.get("actions") or record.get("events")]
     if not kept:
         return ""
 
@@ -241,7 +341,9 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
                                    for key, value in (result.get("values") or {}).items())
                 text = f"Resolve: {call} -> {output or result.get('status', 'no result')}"
             elif event["kind"] == "selection":
-                text = f"Selection: {call} ({event.get('from', 'user-selected')})"
+                text = f"Selection: {call}"
+                if not event.get("input_origins"):
+                    text += f" ({event.get('from', 'user-selected')})"
             else:
                 result = event.get("result") or {}
                 suffix = f" -> status={result.get('status', 'unknown')}"
