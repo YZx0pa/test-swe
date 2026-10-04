@@ -13,3 +13,27 @@ export function getContentString(content: Message["content"]): string {
     .map((c) => c.text);
   return texts.join(" ");
 }
+
+/**
+ * Terminal agent responses are stored as JSON in an AI message.  Show their
+ * user-facing message in chat, while retaining the structured status in state.
+ */
+export function getAssistantDisplayContent(content: Message["content"]): string {
+  const text = getContentString(content);
+  try {
+    const value: unknown = JSON.parse(text);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "message" in value &&
+      typeof value.message === "string" &&
+      "status" in value &&
+      (value.status === "done" || value.status === "needs_user")
+    ) {
+      return value.message;
+    }
+  } catch {
+    // Regular assistant text is not JSON.
+  }
+  return text;
+}

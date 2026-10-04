@@ -13,7 +13,6 @@ mode is fixed to mock before any tool exists, so nothing here reaches VIRA or a 
 database.
 """
 import asyncio
-import dataclasses
 
 import agent_kit
 import mock_jeni
@@ -27,45 +26,14 @@ USER_EMAIL = "sam.lee@example.com"   # the signed-in user, for "me": Sam Lee (80
 # False: only ALWAYS_CONFIRM tools ask.  True: every write asks, as in real mode.
 GATE_WRITES = False
 
-# A chat window shows the reply as written; the SUMMARY: a | b | c format is for grading.
-SUMMARY_RULE = """\
-- When you are done, reply in plain text without calling a tool. If the task is only
-  partially done or cannot be fully completed, start that reply with
-  SUMMARY: <what succeeded> | <what failed or is missing> | <why>
-"""
-CHAT_RULE = """\
-- When you are done, reply without calling a tool, briefly, for a chat window: the outcome
-  first, in a sentence or two, and a short markdown list only for several items. Don't recount
-  the tools you called. If the task is only partially done or cannot be fully completed, say
-  what succeeded, what failed or is missing, and why.
-"""
-# The terminal REPL reads a STATUS line to remember finished tasks (agent_kit.read_status); the
-# server never does, and in a chat window it shows as a stray "STATUS: done".
-STATUS_RULE = """\
-- End EVERY reply that has no tool call with a status line as its LAST line, one of:
-    STATUS: done                 - the task is finished (succeeded or cannot proceed)
-    STATUS: needs_user: <what>   - you must get something from the user to continue
-  Use needs_user only when you are genuinely blocked on the user (e.g. a value no tool
-  can supply). Otherwise, if more tool calls are needed, make them instead of replying.
-"""
-NO_STATUS_RULE = """\
-- If more tool calls are needed, make them instead of replying.
-"""
-CHAT_REPLACEMENTS = ((SUMMARY_RULE, CHAT_RULE), (STATUS_RULE, NO_STATUS_RULE))
-
-
 def demo_toolset(state: mock_jeni.State, query_tools=None) -> agent_kit.Toolset:
-    """jeni_db on the kept mock State, with the closing rules written for a chat window."""
+    """jeni_db on the kept mock State."""
     query_tools = query_tools or fake_db_queries(state.db_fixtures(COMPANY_ID))
-    toolset = agent_kit.toolset("jeni_db", query_tools=query_tools,
-                                context={"auth_profile": {"company_id": COMPANY_ID}})
-    prompt = toolset.prompt
-    for rule, replacement in CHAT_REPLACEMENTS:
-        if rule not in prompt:
-            raise RuntimeError("a closing rule of agent_kit.SYSTEM_PROMPT changed: update "
-                               "CHAT_REPLACEMENTS in demo/jeni_graph.py to match")
-        prompt = prompt.replace(rule, replacement)
-    return dataclasses.replace(toolset, prompt=prompt)
+    return agent_kit.toolset(
+        "jeni_db",
+        query_tools=query_tools,
+        context={"auth_profile": {"company_id": COMPANY_ID}},
+    )
 
 
 def build(model=None, gate_writes: bool = GATE_WRITES):
@@ -79,7 +47,8 @@ def build(model=None, gate_writes: bool = GATE_WRITES):
     query_tools = fake_db_queries(state.db_fixtures(COMPANY_ID))
     return run_langgraph.build_agent(model=model, toolset=demo_toolset(state, query_tools),
                                      gate_writes=gate_writes, own_checkpointer=False,
-                                     query_tools=query_tools, context=context)
+                                     query_tools=query_tools, context=context,
+                                     task_memory=True)
 
 
 _graph = None

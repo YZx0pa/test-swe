@@ -2,7 +2,7 @@ import { parsePartialJson } from "@langchain/core/output_parsers";
 import { useStreamContext } from "@/providers/Stream";
 import { AIMessage, Checkpoint, Message } from "@langchain/langgraph-sdk";
 import { useStream } from "@langchain/langgraph-sdk/react";
-import { getContentString } from "../utils";
+import { getAssistantDisplayContent } from "../utils";
 import { BranchSwitcher, CommandBar } from "./shared";
 import { MarkdownText } from "../markdown-text";
 import { LoadExternalComponent } from "@langchain/langgraph-sdk/react-ui";
@@ -108,7 +108,7 @@ export function AssistantMessage({
   handleRegenerate: (parentCheckpoint: Checkpoint | null | undefined) => void;
 }) {
   const content = message?.content ?? [];
-  const contentString = getContentString(content);
+  const contentString = getAssistantDisplayContent(content);
   // Jeni demo: tool calls and their results are internal workings; they are never shown.
   const hideToolCalls = true;
 
