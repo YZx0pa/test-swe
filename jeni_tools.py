@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Annotated, Any, Dict, Literal
@@ -379,9 +380,15 @@ def description(task: dict) -> str:
 
 
 def session_uuid(thread_id: str | None = None) -> str:
-    """The agent_session_uuid VIRA requires on every task group: one per conversation (thread),
-    as v1 has one per chat; without a thread, one for this process."""
-    return str(uuid.uuid5(SESSION_NS, thread_id)) if thread_id else _PROCESS_SESSION
+    """Return a new VIRA session UUID for every task-group submission.
+
+    The LangGraph ``thread_id`` remains stable for checkpointing and task memory.
+    VIRA's task-group uniqueness is scoped by ``agent_session_uuid``, however,
+    so each execution also incorporates the process session, thread and a
+    timestamp/nonce.  The result remains a valid UUID accepted by VIRA.
+    """
+    seed = f"{_PROCESS_SESSION}:{thread_id or 'no-thread'}:{time.time_ns()}:{uuid.uuid4().hex}"
+    return str(uuid.uuid5(SESSION_NS, seed))
 
 
 def payload(task: dict, args: dict, session: str | None = None) -> dict:
