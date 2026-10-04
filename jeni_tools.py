@@ -27,6 +27,7 @@ Changes to v1's catalog (proposed to engineering, docs/agent-frameworks.md §12)
 import argparse
 import functools
 import json
+import logging
 import os
 import re
 import sys
@@ -42,6 +43,13 @@ import vira_results
 import vira_tools
 
 HERE = Path(__file__).resolve().parent
+STAGE_LOG = logging.getLogger("jeni.stages")
+
+
+def _stage(event: str, **details) -> None:
+    values = " ".join(f"{key}={value}" for key, value in sorted(details.items())
+                      if value is not None)
+    STAGE_LOG.info("%s%s", event, f" {values}" if values else "")
 DEFAULT_CATALOG = HERE / "config" / "jeni_tasks.json"
 # The task-group route: real mode sends it to the VIRA engine at VIRA_ACTUAL_LOCATION with the
 # user's VIRA_XRTOKEN (recruiter_cli._target); mock mode answers it (mock_jeni.py).
@@ -393,9 +401,12 @@ def payload(task: dict, args: dict, session: str | None = None) -> dict:
                                       "description": sub["description"], "fields": fields}]}]}
 
 
-QUEUED = {"status": "queued", "task_status": "queued", "failed_reason": None,
-          "result": {"message": "VIRA accepted the task and runs it in the background; "
-                                "its outcome isn't known yet."}}
+QUEUED = {
+    "request_status": "ok",
+    "group_status": "queued",
+    "subtasks": [],
+    "message": "VIRA accepted the task and runs it in the background; its outcome isn't known yet.",
+}
 
 
 def _queued_uuid(result: Dict) -> str | None:
@@ -420,25 +431,53 @@ def _read_back(command: str, group_uuid: str) -> Dict | None:
     return vira.mask_result(command, group)
 
 
-def project(result: Dict) -> Dict:
-    """What the model sees: the sub-task's status and result, not the whole group.
+def _request_failed(message: str) -> Dict:
+    """A failure before a trustworthy VIRA task result was obtained."""
+    return {"request_status": "failed", "message": message}
 
-    The group also carries uuids, timestamps and the creator's name, none of which the
-    model needs.
+
+def _result_message(result: Dict, default: str) -> str:
+    """Return a safe, concise transport/error message from a VIRA-shaped reply."""
+    message = result.get("message")
+    if not message and isinstance(result.get("result"), dict):
+        message = result["result"].get("message")
+    return str(message or default)
+
+
+def project(result: Dict) -> Dict:
+    """Project VIRA's real execution state for the model.
+
+    ``request_status`` says whether Jeni successfully sent/read the request.  The
+    engine's ``agentTaskGroupStatus`` and every subtask status remain separate, so
+    an HTTP/transport success is never presented as a completed business action.
     """
     if result.get("status") != "ok":
-        return result
+        return _request_failed(_result_message(result, "VIRA request failed"))
     if _queued_uuid(result):
         return QUEUED      # the VIRA engine queued the group and runs it later: nothing is known yet
     try:
-        sub = result["result"]["tasks"][0]["subTasks"][0]
-    except (KeyError, IndexError, TypeError):
-        return {"status": "error", "message": "unexpected VIRA reply (no sub-task result)"}
-    if str(sub.get("agentSubTaskStatus")).lower() in vira_results.UNFINISHED:
+        group = result["result"]
+        group_status = group["agentTaskGroupStatus"]
+        tasks = group["tasks"]
+    except (KeyError, TypeError):
+        return _request_failed("unexpected VIRA reply (no task-group result)")
+
+    subtasks = []
+    for task in tasks:
+        for sub in task.get("subTasks", []):
+            sub_status = sub.get("agentSubTaskStatus")
+            item = {"status": sub_status}
+            if str(sub_status).lower() == "failed" and sub.get("failedReason"):
+                item["failed_reason"] = sub["failedReason"]
+            if sub.get("agentSubTaskResponse") is not None:
+                item["result"] = sub["agentSubTaskResponse"]
+            subtasks.append(item)
+    if not subtasks:
+        return _request_failed("unexpected VIRA reply (no sub-task result)")
+    if (str(group_status).lower() in vira_results.UNFINISHED or
+            any(str(sub["status"]).lower() in vira_results.UNFINISHED for sub in subtasks)):
         return QUEUED      # read back, but still not run when the wait ran out
-    done = sub.get("agentSubTaskStatus") == "completed"
-    return {"status": "ok" if done else "error", "task_status": sub.get("agentSubTaskStatus"),
-            "failed_reason": sub.get("failedReason"), "result": sub.get("agentSubTaskResponse")}
+    return {"request_status": "ok", "group_status": group_status, "subtasks": subtasks}
 
 
 @functools.lru_cache(maxsize=None)
@@ -469,22 +508,24 @@ def _problems(exc: ValidationError) -> str:
 def run(name: str, args: dict, session: str | None = None) -> Dict:
     """Validate, send the one-task group through the guarded path, and project the reply."""
     if name not in catalog():
-        return {"status": "error", "message": f"unknown task {name}"}
+        return _request_failed(f"unknown task {name}")
+    _stage("PYDANTIC_CHECK", tool=name)
     try:
         clean = tidy_case(models()[name].model_validate(args).model_dump(exclude_none=True))
     except ValidationError as exc:
-        return {"status": "error", "message": f"invalid arguments: {_problems(exc)}"}
+        _stage("PYDANTIC_RESULT", tool=name, result="failed")
+        return _request_failed(f"invalid arguments: {_problems(exc)}")
+    _stage("PYDANTIC_RESULT", tool=name, result="passed")
     try:              # "me" as the signed-in user's token; recruiter_cli sends the address
         clean = {k: pii_vault.resolve_me(k, v) for k, v in clean.items()}
     except LookupError:
-        return {"status": "error", "message": "The signed-in user's email isn't known here: ask "
-                                              "the user to type it."}
+        return _request_failed("The signed-in user's email isn't known here: ask the user to type it.")
     try:
         command = name.replace("_", "-")
         result = vira.execute(command, PATH, {}, payload(catalog()[name], clean, session),
                               mode=vira_tools.current_mode(), confirmed=False)
     except Exception as exc:        # e.g. VIRA unreachable; the message may name hosts
-        return {"status": "error", "message": f"VIRA call failed ({type(exc).__name__})"}
+        return _request_failed(f"VIRA call failed ({type(exc).__name__})")
     group_uuid = _queued_uuid(result)
     if group_uuid:                  # the engine runs it in the background: wait for the outcome
         result = _read_back(command, group_uuid) or result

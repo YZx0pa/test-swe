@@ -18,13 +18,14 @@ litellm on import.
 import argparse
 import functools
 import json
+import logging
 import os
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 import re
 
 from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
@@ -32,13 +33,27 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
+from pydantic import BaseModel, Field
 
 import grounding
 import jeni_tools
 import pii_vault
 import recruiter_cli
+# Re-exported for existing runners/tests; implementation lives in task_memory.py.
+from task_memory import (TaskMemoryMiddleware, active_task_messages as _active_task_messages,
+                         extract_record, memory_digest, packed_task_messages)
 import vira_tools
 from terminal import printable
+
+
+STAGE_LOG = logging.getLogger("jeni.stages")
+
+
+def stage(event: str, **details) -> None:
+    """Write a compact, non-PII execution-stage record for developers."""
+    values = " ".join(f"{key}={value}" for key, value in sorted(details.items())
+                      if value is not None)
+    STAGE_LOG.info("%s%s", event, f" {values}" if values else "")
 
 
 # langsmith reads *_TRACING_V2 before *_TRACING, under both prefixes.
@@ -82,15 +97,26 @@ Rules:
 - A person may approve, edit or reject a call before it runs. An edit or a rejection is their
   decision: report what ran as the outcome, not as a failure, and don't redo what they removed
   or rejected, or offer to, with the same tool or another.
-- When you are done, reply in plain text without calling a tool. If the task is only
-  partially done or cannot be fully completed, start that reply with
-  SUMMARY: <what succeeded> | <what failed or is missing> | <why>
-- End EVERY reply that has no tool call with a status line as its LAST line, one of:
-    STATUS: done                 - the task is finished (succeeded or cannot proceed)
-    STATUS: needs_user: <what>   - you must get something from the user to continue
-  Use needs_user only when you are genuinely blocked on the user (e.g. a value no tool
-  can supply). Otherwise, if more tool calls are needed, make them instead of replying.
+- A resolver result with `selection_policy: choose_many` is a list for the user to choose from,
+  not permission to act on every item. When the user asks to list applicants, show the list and
+  stop. Only shortlist selected application ids, or all applicants when the user explicitly says
+  "shortlist all".
+- If a tool returns `user_action_required: true`, explain its message and ask the user to correct
+  that field. Do not silently retry a write using a previous or guessed value.
+- When you are done, return the terminal response schema. Put the user-facing explanation in
+  `message`. Set `status` to `done` when the task is finished (including when it cannot
+  proceed), or `needs_user` only when you are genuinely blocked on the user. Otherwise, if
+  more tool calls are needed, make them instead of returning a terminal response.
 """
+
+
+class TerminalResponse(BaseModel):
+    """The only allowed final result once the agent has stopped calling tools."""
+
+    message: str = Field(description="Concise, user-facing outcome or request for information.")
+    status: Literal["done", "needs_user"] = Field(
+        description="done when this task is complete; needs_user only when user input is required."
+    )
 
 
 @dataclass(frozen=True)
@@ -239,6 +265,8 @@ class CallLedger:
     A subagent runs in its own message context, so the message-history check alone
     can't see a call the parent (or a sibling subagent) already made.  All of them
     share the task's thread_id, so one ledger keyed by it covers the whole task.
+    TaskMemoryMiddleware additionally contributes the current task boundary when
+    one UI thread holds several completed tasks.
     """
 
     def __init__(self) -> None:
@@ -274,7 +302,7 @@ class ToolCallGuard(AgentMiddleware):
         call = request.tool_call
         key = _normalise(call["args"])
         is_read = call["name"] in self.read_only
-        messages = request.state.get("messages", [])
+        messages = _active_task_messages(request.state)
         failed = {m.tool_call_id for m in messages if m.type == "tool" and _failed(m)}
         repeat = earlier_failed = False
         for msg in messages:
@@ -304,9 +332,12 @@ class ToolCallGuard(AgentMiddleware):
         earlier tool result.  A reviewer's edited args (HumanInTheLoopMiddleware) count as
         user input, like the task.
         """
-        messages = request.state.get("messages", [])
+        messages = _active_task_messages(request.state)
         sources = ([("task", m.text) for m in messages if m.type == "human"]
                    + [(f"step {i}", m.text) for i, m in enumerate(messages) if m.type == "tool"])
+        compact = memory_digest(request.state.get("task_memory_records", []))
+        if compact:
+            sources.append(("earlier completed task", compact))
         edited = (request.state.get("hitl_edited_tool_calls") or {}).get(request.tool_call.get("id"))
         if edited:
             sources.append(("task", json.dumps(edited.get("args", {}))))
@@ -330,7 +361,7 @@ class ToolCallGuard(AgentMiddleware):
         fields = sorted(self.user_only & set(args))
         if not fields:
             return []
-        messages = request.state.get("messages", [])
+        messages = _active_task_messages(request.state)
         said = " ".join(m.text for m in messages if m.type == "human")
         edited = (request.state.get("hitl_edited_tool_calls") or {}).get(request.tool_call.get("id"))
         if edited:
@@ -346,12 +377,18 @@ class ToolCallGuard(AgentMiddleware):
         return bad
 
     def _refusal(self, request) -> ToolMessage | None:
-        if request.tool_call["name"] in overruled(request.state.get("messages", [])):
+        name = request.tool_call["name"]
+        # A high-impact action must always return to the reviewer for its next
+        # proposed execution.  An earlier edit/rejection must never bypass that
+        # card or turn into an automatic retry.
+        if name not in ALWAYS_CONFIRM and name in overruled(_active_task_messages(request.state)):
+            stage("TOOL_GUARD_REFUSED", tool=name, reason="reviewer_decision_stands")
             return self._result(request, f"Refused: the reviewer already edited or rejected "
-                                f"{request.tool_call['name']} in this request, and that decision "
-                                "stands. Report what ran; don't redo it or offer to. The user "
-                                "will ask if they want more.")
+                                f"{name} in this request, and that decision stands. Report what "
+                                "ran; don't redo it or offer to. The user will ask if they want more.")
         misused, invented = self._bad_ids(request)
+        stage("GROUNDING_CHECK", tool=name, result="refused" if (misused or invented) else "passed",
+              misused=len(misused), invented=len(invented))
         if misused:
             return self._result(request, "Refused: " + "; ".join(misused) + ". Pass an id only as "
                                 "the kind it came back as: call the tool that returns the kind "
@@ -369,7 +406,8 @@ class ToolCallGuard(AgentMiddleware):
         if not repeat and self.ledger is not None:
             info = request.runtime.execution_info
             call = request.tool_call
-            repeat = not self.ledger.claim((info.thread_id if info else None, call["name"],
+            task_start = request.state.get("task_memory_active_start", 0)
+            repeat = not self.ledger.claim((info.thread_id if info else None, task_start, call["name"],
                                             _normalise(call["args"])))
         if repeat:
             return self._result(request, "Refused: identical to an earlier call in this task. "
@@ -383,7 +421,10 @@ class ToolCallGuard(AgentMiddleware):
         if refused:
             return refused
         try:
-            return handler(request)
+            stage("TOOL_CALL", tool=request.tool_call["name"], mode="sync")
+            result = handler(request)
+            stage("TOOL_RESULT", tool=request.tool_call["name"], status=getattr(result, "status", None))
+            return result
         except GraphBubbleUp:            # interrupts and parent commands must propagate
             raise
         except Exception as exc:
@@ -396,7 +437,10 @@ class ToolCallGuard(AgentMiddleware):
         if refused:
             return refused
         try:
-            return await handler(request)
+            stage("TOOL_CALL", tool=request.tool_call["name"], mode="async")
+            result = await handler(request)
+            stage("TOOL_RESULT", tool=request.tool_call["name"], status=getattr(result, "status", None))
+            return result
         except GraphBubbleUp:
             raise
         except Exception as exc:
@@ -443,16 +487,38 @@ def overruled(messages) -> set[str]:
 
 
 def _ask_unless_overruled(request) -> bool:
-    return request.tool_call["name"] not in overruled(request.state.get("messages", []))
+    name = request.tool_call["name"]
+    required = name in ALWAYS_CONFIRM or name not in overruled(_active_task_messages(request.state))
+    stage("HUMAN_CHECK", tool=name, required=required,
+          policy="always_confirm" if name in ALWAYS_CONFIRM else "normal")
+    return required
+
+
+def _latest_validation_reason(state, tool_name: str) -> str | None:
+    """A safe explanation for the next approval card after validation blocked a call."""
+    for message in reversed(_active_task_messages(state)):
+        if message.type != "tool" or message.name != tool_name:
+            continue
+        text = message.text.rsplit("Tool response:", 1)[-1]
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if payload.get("status") in {"validation_error", "validation_unavailable"}:
+            return str(payload.get("message") or "The previous attempt did not pass validation.")
+    return None
 
 
 def _describe(tool_call, state, runtime) -> str:
     """An approval card's text: what the call would do, in plain words (jeni_tools.summary),
     instead of the middleware's "Tool: … Args: {…}"."""
-    return jeni_tools.summary(tool_call["name"], tool_call.get("args") or {})
+    description = jeni_tools.summary(tool_call["name"], tool_call.get("args") or {})
+    reason = _latest_validation_reason(state, tool_call["name"])
+    return description + (f" Previous attempt was not run: {reason}" if reason else "")
 
 # Tools that ALWAYS pause for a human, in any mode and even without --approve-all, because
 # acting on the wrong ones is costly/irreversible (bulk actions on candidates, ownership, etc.).
+# Every newly proposed execution of one of these tools needs its own approval card.
 # Only names that exist in the active toolset are gated, so this is safe for vira/jeni/jeni_db.
 ALWAYS_CONFIRM = frozenset({
     "shortlist_multiple_application",
@@ -473,8 +539,8 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     ON TOP of that, tools in ALWAYS_CONFIRM always pause (any mode), if present in the
     toolset -- high-stakes actions a human should see every time.
     `mode` defaults to the configured one (vira_tools.configure), so a real-mode agent
-    can't be built without the write gates.  No card for a tool the reviewer already
-    overruled (overruled()).
+    can't be built without the write gates.  A prior reviewer edit/rejection suppresses
+    a normal tool's repeat, while ALWAYS_CONFIRM tools always show another card.
     """
     if approve_all:
         names = toolset.names - toolset.read_only
@@ -523,6 +589,7 @@ class UsageCounter(BaseCallbackHandler):
 
     def on_chat_model_start(self, serialized, messages, **kwargs) -> None:
         self.calls += 1
+        stage("AGENT_ANALYSING", model_call=self.calls)
 
     def on_llm_end(self, response, **kwargs) -> None:
         for generations in response.generations:
@@ -591,7 +658,20 @@ def run_task(agent, task: str, *, decide: Callable[[dict], list[dict]] = ask_hum
     return out.value
 
 
-def show(messages, start: int = 0) -> None:
+def terminal_response_data(result: dict) -> dict | None:
+    """Normalise create_agent's Pydantic/dict structured terminal result."""
+    response = result.get("structured_response")
+    if isinstance(response, BaseModel):
+        response = response.model_dump()
+    if not isinstance(response, dict):
+        return None
+    message, status = response.get("message"), response.get("status")
+    if isinstance(message, str) and status in {"done", "needs_user"}:
+        return {"message": message, "status": status}
+    return None
+
+
+def show(messages, start: int = 0, *, terminal: dict | None = None) -> None:
     """Trajectory printout in the style of run_mini.show(); control characters removed.
 
     Prints messages[start:], numbered as in the whole conversation.
@@ -601,15 +681,22 @@ def show(messages, start: int = 0) -> None:
             print(printable(f"[{i}] user      : {m.text}"))
         elif m.type == "ai":
             for tc in m.tool_calls:
+                if tc["name"] == TerminalResponse.__name__:
+                    continue                    # LangChain's internal structured-output tool
                 print(printable(f"[{i}] assistant → call: {tc['name']}"
                                 f"({json.dumps(tc['args'], ensure_ascii=False)})"))
-            if m.text:
+            if m.text and not terminal:
                 print(printable(f"[{i}] assistant : {m.text}"))
         elif m.type == "tool":
             print(printable(f"[{i}] tool      → {m.text}"))
+    if terminal:
+        print(printable("[final] assistant : " + terminal["message"]))
 
 
 def final_text(result: dict) -> str:
+    terminal = terminal_response_data(result)
+    if terminal:
+        return terminal["message"]
     return result["messages"][-1].text if result.get("messages") else ""
 
 
@@ -645,8 +732,13 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
                         "(in real mode, score/insights always pause; reads never do)")
     p.add_argument("--step-limit", type=int, default=12,
                    help="max model calls per task (run_mini.py uses 12)")
+    p.add_argument("--no-task-memory", dest="task_memory", action="store_false", default=True,
+                   help="do not inject compact context from completed tasks")
     p.add_argument("--trace", action="store_true",
                    help="allow LangSmith tracing if LANGSMITH_* is configured (off by default)")
+    p.add_argument("--stage-log", metavar="PATH",
+                   default=os.environ.get("JENI_STAGE_LOG", "logs/jeni_agent.log"),
+                   help="write compact execution-stage records here (default: logs/jeni_agent.log)")
     p.add_argument("--trace-json", metavar="PATH",
                    help="write each task's trace (steps + grounding) here, for the "
                         "visualisation page; owner-only, emails/phones scrubbed, e.g. "
@@ -657,6 +749,17 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
 def setup(args: argparse.Namespace) -> None:
     set_tracing(args.trace)
     vira_tools.configure(args.mode)
+    log_path = getattr(args, "stage_log", None)
+    if log_path:
+        target = Path(log_path)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handler = logging.FileHandler(target, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        STAGE_LOG.handlers.clear()
+        STAGE_LOG.addHandler(handler)
+        STAGE_LOG.setLevel(logging.INFO)
+        STAGE_LOG.propagate = False
+        stage("RUN_CONFIGURED", mode=args.mode, tools=getattr(args, "tools", None), log=target)
 
 
 def _trace_run(label: str, task: str, result: dict, counter: UsageCounter,
@@ -674,9 +777,34 @@ def _report(result: dict, counter: "UsageCounter", t0: float, *, task: str,
             after, trace, label, tools) -> dict:
     """Shared post-run output for the sync and async runners."""
     messages = result["messages"]
-    turn = max((i for i, m in enumerate(messages) if m.type == "human"), default=0)
+    latest_human = max((i for i, m in enumerate(messages) if m.type == "human"), default=0)
+    terminal = terminal_response_data(result)
+
+    # Show the same temporary context that TaskMemoryMiddleware supplied to
+    # the model for this task: compact completed-task records, then the latest
+    # user input and this task's live messages.  Do not display or mutate the
+    # full checkpoint history here.
+    prior_records = list(result.get("task_memory_records", []))
+    if (terminal and terminal["status"] == "done"
+            and result.get("task_memory_active_start") == len(messages)):
+        # after_agent has just stored this task.  It was not available before
+        # this task started, so exclude it from this task's displayed context.
+        prior_records = prior_records[:-1]
+    # `needs_user` keeps the same task open across later human replies, so the
+    # display must start from task_memory_active_start—not the latest reply.
+    # After `done`, after_agent advances active_start; use the preserved start
+    # of that just-completed task instead.
+    if terminal and terminal["status"] == "done":
+        display_start = result.get("task_memory_last_completed_start", latest_human)
+    else:
+        display_start = result.get("task_memory_active_start", latest_human)
+    try:
+        display_start = max(0, min(int(display_start), len(messages)))
+    except (TypeError, ValueError):
+        display_start = latest_human
+    display_messages = packed_task_messages(messages, prior_records, display_start)
     print("\n=== trajectory ===")
-    show(messages, turn)                 # this turn only; earlier turns were printed already
+    show(display_messages, terminal=terminal)
     if after:
         after(result)
     print(f"\n(model calls: {counter.calls}, tokens in/out: "
@@ -765,198 +893,10 @@ def repl(label: str, agent, args: argparse.Namespace,
             print(printable(f"[error] {type(exc).__name__}: {exc}"))
 
 
-def _last_ai_text(messages) -> str:
-    for m in reversed(messages):
-        if m.type == "ai" and not m.tool_calls and m.text:
-            return m.text
-    return ""
-
-
-def read_status(messages) -> tuple[str, str]:
-    """(verdict, detail) from the agent's last prose reply.
-
-    verdict: "done" | "needs_user" | "continue".  Tolerant of a forgetful model:
-    a reply with no STATUS line is treated as "done" (it stopped calling tools), which
-    is the safe default -- the next user message then starts a fresh task.
-    """
-    text = _last_ai_text(messages)
-    if not text:
-        return "continue", ""          # still mid-loop (last message was a tool call)
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if line.startswith("STATUS:"):
-            body = line[len("STATUS:"):].strip()
-            if body.startswith("needs_user"):
-                return "needs_user", body.split(":", 1)[1].strip() if ":" in body else ""
-            return "done", ""
-    return "done", ""                  # prose, no STATUS: assume the task ended
-
-
-_EXECUTED_RE = re.compile(r"[Ee]xecuted instead:[^\n]*?with arguments\s*(\{[^\n]*\})")
-
-
-def _result_ids(tool_msg_text: str) -> list:
-    """The ids a read-only resolver returned, for the Resolve trail.  Handles the common
-    shapes: a top-level list of ints under 'applications'/'valid_values', or selection
-    'candidates' of {..._id: N}.  Best-effort: returns [] if nothing id-like is found."""
-    text = tool_msg_text or ""
-    try:
-        data = json.loads(text[: text.rfind("}") + 1])
-    except (ValueError, AttributeError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    res = data.get("result", data)
-    if not isinstance(res, dict):
-        res = data
-    for key in ("applications", "valid_values"):
-        v = res.get(key) if isinstance(res, dict) else None
-        if isinstance(v, list) and v and all(isinstance(x, int) for x in v):
-            return v
-    sel = res.get("selection") if isinstance(res, dict) else None
-    if isinstance(sel, dict) and isinstance(sel.get("candidates"), list):
-        ids = [c[k] for c in sel["candidates"] if isinstance(c, dict)
-               for k in c if k.endswith("_id") and isinstance(c[k], int)]
-        if ids:
-            return ids
-    return []
-
-
-def _executed_args(tool_msg_text: str) -> dict | None:
-    """If a tool result carries the HITL 'Executed instead: ... with arguments {...}' note,
-    return those executed args; else None.  This is how an interrupt EDIT is recovered: the
-    agent's own message still shows its ORIGINAL call, but the edited call is what ran."""
-    if not tool_msg_text or "xecuted instead" not in tool_msg_text:
-        return None
-    m = _EXECUTED_RE.search(tool_msg_text)
-    if not m:
-        return None
-    try:
-        args = json.loads(m.group(1))
-        return args if isinstance(args, dict) else None
-    except ValueError:
-        return None
-
-
-def extract_record(messages, read_only: frozenset) -> dict:
-    """A compact, deterministic record of one finished task -- no LLM.
-
-    Reports, for each data-CHANGING call, the args that ACTUALLY RAN (an interrupt edit
-    replaces the agent's proposed args, recovered from the tool result's 'Executed instead'
-    note), where each value came from, and the final outcome.  Read-only resolver/validator
-    calls are not stored as actions; they only provide provenance for the ids used.
-    """
-    instruction = next((m.text for m in messages if m.type == "human" and m.text), "")
-    sources = ([("task", m.text) for m in messages if m.type == "human"]
-               + [(f"step {i}", m.text) for i, m in enumerate(messages) if m.type == "tool"])
-    # pair each ai tool call with the tool message that follows it, to find an edit note
-    resolve, actions, resolved, seen_vals = [], [], [], set()
-    for i, m in enumerate(messages):
-        if m.type != "ai":
-            continue
-        for tc in m.tool_calls:
-            nxt = next((messages[j] for j in range(i + 1, len(messages))
-                        if messages[j].type == "tool"), None)
-            if tc["name"] in read_only:
-                # a lookup/validation step: record HOW things were found (and what it returned)
-                resolve.append({"tool": tc["name"], "args": tc.get("args", {}),
-                                "found": _result_ids(nxt.text) if nxt is not None else []})
-                continue
-            args = tc.get("args", {})
-            edited = False
-            if nxt is not None:                   # HITL edit -> the executed args, not the proposed
-                executed = _executed_args(nxt.text)
-                if executed is not None:
-                    args = executed
-                    edited = True                 # a human chose these at the approval step
-            actions.append({"tool": tc["name"], "args": args})
-            for arg, entries in grounding.ground_args(args, sources).items():
-                for p in entries:
-                    key = (arg, json.dumps(p["value"], default=str))
-                    if key in seen_vals:
-                        continue
-                    seen_vals.add(key)
-                    src = p["sources"]
-                    if edited:
-                        origin = "user (reviewer-selected)"   # chosen by the human at approval
-                    elif not src:
-                        origin = "unknown"
-                    elif any(s == "task" for s in src):
-                        origin = "user"
-                    else:
-                        origin = "system (looked up)"
-                    resolved.append({"field": arg, "value": p["value"], "from": origin})
-    return {"instruction": instruction, "resolve": resolve, "resolved": resolved,
-            "actions": actions, "outcome": _last_ai_text(messages)}
-
-
-def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int = 1800,
-                  hard_cap: int = 15) -> str:
-    """A short text block of recent finished tasks, injected into a new task as user text.
-
-    A record is kept if it is newer than `max_age_sec` (default 30 min) OR among the last
-    `keep_last` (default 5) -- so a quiet session still shows the last few, and a busy one
-    keeps everything recent, up to `hard_cap` (newest win) so the context can't blow up.
-
-    Because ToolCallGuard grounds ids against the user's words, any id named here becomes
-    usable in the new task (e.g. 'add sql to that same job 501') without being refused.
-    """
-    if not records:
-        return ""
-    now = time.time()
-    n = len(records)
-    kept = [r for i, r in enumerate(records)
-            if (now - r.get("ts", 0) <= max_age_sec) or i >= n - keep_last]
-    kept = kept[-hard_cap:]                              # ceiling; keep the newest
-    kept = [r for r in kept if r.get("actions")]         # a task that did nothing isn't memory
-    if not kept:
-        return ""
-
-    def _clean(text: str) -> str:
-        # strip control chars (e.g. a pasted "\r") and collapse whitespace
-        return " ".join((text or "").split())
-
-    def _tag(origin: str) -> str:
-        return ("from user" if origin == "user"
-                else "reviewer-selected" if "reviewer" in origin
-                else "looked up" if "system" in origin else origin)
-
-    lines = ["[earlier in this session - for reference]"]
-    for i, r in enumerate(kept, 1):
-        did = ", ".join(a["tool"] for a in r["actions"]) or "(none)"
-        resolve_parts = []
-        for a in r.get("resolve", []):
-            found = a.get("found") or []
-            if found:
-                shown = ", ".join(str(x) for x in found[:12]) + ("…" if len(found) > 12 else "")
-                resolve_parts.append(f"{a['tool']} -> [{shown}]")
-            else:
-                resolve_parts.append(a["tool"])
-        resolve = "; ".join(resolve_parts)
-        # group resolved values by (field, origin) so 8 app_ids become one line, not eight
-        groups: dict[tuple, list] = {}
-        for v in r.get("resolved", []):
-            groups.setdefault((v["field"], _tag(v["from"])), []).append(v["value"])
-        val_parts = [f"{field} = {', '.join(str(x) for x in vals)} ({tag})"
-                     for (field, tag), vals in groups.items()]
-        lines.append(f"{i}. Instruction: {_clean(r['instruction'])}")
-        if resolve:
-            lines.append(f"   Resolve: {resolve}")
-        lines.append(f"   Did: {did}")
-        if val_parts:
-            lines.append(f"   Values: {'; '.join(val_parts)}")
-    return "\n".join(lines)
-
-
 async def arepl(label: str, agent, args: argparse.Namespace, tools,
                 after: Callable[[dict], None] | None = None) -> None:
-    """Async twin of repl for toolsets with async tools (db/jeni_db).
-
-    `tools` is the Toolset (so read_only is available for the finished-task record); a bare
-    name set is also accepted (then no record filtering / memory).
-    """
+    """Async twin of repl for toolsets with async tools (db/jeni_db)."""
     names = getattr(tools, "names", tools)              # grounding wants the name set
-    read_only = getattr(tools, "read_only", frozenset())
     trace = None
     if getattr(args, "trace_json", None):
         trace = {"path": args.trace_json, "model": os.environ.get("CHAT_MODEL", "gpt-5-mini"),
@@ -967,10 +907,7 @@ async def arepl(label: str, agent, args: argparse.Namespace, tools,
         return
     print(f"Recruiter agent ({label}, mode={args.mode}). Type a task, 'new' to start a new "
           f"conversation, or 'quit'.")
-    records: list[dict] = []                            # finished-task memory, this session
     thread_id = uuid.uuid4().hex
-    awaiting = False                                    # are we mid-task, waiting on the user?
-    instruction = ""                                    # the task's ORIGINATING user text
     while True:
         try:
             user = input("\ninput task> ").strip()
@@ -982,32 +919,11 @@ async def arepl(label: str, agent, args: argparse.Namespace, tools,
             return
         if user.lower() == "new":
             thread_id = uuid.uuid4().hex
-            awaiting = False
             print("(new conversation)")
             continue
-        # A fresh task (not a reply to a pending question) carries the memory digest in,
-        # as user text, so past ids are both visible to the model and grounded for the guard.
-        # Keep the ORIGINATING instruction separately, so the record stores what the user
-        # actually typed -- not the injected digest (which would nest, digest-in-digest).
-        task = user
-        if not awaiting:
-            instruction = user                         # first turn of this task
-            digest = memory_digest(records)
-            if digest:
-                task = f"{digest}\n\n{user}"
         try:
-            result = await arun_and_show(agent, task, after, trace, label, names,
-                                         thread_id)
+            await arun_and_show(agent, user, after, trace, label, names,
+                                thread_id)
         except Exception as exc:
             print(printable(f"[error] {type(exc).__name__}: {exc}"))
             continue
-        verdict, detail = read_status(result.get("messages", []))
-        if verdict == "needs_user":
-            awaiting = True                            # keep the thread; next input continues it
-        else:                                          # done (or treated as done)
-            record = extract_record(result.get("messages", []), read_only)
-            record["instruction"] = instruction        # the real instruction, never the digest
-            record["ts"] = time.time()                 # completion time, for memory_digest's age window
-            records.append(record)
-            thread_id = uuid.uuid4().hex               # refresh: next task starts clean
-            awaiting = False

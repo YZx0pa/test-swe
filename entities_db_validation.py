@@ -18,6 +18,14 @@ from langchain_core.messages import ToolMessage
 import pii_vault
 
 LOG = logging.getLogger(__name__)
+STAGE_LOG = logging.getLogger("jeni.stages")
+
+
+def _stage(event: str, **details) -> None:
+    values = " ".join(f"{key}={value}" for key, value in sorted(details.items())
+                      if value is not None)
+    STAGE_LOG.info("%s%s", event, f" {values}" if values else "")
+
 ROLE_IDS = frozenset({1, 5})
 
 
@@ -88,6 +96,8 @@ class EntitiesDBValidationMiddleware(AgentMiddleware):
 
     async def _validate(self, request) -> ToolMessage | None:
         args = request.tool_call.get("args") or {}
+        _stage("DB_VALIDATION", tool=request.tool_call["name"], phase=self.phase,
+               fields=",".join(sorted(args)))
 
         # One job-detail result covers all job-targeting actions.  It is also
         # the canonical title/state source for future title-reference/state rules.
@@ -166,6 +176,8 @@ class EntitiesDBValidationMiddleware(AgentMiddleware):
                                             "emails", "candidate_email")):
             LOG.info("ENTITY_DB_VALIDATION_SKIPPED tool=%s reason=no_configured_entity_fields",
                      request.tool_call["name"])
+        _stage("DB_VALIDATION_RESULT", tool=request.tool_call["name"], phase=self.phase,
+               result="passed")
         return None
 
     async def awrap_tool_call(self, request, handler):
@@ -175,7 +187,11 @@ class EntitiesDBValidationMiddleware(AgentMiddleware):
             refused = await self._validate(request)
         except Exception as exc:
             return _unavailable(request, "unexpected_exception", {"type": type(exc).__name__})
-        return refused if refused is not None else await handler(request)
+        if refused is not None:
+            _stage("DB_VALIDATION_RESULT", tool=request.tool_call["name"], phase=self.phase,
+                   result="refused")
+            return refused
+        return await handler(request)
 
 
 class PreApprovalEntitiesDBValidationMiddleware(EntitiesDBValidationMiddleware):

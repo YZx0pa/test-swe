@@ -28,13 +28,16 @@ ASYNC_TOOLSETS = {"db", "jeni_db"}
 
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
                 toolset: agent_kit.Toolset = agent_kit.VIRA, gate_writes: bool = False,
-                own_checkpointer: bool = True, query_tools=None, context=None):
+                own_checkpointer: bool = True, query_tools=None, context=None,
+                task_memory: bool = False):
     """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
     demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
     refuses a graph that brings its own checkpointer."""
     gated = agent_kit.interrupt_on(approve_all, mode="real" if gate_writes else None,
                                    toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
+    memory = [agent_kit.TaskMemoryMiddleware(toolset.read_only)] if task_memory else []
+    agent_kit.stage("MEMORY_MIDDLEWARE_CONFIGURED", enabled=task_memory)
     import entities_db_validation
     entity_pre, entity_execute = entities_db_validation.stages(
         query_tools, context,
@@ -46,9 +49,10 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
         model or agent_kit.build_chat_model(),
         toolset.tools(),
         system_prompt=toolset.prompt,
+        response_format=agent_kit.TerminalResponse,
         # Pre-card validation is outermost; execution validation is inside HITL so it
         # sees reviewer-edited arguments, then ToolCallGuard performs provenance checks.
-        middleware=[*entity_pre, *approval,
+        middleware=[*memory, *entity_pre, *approval,
                     *agent_kit.middleware(step_limit, toolset=toolset,
                                           execution_validation=(entity_execute[0]
                                                                 if entity_execute else None))],
@@ -109,7 +113,8 @@ async def amain(args):
     try:
         toolset = agent_kit.cli_toolset(args, query_tools=query_tools, context=context)
         agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
-                            toolset=toolset, query_tools=query_tools, context=context)
+                            toolset=toolset, query_tools=query_tools, context=context,
+                            task_memory=args.task_memory)
         await agent_kit.arepl("LangGraph", agent, args, toolset)
     finally:
         if pool is not None:
@@ -123,7 +128,7 @@ def main(argv=None):
         return
     agent_kit.setup(args)
     agent = build_agent(approve_all=args.approve_all, step_limit=args.step_limit,
-                        toolset=agent_kit.cli_toolset(args))
+                        toolset=agent_kit.cli_toolset(args), task_memory=args.task_memory)
     agent_kit.repl("LangGraph", agent, args)
 
 
