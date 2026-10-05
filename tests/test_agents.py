@@ -5,7 +5,6 @@ import os
 import stat
 
 import pytest
-from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 import agent_kit
@@ -283,7 +282,7 @@ def test_the_repl_keeps_one_conversation_until_new(vira, monkeypatch, capsys):
     out = capsys.readouterr().out
     turns = [t.strip() for t in out.split("=== trajectory ===")[1:]]
     assert turns[0].startswith("[0] user      : Score the applicants.")
-    assert turns[1].startswith("[2] user      : Applicants 11 and 12.")    # this turn only
+    assert turns[1].startswith("[0] user      : Applicants 11 and 12.")    # this turn only, numbered from 0
     assert "Score the applicants." not in turns[1]
     assert "(new conversation)" in out and turns[2].startswith("[0] user      : hi")
     assert [v["body"]["app_ids"] for v in vira] == [[11, 12]]
@@ -357,45 +356,29 @@ def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, mon
     assert [(v["path"], v["mode"]) for v in vira] == [("fast_retargeting", "real")]
 
 
-class Interpreter:
-    """Stands in for the confirmation model: replies with these decisions, in order."""
-
-    def __init__(self, *decisions):
-        self.decisions, self.asked = list(decisions), 0
-
-    def invoke(self, history, config=None):
-        self.asked += 1
-        return AIMessage(json.dumps(self.decisions.pop(0)))
-
-
-def confirm(monkeypatch, answers, model, args):
+def confirm(monkeypatch, answers, args):
     answers = iter(answers)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    return agent_kit.ask_human({"action_requests": [{"name": "score_candidates", "args": args}]},
-                               model=model)
+    return agent_kit.ask_human({"action_requests": [{"name": "score_candidates", "args": args}]})
 
 
-def test_enter_approves_and_n_rejects_without_asking_the_interpreter(monkeypatch):
-    model = Interpreter()
-    assert confirm(monkeypatch, [""], model, {"app_ids": [11]}) == [{"type": "approve"}]
-    assert confirm(monkeypatch, ["n"], model, {"app_ids": [11]})[0]["type"] == "reject"
-    assert model.asked == 0
+def test_enter_or_y_approves_and_n_rejects(monkeypatch):
+    assert confirm(monkeypatch, [""], {"app_ids": [11]}) == [{"type": "approve"}]
+    assert confirm(monkeypatch, ["y"], {"app_ids": [11]}) == [{"type": "approve"}]
+    assert confirm(monkeypatch, ["n"], {"app_ids": [11]})[0]["type"] == "reject"
 
 
-def test_a_change_in_words_is_shown_then_runs_as_an_edit(monkeypatch, capsys):
-    # The interpreter repeats 12 and adds 99; only ids the original call offered survive.
-    model = Interpreter({"decision": "update", "args": {"app_ids": [12, 12, 99]}})
-    decisions = confirm(monkeypatch, ["drop 11", ""], model, {"app_ids": [11, 12]})
+def test_e_replaces_the_arguments_with_a_json_object(monkeypatch, capsys):
+    decisions = confirm(monkeypatch, ["e", "drop 11", "[12]", '{"app_ids": [12]}'], {"app_ids": [11, 12]})
     assert decisions == [{"type": "edit", "edited_action": {"name": "score_candidates",
                                                             "args": {"app_ids": [12]}}}]
-    assert "updated -> score_candidates" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "not valid JSON" in out and "expected a JSON object" in out
 
 
-def test_without_an_interpreter_a_change_in_words_is_asked_again(monkeypatch, capsys):
-    monkeypatch.setattr(agent_kit, "confirm_chat_model", lambda: None)
-    decisions = confirm(monkeypatch, ["drop 11", "y"], None, {"app_ids": [11, 12]})
-    assert decisions == [{"type": "approve"}]
-    assert "couldn't reach the interpreter" in capsys.readouterr().out
+def test_a_change_in_words_is_not_interpreted_but_asked_again(monkeypatch, capsys):
+    assert confirm(monkeypatch, ["drop 11", "y"], {"app_ids": [11, 12]}) == [{"type": "approve"}]
+    assert "enter y to approve, e to replace all arguments as JSON" in capsys.readouterr().out
 
 
 # --- what reaches your terminal and disk -------------------------------------

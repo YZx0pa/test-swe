@@ -6,6 +6,7 @@ v1's format with v1's field names, but not Jeni's real catalog, which stays out 
 import argparse
 import asyncio
 import json
+import uuid
 
 import pytest
 
@@ -20,7 +21,7 @@ import recruiter_cli
 import run_deepagent
 import run_langgraph
 import vira_tools
-from conftest import read_audit
+from conftest import done, read_audit, reply
 from fakes import call, calls, say, scripted
 from mock_vira import MockVira
 
@@ -159,7 +160,7 @@ def test_role_has_no_default_and_visibility_is_set_by_the_task(audit_log):
 ])
 def test_invalid_input_never_reaches_vira(audit_log, name, args):
     result = jeni_tools.run(name, args)
-    assert result["status"] == "error" and result["message"].startswith("invalid arguments")
+    assert result["request_status"] == "failed" and result["message"].startswith("invalid arguments")
     assert read_audit(audit_log) == []
 
 
@@ -179,18 +180,20 @@ def test_a_call_sends_one_task_group_in_v1s_format(audit_log, monkeypatch):
         {"field_name": "job_id", "mandatory": True, "field_value": 7001},
         {"field_name": "user_ids", "mandatory": True, "field_value": [802]},
         {"field_name": "role_id", "mandatory": True, "field_value": 5}]
-    assert entry["body"]["agent_session_uuid"] == jeni_tools.session_uuid()     # VIRA requires one
+    assert uuid.UUID(entry["body"]["agent_session_uuid"])                       # VIRA requires one
 
 
-def test_each_conversation_is_one_vira_session(audit_log):
+def test_every_task_group_is_its_own_vira_session(audit_log):
+    """VIRA scopes a task group's uniqueness by agent_session_uuid, so even the same thread
+    sends each group in a session of its own (jeni_tools.session_uuid)."""
     def agent():
         return run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
             calls(call("get_single_job_details", {"job_id": 7001}, "c1")), say("Done.")))
     for thread in ("t1", "t1", "t2"):
         agent_kit.run_task(agent(), "Show job 7001.", thread_id=thread)
     sessions = [a["body"]["agent_session_uuid"] for a in read_audit(audit_log)]
-    assert sessions[0] == sessions[1] == jeni_tools.session_uuid("t1") != sessions[2]
-    assert sessions[2] == jeni_tools.session_uuid("t2") and len(set(sessions)) == 2
+    assert len(sessions) == len(set(sessions)) == 3 and all(uuid.UUID(s) for s in sessions)
+    assert jeni_tools.session_uuid("t1") != jeni_tools.session_uuid("t1")
 
 
 def test_a_queued_task_is_reported_as_queued_not_done():
@@ -198,9 +201,8 @@ def test_a_queued_task_is_reported_as_queued_not_done():
         "agentTaskGroupUuid": "6f1c2a52-0000-4000-8000-000000000001",
         "message": "Your tasks have been received. We are processing your tasks."}}
     assert jeni_tools.project(received) == {
-        "status": "queued", "task_status": "queued", "failed_reason": None,
-        "result": {"message": "VIRA accepted the task and runs it in the background; "
-                              "its outcome isn't known yet."}}
+        "request_status": "ok", "group_status": "queued", "subtasks": [],
+        "message": "VIRA accepted the task and runs it in the background; its outcome isn't known yet."}
     assert "queued" in jeni_tools.RULES
 
 
@@ -220,17 +222,17 @@ def test_the_mock_answers_every_task_in_the_real_reply_shape():
 def test_the_model_sees_only_the_sub_task_result():
     for name, args in VALID.items():
         result = jeni_tools.run(name, args)
-        assert set(result) == {"status", "task_status", "failed_reason", "result"}, name
-        assert result["status"] == "ok" and result["task_status"] == "completed", name
+        assert set(result) == {"request_status", "group_status", "subtasks"}, name
+        assert done(result) and result["group_status"] == "completed", name
         text = json.dumps(result)
         assert "creatorName" not in text and "agentTaskGroupUuid" not in text, name
 
 
 def test_a_failed_task_says_why():
     assert jeni_tools.run("get_single_job_details", {"job_id": 4242}) == {
-        "status": "error", "task_status": "failed", "failed_reason": "Job 4242 not found",
-        "result": None}
-    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["failed_reason"] == (
+        "request_status": "ok", "group_status": "failed",
+        "subtasks": [{"status": "failed", "failed_reason": "Job 4242 not found"}]}
+    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["subtasks"][0]["failed_reason"] == (
         "Job must be open and public before publishing to LinkedIn")
     payload = jeni_tools.payload(jeni_tools.catalog()["clone_job"], {})
     sub = MockVira.call(jeni_tools.PATH, {}, payload)["result"]["tasks"][0]["subTasks"][0]
@@ -240,15 +242,15 @@ def test_a_failed_task_says_why():
 def test_partial_success_is_visible():
     result = jeni_tools.run("add_job_collaborators",
                             {"job_id": 7001, "user_ids": [802, 999], "role_id": 5})
-    assert result["status"] == "ok"
-    assert [p["userId"] for p in result["result"]["passedArr"]] == [802]
-    assert [f["userId"] for f in result["result"]["failedArr"]] == [999]
+    assert done(result)
+    assert [p["userId"] for p in reply(result)["passedArr"]] == [802]
+    assert [f["userId"] for f in reply(result)["failedArr"]] == [999]
 
 
 def test_people_in_results_are_masked_but_their_ids_are_not():
     apps = json.dumps(jeni_tools.run("get_applications", {"job_id": 7001}))
     assert "@example.com" not in apps and "Mock Candidate" not in apps and "5102" in apps
-    users = jeni_tools.run("search_users", {"search_key": "Bob"})["result"]["users"]
+    users = reply(jeni_tools.run("search_users", {"search_key": "Bob"}))["users"]
     [user] = users
     assert (user["userId"], user["firstName"], user["lastName"]) == (802, "<redacted>", "<redacted>")
     assert pii_vault.TOKEN.fullmatch(user["email"]) and pii_vault.VAULT.sources(user["email"]) >= {"colleague"}
@@ -280,29 +282,29 @@ def kept():
 
 
 def test_the_mock_forgets_changes_by_default():
-    assert jeni_tools.run("make_job_public", {"job_id": 7001})["status"] == "ok"
-    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "error"
+    assert done(jeni_tools.run("make_job_public", {"job_id": 7001}))
+    assert not done(jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001}))
     jeni_tools.run("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]})
-    details = jeni_tools.run("get_single_job_details", {"job_id": 7001})["result"]
+    details = reply(jeni_tools.run("get_single_job_details", {"job_id": 7001}))
     assert details["skills"] == ["Python", "Go", "PostgreSQL"] and details["isPrivate"] is True
     assert mock_jeni.JOBS[7001]["skills"] == ["Python", "Go", "PostgreSQL"]
 
 
 def test_a_kept_state_remembers_what_changed(kept):
-    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "error"
+    assert not done(jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001}))
     jeni_tools.run("make_job_public", {"job_id": 7001})
-    assert jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001})["status"] == "ok"
+    assert done(jeni_tools.run("publish_job_to_linkedin", {"job_id": 7001}))
     jeni_tools.run("add_job_skills", {"job_id": 7001, "skills": ["Kafka"]})
     jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
-    details = jeni_tools.run("get_single_job_details", {"job_id": 7001})["result"]
+    details = reply(jeni_tools.run("get_single_job_details", {"job_id": 7001}))
     assert details["skills"][-1] == "Kafka" and details["isPrivate"] is False
     assert details["publishedToLinkedIn"] is True
     assert details["collaborators"] == [{"userId": 802, "roleId": 5}]
     again = jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
-    assert again["result"]["passedArr"] == [] and len(again["result"]["existingArr"]) == 1
+    assert reply(again)["passedArr"] == [] and len(reply(again)["existingArr"]) == 1
     jeni_tools.run("shortlist_multiple_application", {"app_ids": [5102, 5103]})
     stages = {a["appId"]: a["stage"]
-              for a in jeni_tools.run("get_applications", {"job_id": 7001})["result"]["applications"]}
+              for a in reply(jeni_tools.run("get_applications", {"job_id": 7001}))["applications"]}
     assert stages == {5101: "applied", 5102: "shortlisted", 5103: "shortlisted", 5104: "applied"}
     assert mock_jeni.JOBS[7001]["isPrivate"] is True and mock_jeni.APPLICATIONS[5102][2] == "applied"
 
@@ -315,17 +317,17 @@ def test_a_created_job_and_candidate_are_found_by_the_db_lookups(kept):
         return asyncio.run(queries[name].handler(inputs, context))
 
     assert lookup("find_job_by_title", {"title": "Data Engineer"})["status"] == "not_found"
-    job_id = jeni_tools.run("create_job", VALID["create_job"])["result"]["jobId"]
+    job_id = reply(jeni_tools.run("create_job", VALID["create_job"]))["jobId"]
     assert job_id == mock_jeni.created_job_id("Data Engineer")
     assert lookup("find_job_by_title", {"title": "Data Engineer"}) == {
         "status": "resolved", "resolved_fields": {"job_id": job_id}}
-    app_id = jeni_tools.run("create_application_to_job", {**VALID["create_application_to_job"],
-                                                          "job_id": job_id})["result"]["appId"]
+    app_id = reply(jeni_tools.run("create_application_to_job", {**VALID["create_application_to_job"],
+                                                                "job_id": job_id}))["appId"]
     assert lookup("list_job_applications", {"job_id": job_id})["applications"] == [app_id]
-    assert jeni_tools.run("create_job", VALID["create_job"])["result"]["jobId"] == job_id + 1
+    assert reply(jeni_tools.run("create_job", VALID["create_job"]))["jobId"] == job_id + 1
     kept.reset()
     assert lookup("find_job_by_title", {"title": "Data Engineer"})["status"] == "not_found"
-    assert jeni_tools.run("get_single_job_details", {"job_id": job_id})["status"] == "error"
+    assert not done(jeni_tools.run("get_single_job_details", {"job_id": job_id}))
 
 
 def test_the_activity_log_keeps_ids_not_names_or_emails(kept):
@@ -363,26 +365,48 @@ def test_a_read_runs_again_after_a_write_but_not_twice_in_a_row(audit_log):
 
 def test_a_reviewers_edit_stands_until_the_user_writes_again(audit_log):
     agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
-        calls(call("shortlist_multiple_application", {"app_ids": [5102, 5103]}, "c1")),
-        calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c2")),   # around the edit
-        say("Shortlisted 5102, as edited."),
-        calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c3")),   # now the user asked
-        say("Shortlisted 5103 too.")))
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Kafka", "Spark"]}, "c1")),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Spark"]}, "c2")),   # around the edit
+        say("Added Kafka, as edited."),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Spark"]}, "c3")),   # now the user asked
+        say("Added Spark too.")))
     cards = []
 
     def edit_the_first(request):
         cards.append([a["args"] for a in request["action_requests"]])
         if len(cards) > 1:
             return [{"type": "approve"}]
+        return [{"type": "edit", "edited_action": {"name": "add_job_skills",
+                                                   "args": {"job_id": 7001, "skills": ["Kafka"]}}}]
+
+    first = agent_kit.run_task(agent, "Add Kafka and Spark to job 7001.", decide=edit_the_first,
+                               thread_id="t1")
+    assert "reviewer already edited or rejected" in tool_messages(first)["c2"].text
+    agent_kit.run_task(agent, "Add Spark too.", decide=edit_the_first, thread_id="t1")
+    assert cards == [[{"job_id": 7001, "skills": ["Kafka", "Spark"]}],
+                     [{"job_id": 7001, "skills": ["Spark"]}]]                      # no card for c2
+    assert [fields_of(a)["skills"] for a in read_audit(audit_log)] == [["Kafka"], ["Spark"]]
+
+
+def test_an_always_confirm_tool_gets_a_new_card_even_after_an_edit(audit_log):
+    """ALWAYS_CONFIRM: every proposed run of a high-impact tool goes back to the reviewer, so
+    an edit or a rejection never turns into a refusal the reviewer doesn't see."""
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
+        calls(call("shortlist_multiple_application", {"app_ids": [5102, 5103]}, "c1")),
+        calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c2")),   # around the edit
+        say("Shortlisted 5102, as edited.")))
+    cards = []
+
+    def edit_then_reject(request):
+        cards.append([a["args"] for a in request["action_requests"]])
+        if len(cards) > 1:
+            return [{"type": "reject", "message": "Only 5102."}]
         return [{"type": "edit", "edited_action": {"name": "shortlist_multiple_application",
                                                    "args": {"app_ids": [5102]}}}]
 
-    first = agent_kit.run_task(agent, "Shortlist applicants 5102 and 5103.", decide=edit_the_first,
-                               thread_id="t1")
-    assert "reviewer already edited or rejected" in tool_messages(first)["c2"].text
-    agent_kit.run_task(agent, "Shortlist 5103 too.", decide=edit_the_first, thread_id="t1")
-    assert cards == [[{"app_ids": [5102, 5103]}], [{"app_ids": [5103]}]]      # no card for c2
-    assert [fields_of(a)["app_ids"] for a in read_audit(audit_log)] == [[5102], [5103]]
+    agent_kit.run_task(agent, "Shortlist applicants 5102 and 5103.", decide=edit_then_reject)
+    assert cards == [[{"app_ids": [5102, 5103]}], [{"app_ids": [5103]}]]          # a card for c2
+    assert [fields_of(a)["app_ids"] for a in read_audit(audit_log)] == [[5102]]
 
 
 def test_a_rejection_stands_and_gets_no_second_card(audit_log):
@@ -409,8 +433,22 @@ def test_a_failed_write_runs_again_once_another_write_ran(audit_log, kept):
     replies = tool_messages(result)
     assert "must be open and public" in replies["c1"].text
     assert "identical to an earlier call" in replies["c2"].text
-    assert json.loads(replies["c4"].text)["status"] == "ok"
+    assert done(json.loads(replies["c4"].text))
     assert "identical to an earlier call" in replies["c5"].text
+    assert [a["command"] for a in read_audit(audit_log)] == [
+        "publish-job-to-linkedin", "make-job-public", "publish-job-to-linkedin"]
+
+
+def test_a_failed_sub_task_counts_as_a_failure_for_the_retry_rule(audit_log, kept):
+    """jeni_tools.project reports a failed task as a failed sub-task under request_status ok;
+    the guard reads that as a failure, so fixing the cause lets the same call run again."""
+    result = run(scripted(
+        calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c1")),    # private: fails
+        calls(call("make_job_public", {"job_id": 7001}, "c2")),
+        calls(call("publish_job_to_linkedin", {"job_id": 7001}, "c3")),    # a write since: runs
+        say("Published.")), "Publish job 7001 to LinkedIn, making it public if needed.")
+    assert agent_kit._failed(tool_messages(result)["c1"])
+    assert done(json.loads(tool_messages(result)["c3"].text))
     assert [a["command"] for a in read_audit(audit_log)] == [
         "publish-job-to-linkedin", "make-job-public", "publish-job-to-linkedin"]
 

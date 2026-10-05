@@ -77,7 +77,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `recruiter_cli.py` | `execute()` plus the typed actions (four VIRA endpoints and the assumed `get_match_id_from_profile_id` lookup) own routing and the query/body split. The CLI wraps them; its output is byte-identical to before. |
 | `vira_tools.py` | The model-facing contract: typed functions whose `Annotated[…, Field(…)]` signatures and docstrings **are** the tool schema. Edit them the way you'd edit `commands.md`. |
 | `agent_kit.py` | Shared prompt, model factory, middleware, approval loop and REPL for the LangChain-based runners. |
-| `run_langgraph.py` / `run_workflow.py` / `run_deepagent.py` | The runtimes. New runners default to `--mode mock`; `--mode real` reaches VIRA. |
+| `run_langgraph.py` / `run_workflow.py` / `run_deepagent.py` | The runtimes. `run_langgraph.py` and `run_deepagent.py` default to `--mode real` (since 2026-10-04), `run_workflow.py` to `--mode mock`; `--mode real` reaches VIRA. |
 | `vira_mcp.py` | The same tools over MCP. |
 | `compare_agents.py` | Live side-by-side on mock VIRA (section 7): `--model`, `--repeat`, `--json` traces. |
 | `grounding.py` | Traces every tool argument and answer id/score to the task or an earlier result, and flags ids of the wrong kind ([format](agent-frameworks-changes.md#6-trace-and-grounding-json)). |
@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 358 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 361 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -194,10 +194,11 @@ gated even without it, because they trigger calculations on VIRA; the reads (`fi
 `vira_tools.configure()`, so a real-mode agent can't be built without the gate.
 Each model turn raises one interrupt that batches all gated calls. The runner answers with one decision per call (`approve`, `edit` with new args, `reject`)
 via `Command(resume={"decisions": [...]})` on the same thread. A rejected call never reaches VIRA
-(tested). At the CLI, `ask_human` takes Enter or `y` to approve, `n` to reject, or a change in words
-("only 12"), which a small confirmation model (`CONFIRM_MODEL`, default `gpt-4o-mini`) turns into
-edited args. Only values the original call offered survive, the change is shown, and nothing runs
-until Enter or `y`. Interrupts need a checkpointer; `InMemorySaver` covers a single process.
+(tested). At the CLI, `ask_human` takes Enter or `y` to approve, `n` to reject, or `e` followed by
+the call's complete arguments as a JSON object, sent as an `edit` like the demo UI's. Anything else
+is asked again. A change in words isn't interpreted: the small confirmation model that turned
+"only 12" into edited args was removed on 2026-10-03. Interrupts need a checkpointer;
+`InMemorySaver` covers a single process.
 
 **Each card says what the call would do, in plain words.** `interrupt_on()` gives every gated tool
 a `description`, `jeni_tools.summary(name, args)`: "Shortlist applications 5102 and 5103.",
@@ -216,8 +217,11 @@ rejected, or offer to") didn't stop it: the demo's rehearsal still saw it in 2 o
 is structural now. `agent_kit.overruled(messages)` names the tools a reviewer edited or rejected
 since the user's last message; `interrupt_on()` gives HITL a `when` predicate so a new call to
 such a tool gets no card, and `ToolCallGuard` refuses it ("the reviewer already edited or
-rejected … that decision stands"). The next message from the user lifts it, so "shortlist 5103
-too" works.
+rejected … that decision stands"). The next message from the user lifts it, so "add Spark too"
+works. `ALWAYS_CONFIRM` tools are the exception (since 2026-10-04): every new call to one gets a
+card of its own, so the reviewer decides each high-impact attempt rather than the guard refusing
+it out of sight. Edited to 5102 only, a shortlist the model retries for 5103 comes back as a
+second card.
 
 ## 4. deepagents: `run_deepagent.py`
 
@@ -455,17 +459,17 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 358 tests
+.venv/bin/python -m pytest -q                                   # offline, 361 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
-python run_langgraph.py --tools vira --task "Find potential talents for job 123"   # mock VIRA by default
-python run_langgraph.py --tools vira --approve-all                        # approve, change or reject each write
-python run_langgraph.py --tools jeni                                      # one conversation: answer its questions; 'new' starts over
+python run_langgraph.py --mode mock --tools vira --task "Find potential talents for job 123"   # mock VIRA
+python run_langgraph.py --mode mock --tools vira --approve-all                        # approve, change or reject each write
+python run_langgraph.py --mode mock --tools jeni                                      # one conversation: answer its questions; 'new' starts over
 python run_workflow.py --app-ids 11,12,13 --top 2
-python run_deepagent.py --tools vira --task "For jobs 101 and 102, find talents and write /report.md"
-python run_langgraph.py --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
+python run_deepagent.py --mode mock --tools vira --task "For jobs 101 and 102, find talents and write /report.md"
+python run_langgraph.py --mode mock --tools jeni --task "Assign job 7001 to Bob as a team member"   # Jeni's tasks (§12)
 python jeni_tools.py                                                      # list them: read or write, and their fields
-python run_langgraph.py --task "Add Kubernetes to the backend engineer job"      # jeni_db: looks the job up first (§13)
+python run_langgraph.py --mode mock --task "Add Kubernetes to the backend engineer job"      # jeni_db: looks the job up first (§13)
 demo/run.sh                                                               # the demo (§14): chat on :3000, data panel beside it
 .venv/bin/python -m demo.rehearse                                         # play the demo script against it and check the data
 python vira_check.py                                                      # real VIRA engine, read-only: does it run task groups?
@@ -546,7 +550,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
 | The engine's `xrtoken` leaks or is sent elsewhere | `VIRA_XRTOKEN` is read from the environment and sent only as the `xrtoken` header to `VIRA_ACTUAL_LOCATION`, never to the other endpoints; the audit log records commands and masked bodies, not headers; no redirects are followed and proxy variables are ignored | `test_task_groups_go_to_the_engine_with_only_the_users_xrtoken` |
 | A task group sent with a missing or wrong engine setting | No location, plain http to a non-loopback host, or an empty token: nothing is sent, and the error names the setting, never the host | `test_the_engine_fails_closed_without_its_settings` |
-| An agent redoes what a reviewer removed (the applicant edited off a shortlist, a rejected change with other args) | `agent_kit.overruled()`: until the user writes again, a new call to a tool the reviewer edited or rejected gets no card (HITL's `when`) and `ToolCallGuard` refuses it | `test_a_reviewers_edit_stands_until_the_user_writes_again`, `test_a_rejection_stands_and_gets_no_second_card` |
+| An agent redoes what a reviewer removed (a skill edited off a change, a rejected change with other args) | `agent_kit.overruled()`: until the user writes again, a new call to a tool the reviewer edited or rejected gets no card (HITL's `when`) and `ToolCallGuard` refuses it. An `ALWAYS_CONFIRM` tool (shortlist, reject, share, transfer) gets a new card instead, for the reviewer to decide | `test_a_reviewers_edit_stands_until_the_user_writes_again`, `test_a_rejection_stands_and_gets_no_second_card`, `test_an_always_confirm_tool_gets_a_new_card_even_after_an_edit` |
 | Jeni: candidate names in task payloads reach the audit log, or the creator's name reaches the model | `_mask_pii` masks a `field_value` whose `field_name` is sensitive, and creator/owner names; the model gets only the sub-task result | `test_candidate_details_are_masked_in_the_audit_log`, `test_creator_and_owner_names_are_masked`, `test_the_model_sees_only_the_sub_task_result` |
 | Jeni: a collaborator silently added as administrator | `role_id` has no default and takes only 1 (administrator) or 5 (team member); `is_private` is set by the task | `test_role_has_no_default_and_visibility_is_set_by_the_task` |
 | Jeni's internal task catalog published with the code | `config/*` is gitignored (only its README is tracked); `jeni_tools` reads the catalog from there or `JENI_TASKS_FILE`; the tests use a synthetic fixture and pass without the real file | `test_the_catalog_is_read_from_the_configured_file`, `test_a_missing_catalog_is_a_clear_error_and_only_for_jeni` |
@@ -597,9 +601,15 @@ How a call works:
   in its usual spelling ("sql" → "SQL", "node.js" → "Node.js"). A value with any capital is left
   exactly as typed ("iOS Developer", "Maya de Souza"); emails never change. The field
   descriptions ask the model for the same, so the tidy-up is a safety net.
-- **Only the sub-task result reaches the model**: `{status, task_status, failed_reason, result}`.
-  The group's uuids, timestamps and creator name stay out. A task can be `completed` with items in
-  `failedArr` (one of two collaborators not found), and the prompt says to read it.
+- **Only the sub-task results reach the model**:
+  `{request_status, group_status, subtasks: [{status, result, failed_reason}]}` (since 2026-10-04).
+  `request_status` says whether the call was sent and read back (`failed`, with a `message`,
+  otherwise), `group_status` is the engine's, and each sub-task keeps its own status, so a sent
+  request never reads as a completed action. The group's uuids, timestamps and creator name stay
+  out. A task can be `completed` with items in `failedArr` (one of two collaborators not found),
+  and the prompt says to read it. `ToolCallGuard` counts a result with a failed sub-task, or one
+  that wasn't sent, as a failure (`agent_kit._failed`), so "make it public, then publish" can
+  retry the publish that failed.
 - **Approvals.** Real mode and `--approve-all` pause all 16 writes, never the 6 reads.
   Shortlist, reject, share and transfer ownership pause in mock mode too.
 - **Asking.** `RULES` tells the model to ask only for what no tool can give it, not to have the
@@ -661,16 +671,20 @@ Open points:
 
 Jeni's tasks take ids, but people name things: "the data scientist job", "Bob". v1 looks names
 up in Jeni's database before it plans (`handleSearchJobs`, `handleSearchUsers`). `jeni_db` gives
-the agent the same lookups as read-only tools next to the 22 tasks, so it turns a name into an
-id, checks the ids the user typed, and only then acts. It is the default toolset of
-`run_langgraph.py`.
+the agent two lookups as read-only tools next to the 22 tasks, so it turns a job's title into an
+id; people come from Jeni's own `search_users`. The other queries run as entity checks
+(`entities_db_validation.py`, since 2026-10-03) before a Jeni write executes: the job and
+application ids are in the company, recipients are active recruiters (tokens and "me" resolved
+first), a candidate's email has an application in the company. A failed check returns
+`validation_error` with `user_action_required`, and nothing is sent. `jeni_db` is the default
+toolset of `run_langgraph.py`.
 
-| Tool | Does | Returns |
-|---|---|---|
-| `find_job_by_title` | Jobs whose title contains the text, newest first | one: `{"status": "resolved", "job_id"}`; several: `ambiguous`, up to 10 candidates labelled with their open date; none: `not_found` |
-| `find_user` | Active recruiters (role 4) by name or email | the same, with `user_id`; the labels are emails, so they arrive masked |
-| `list_job_applications` | A job's applications (up to 200) | the app ids, in `applications` and `selection.candidates` |
-| `validate_job_id(s)`, `validate_app_ids`, `validate_email(s)` | Checks ids or emails the user gave | `resolved`, or `not_found` with `invalid_values` |
+| Query | Does | Returns | Used by |
+|---|---|---|---|
+| `find_job_by_title` | Jobs whose title contains the text, newest first | one: `{"status": "resolved", "job_id"}`; several: `ambiguous`, up to 10 candidates labelled with their open date; none: `not_found` | the model |
+| `list_job_applications` | A job's applications (up to 200) | the app ids, in `applications` and `selection.candidates` | the model |
+| `find_user` | Active recruiters (role 4) by name or email | the same, with `user_id` | kept, not offered |
+| `get_job_detail`, `validate_job_id(s)`, `validate_app_ids`, `validate_user_ids`, `validate_email(s)`, `find_candidate_by_email` | Checks ids, emails and job state | `resolved`, or `not_found` with `invalid_values` | the entity checks |
 
 Files:
 - `db_lookup.py`: v1's Node queries on asyncpg (`handle_search_jobs`, `handle_search_users`),
@@ -760,14 +774,11 @@ What differs from `run_langgraph.py`, and why:
 - **No checkpointer of its own.** `langgraph dev` refuses a graph that brings one ("persistence is
   handled automatically by the platform") and keeps threads itself, in memory, flushed to
   `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
-- **The closing rules are written for a chat window.** `SYSTEM_PROMPT` ends with the grading format
-  `SUMMARY: <what succeeded> | <what failed> | <why>` and a `STATUS: done` / `STATUS: needs_user`
-  last line, which only the terminal REPL reads (to remember finished tasks); in the chat both
-  showed as stray lines. The demo replaces the first with "the outcome first, in a sentence or
-  two … don't recount the tools you called … say what succeeded, what failed or is missing, and
-  why", and the second with its one instruction that isn't about the status line ("if more tool
-  calls are needed, make them instead of replying"). It fails at build time if either rule it
-  replaces has changed (`CHAT_REPLACEMENTS`).
+- **The closing reply is structured.** Since 2026-10-04 the agent ends with a `TerminalResponse`
+  (`message`, and `status`: `done` or `needs_user`) instead of `SUMMARY:` and `STATUS:` lines, and
+  the chat shows only its `message` (`getAssistantDisplayContent` in `demo/ui`). The demo uses the
+  `jeni_db` prompt unchanged, and with `task_memory=True` keeps compact records of finished tasks
+  in a thread (`task_memory.py`).
 - **Built off the event loop.** The server calls the factory inside its event loop, and runs
   there under blockbuster, which raises on blocking I/O (reading the catalog, for one). The
   factory is `async` and builds with `asyncio.to_thread` once; the panel's endpoints are plain
@@ -847,8 +858,8 @@ What the rehearsals found, and what changed:
   model calls to 4.
 - **"Add Bob to the backend engineer job"** was once read as adding Bob as a candidate. The
   script now says "to the hiring team".
-- **An external recipient was refused.** The db rules validate every email the user gives with
-  `validate_emails`, which knows only the company's users, so "share it with
+- **An external recipient was refused.** Every email the user gives is checked against the
+  company's users (then by the db rules, now by the entity checks), so "share it with
   hm.lee@example.com" stopped. The script shares with a colleague (Priya); whether share
   recipients must be colleagues is a product question (below).
 - **The UI sent edited ids as a string** (above). The browser check that found it drives the real
@@ -857,9 +868,9 @@ What the rehearsals found, and what changed:
 Open points:
 - `langgraph dev` is a development server (in-memory, one process). A hosted pilot would run the
   same graph on a licensed LangGraph deployment or behind our own API with auth.
-- **Share recipients.** `validate_emails` checks an address against the company's users, and the
-  db rules validate every email before a write, so a CV can't be shared with an outside address.
-  If sharing outside the company is allowed, the rule should exempt `share_application`.
+- **Share recipients.** The entity checks accept only active recruiters (role 4) of the company
+  as share recipients, so a CV can't be shared with an outside address. If sharing outside the
+  company is allowed, the check should exempt `share_application`.
 - The replies still run long now and then, and sometimes offer to redo what the reviewer removed
   (the code refuses it if asked in the same request).
 
@@ -877,14 +888,14 @@ How a call goes now:
   task group runs with that user's rights, in that user's company, so real mode gates every write
   (§3).
 - **A session is required.** Without one the engine answers 400: "Missing agent_session_uuid!
-  Required: task_group_name, agent_session_uuid, tasks". v1 sends `null` there. v2 sends one per
-  conversation, a uuid5 of the thread id (the tools get the thread from their `RunnableConfig`;
-  outside a thread, one per process). A fresh uuid was accepted, so the engine doesn't require
-  the session to exist.
+  Required: task_group_name, agent_session_uuid, tasks". v1 sends `null` there. v2 sends a fresh
+  one with every task group (since 2026-10-04): the engine scopes a group's uniqueness by its
+  session, so `session_uuid` mixes the process, the thread, the time and a random part. A fresh
+  uuid is accepted, so the engine doesn't require the session to exist.
 - **The engine is asynchronous.** The POST answers 200 in about 0.3 s with only
   `{agentTaskGroupUuid, message: "Your tasks have been received. We are processing your tasks.
   You can see task status on the task panel"}`. `jeni_tools.project()` turns that into
-  `{"status": "queued", ...}`, and `RULES` tells the model to say the task was submitted, not
+  `{"request_status": "ok", "group_status": "queued", "subtasks": []}`, and `RULES` tells the model to say the task was submitted, not
   done, and not to use anything it would have returned.
 - **Reading the outcome back** (`vira_results.py`). `jeni_tools.run` waits for the group (up to
   `VIRA_RESULT_WAIT`, 30 s), then masks the outcome like any reply, audits the read
@@ -1004,7 +1015,7 @@ it with Priya" needed Priya's address typed out, even right after `search_users`
   is sent, mock or real: after the guard, after the approval card, after the audit entry (which
   stays redacted). A token the process didn't issue sends nothing.
 - **Where a token may go.** Each token remembers where its address was seen. Only a colleague's
-  (from the user directory: `search_users`, `find_user`, `validate_email(s)`) may stand in for a
+  (from the user directory: `search_users`, or `find_user` if offered again) may stand in for a
   share recipient or a new owner (`RECIPIENT_FIELDS`). A candidate's, or any other record's, goes
   nowhere, and candidate fields still take a typed address only. `ToolCallGuard` asks
   `pii_vault.VAULT.allowed()` where it checks the user's words.

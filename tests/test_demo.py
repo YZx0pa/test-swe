@@ -59,21 +59,12 @@ def test_the_demo_agent_is_mock_only_and_brings_no_checkpointer(monkeypatch):
     assert all(os.environ[v] == "false" for v in agent_kit.TRACING_VARS)
 
 
-def test_the_demo_prompt_changes_only_the_closing_rules():
+def test_the_demo_prompt_is_jeni_db_s_and_ends_with_the_terminal_response():
+    """The closing rules are agent_kit's own: a structured TerminalResponse (message, status)
+    instead of SUMMARY/STATUS lines, so the demo no longer rewrites the prompt."""
     prompt = jeni_graph.demo_toolset(mock_jeni.State()).prompt
-    assert "SUMMARY:" not in prompt and "STATUS:" not in prompt and jeni_graph.CHAT_RULE in prompt
-    for rule, replacement in jeni_graph.CHAT_REPLACEMENTS:
-        prompt = prompt.replace(replacement, rule)
     assert prompt == agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES
-
-
-def test_the_demo_build_fails_if_a_closing_rule_changes(monkeypatch):
-    monkeypatch.setattr(jeni_graph, "STATUS_RULE", "- End every reply with a STATUS line.\n")
-    monkeypatch.setattr(jeni_graph, "CHAT_REPLACEMENTS", (
-        (jeni_graph.SUMMARY_RULE, jeni_graph.CHAT_RULE),
-        (jeni_graph.STATUS_RULE, jeni_graph.NO_STATUS_RULE)))
-    with pytest.raises(RuntimeError, match="CHAT_REPLACEMENTS"):
-        jeni_graph.demo_toolset(mock_jeni.State())
+    assert "SUMMARY:" not in prompt and "STATUS:" not in prompt and "terminal response" in prompt
 
 
 def cards_approved(asked):
@@ -234,7 +225,9 @@ def test_an_edited_shortlist_passes_when_the_edit_is_what_ran(audit_log):
     assert any('→ edit {"app_ids": [5102]}' in line for line in lines)
 
 
-def test_going_around_the_reviewer_gets_no_card_and_is_refused(audit_log):
+def test_going_around_the_reviewer_gets_a_card_of_its_own(audit_log):
+    """shortlist is ALWAYS_CONFIRM: a second attempt after an edit goes back to the reviewer,
+    whose edit (5102 only) applies to it as well, so 5103 is never shortlisted."""
     server = InProcess(
         calls(call("find_job_by_title", {"title": "backend engineer"}, "c1")),
         calls(call("get_applications", {"job_id": 7001}, "c2")),
@@ -242,8 +235,8 @@ def test_going_around_the_reviewer_gets_no_card_and_is_refused(audit_log):
         calls(call("shortlist_multiple_application", {"app_ids": [5103]}, "c4")),
         say("Shortlisted 5102."))
     result, lines = rehearsed(server, "shortlist")
-    assert result["ok"] and sum(line.startswith("  card  :") for line in lines) == 1
-    assert any("reviewer already edited or rejected" in line for line in lines)
+    assert sum(line.startswith("  card  :") for line in lines) == 2
+    assert not any("reviewer already edited or rejected" in line for line in lines)
     [job] = [j for j in server.snapshot()["jobs"] if j["jobId"] == 7001]
     assert {a["appId"]: a["stage"] for a in job["applications"]}[5103] == "applied"
 
@@ -256,7 +249,7 @@ def test_a_reject_act_fails_if_the_card_never_appeared(audit_log):
 @pytest.mark.parametrize("asks_first", [True, False])
 def test_an_if_needed_turn_is_sent_only_while_the_check_fails(audit_log, asks_first):
     act_calls = [calls(call("find_job_by_title", {"title": "backend engineer"}, "c1"),
-                       call("find_user", {"search_key": "Bob"}, "c2")),
+                       call("search_users", {"search_key": "Bob"}, "c2")),
                  calls(call("add_job_collaborators",
                             {"job_id": 7001, "user_ids": [802], "role_id": 5}, "c3")),
                  say("Bob is on the team.")]

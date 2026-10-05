@@ -21,6 +21,9 @@ os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
 os.environ.pop("TRON_POSTGRES_DSN", None)               # jeni_db never reaches a real database
 os.environ.pop("VIRA_RESULT_SOURCE", None)              # nor does reading a task group back
 os.environ.pop("VIRA_RESULT_LOCATION", None)
+os.environ.pop("cutqueque", None)                       # nor asks the engine to run one
+os.environ.pop("VIRA_result_trigger", None)
+os.environ["JENI_STAGE_LOG"] = ""                       # the runners' setup() writes no logs/ file
 # Jeni's real task catalog is internal (config/README.md): tests use a synthetic one.
 os.environ["JENI_TASKS_FILE"] = os.path.join(os.path.dirname(__file__), "fixtures", "jeni_tasks.json")
 for _key in ("LANGSMITH_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"):
@@ -29,6 +32,7 @@ for _key in ("LANGSMITH_TRACING_V2", "LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2"
 import pytest  # noqa: E402
 
 import recruiter_cli  # noqa: E402
+import vira_tools  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +41,27 @@ def audit_log(tmp_path, monkeypatch):
     path = tmp_path / "events.jsonl"
     monkeypatch.setattr(recruiter_cli, "EVENTS_LOG", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def vira_mode():
+    """The VIRA mode back as it was after each test: a runner's main() sets it from --mode,
+    whose default is real."""
+    mode = vira_tools.current_mode()
+    yield
+    vira_tools.configure(mode)
+
+
+def done(result: dict) -> bool:
+    """A projected Jeni result (jeni_tools.project) that was sent and whose sub-tasks all completed."""
+    subs = result.get("subtasks") or []
+    return result.get("request_status") == "ok" and bool(subs) and all(
+        s.get("status") == "completed" for s in subs)
+
+
+def reply(result: dict, i: int = 0):
+    """The i-th sub-task's result in a projected Jeni result."""
+    return result["subtasks"][i].get("result")
 
 
 def read_audit(path) -> list[dict]:

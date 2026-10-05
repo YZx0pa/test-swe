@@ -12,7 +12,7 @@ import pii_vault
 import recruiter_cli
 import run_langgraph
 import vira_tools
-from conftest import read_audit
+from conftest import done, read_audit, reply
 from fakes import call, calls, say, scripted
 from mock_vira import MockVira
 
@@ -84,11 +84,11 @@ def test_who_may_send_a_token_or_me():
 # --- results, the decrypt step and the audit log --------------------------------
 def test_results_carry_tokens_and_the_address_goes_out_only_at_send_time(audit_log, sent):
     found = jeni_tools.run("search_users", {"search_key": "Priya"})
-    [priya] = found["result"]["users"]
+    [priya] = reply(found)["users"]
     assert "@" not in json.dumps(found) and pii_vault.VAULT.sources(priya["email"]) >= {"colleague"}
     result = jeni_tools.run("share_application", {"app_ids": [5102], "emails": [priya["email"]],
                                                   "message": "Worth a call"})
-    assert result["status"] == "ok"
+    assert done(result)
     assert recipients(sent[-1])["emails"] == ["priya.nair@example.com"]    # decrypted for VIRA
     log = read_audit(audit_log)
     assert "priya.nair@example.com" not in json.dumps(log) and "<email:" not in json.dumps(log)
@@ -98,7 +98,7 @@ def test_results_carry_tokens_and_the_address_goes_out_only_at_send_time(audit_l
 def test_a_token_this_process_never_issued_sends_nothing(audit_log, sent):
     result = jeni_tools.run("share_application", {"app_ids": [5102], "emails": ["<email:000000000000>"],
                                                   "message": "hi"})
-    assert result["status"] == "error" and "didn't receive" in result["result"]["message"]
+    assert result["request_status"] == "failed" and "didn't receive" in result["message"]
     assert sent == []
 
 
@@ -109,7 +109,7 @@ def test_the_cli_redacts_emails_since_its_tokens_die_with_the_process(capsys):
 
 # --- the agent: colleagues, candidates and "me" ------------------------------------
 def test_a_colleague_found_by_search_can_be_shared_with(audit_log, sent):
-    token = jeni_tools.run("search_users", {"search_key": "Priya"})["result"]["users"][0]["email"]
+    token = reply(jeni_tools.run("search_users", {"search_key": "Priya"}))["users"][0]["email"]
     cards = []
     agent_kit.run_task(
         run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
@@ -123,7 +123,7 @@ def test_a_colleague_found_by_search_can_be_shared_with(audit_log, sent):
 
 
 def test_a_candidates_email_token_is_refused_as_a_recipient(audit_log, sent):
-    details = jeni_tools.run("get_single_application_details", {"app_id": 5102})["result"]
+    details = reply(jeni_tools.run("get_single_application_details", {"app_id": 5102}))
     candidate = details["candidateEmail"]
     assert pii_vault.TOKEN.fullmatch(candidate) and pii_vault.VAULT.sources(candidate) == {"record"}
     before = len(sent)
@@ -141,13 +141,13 @@ def test_me_is_the_signed_in_user(audit_log, sent, signed_in):
     assert recipients(sent[-1])["emails"] == ["sam.lee@example.com"]
     assert jeni_tools.summary("share_application", {"app_ids": [5102], "emails": ["me"]}) == (
         "Share application 5102 with you.")
-    assert jeni_tools.run("transfer_job_ownership", {"job_id": 7001, "new_owner_user_email": "me"})[
-        "result"]["newOwnerUserId"] == 804
+    assert reply(jeni_tools.run("transfer_job_ownership", {"job_id": 7001, "new_owner_user_email": "me"}))[
+        "newOwnerUserId"] == 804
 
 
 def test_me_without_a_signed_in_user_asks_for_the_address(audit_log, sent):
     result = jeni_tools.run("share_application", {"app_ids": [5102], "emails": ["me"], "message": "x"})
-    assert result["status"] == "error" and "type it" in result["message"] and sent == []
+    assert result["request_status"] == "failed" and "type it" in result["message"] and sent == []
 
 
 def test_candidate_fields_still_take_only_a_typed_address():
@@ -155,18 +155,31 @@ def test_candidate_fields_still_take_only_a_typed_address():
     for value in (token, "me"):
         result = jeni_tools.run("create_application_to_job", {"job_id": 7001, "candidate_name": "Bob",
                                                               "candidate_email": value})
-        assert result["status"] == "error" and result["message"].startswith("invalid arguments")
+        assert result["request_status"] == "failed" and result["message"].startswith("invalid arguments")
 
 
-# --- the database lookups -------------------------------------------------------
-def test_directory_lookups_return_colleague_tokens_and_take_me(signed_in):
-    tools = {t.name: t for t in db_tools.langchain_tools(
-        db_queries.fake_db_queries(mock_jeni.db_fixtures(1)), {"auth_profile": {"company_id": 1}})}
+# --- the database checks (jeni_db) -----------------------------------------------
+@pytest.mark.parametrize("to,allowed", [
+    (["me", "priya"], True),                       # "me" and a colleague's token from search_users
+    (["<email:000000000000>"], False),             # a token this process never issued
+    (["stranger@elsewhere.example"], False),       # not a user of the company
+])
+def test_entity_checks_take_me_and_colleague_tokens_only(audit_log, sent, signed_in, to, allowed):
     import asyncio
-    found = json.loads(asyncio.run(tools["find_user"].ainvoke({"search_key": "bob"})))
-    assert found == {"status": "resolved", "user_id": 802}
-    several = json.loads(asyncio.run(tools["find_user"].ainvoke({"search_key": "a"})))
-    labels = [c["label"] for c in several["candidates"]]
-    assert all(pii_vault.TOKEN.fullmatch(lbl) and "colleague" in pii_vault.VAULT.sources(lbl) for lbl in labels)
-    me = json.loads(asyncio.run(tools["validate_email"].ainvoke({"email": "me"})))
-    assert me["status"] == "resolved" and pii_vault.VAULT.reveal(me["valid_values"][0]) == "sam.lee@example.com"
+    priya = reply(jeni_tools.run("search_users", {"search_key": "Priya"}))["users"][0]["email"]
+    emails = [priya if r == "priya" else r for r in to]
+    before = len(sent)
+    queries = db_queries.fake_db_queries(mock_jeni.db_fixtures(1))
+    context = {"auth_profile": {"company_id": 1}}
+    toolset = agent_kit.toolset("jeni_db", query_tools=queries, context=context)
+    agent = run_langgraph.build_agent(toolset=toolset, query_tools=queries, context=context, model=scripted(
+        calls(call("share_application", {"app_ids": [5102], "emails": emails, "message": "x"}, "c1")),
+        say("Done.")))
+    result = asyncio.run(agent_kit.arun_task(agent, "Share application 5102 with me and Priya.",
+                                             decide=approve))
+    outcome = json.loads([m for m in result["messages"] if m.type == "tool"][0].text)
+    if allowed:
+        assert done(outcome)
+        assert recipients(sent[-1])["emails"] == ["sam.lee@example.com", "priya.nair@example.com"]
+    else:
+        assert outcome["status"] == "validation_error" and len(sent) == before

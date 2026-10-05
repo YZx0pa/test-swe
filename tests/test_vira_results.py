@@ -9,7 +9,7 @@ import pii_vault
 import recruiter_cli
 import vira_results
 import vira_tools
-from conftest import read_audit
+from conftest import done, read_audit, reply
 
 vira_tools.configure("mock")
 UUID = "6f1c2a52-0000-4000-8000-0000000000aa"
@@ -94,8 +94,8 @@ def test_the_outcome_is_read_back_masked_and_audited(audit_log, engine, monkeypa
     monkeypatch.setattr(vira_results, "wait_for", lambda uuid: vira_results.group_from_rows(uuid, rows(
         ("sub_task_search_users", "completed", {"users": [{"userId": 803, "email": "priya.nair@example.com"}]}, None))))
     result = jeni_tools.run("search_users", {"search_key": "Priya"})
-    assert result["status"] == "ok" and result["task_status"] == "completed"
-    [user] = result["result"]["users"]
+    assert done(result) and result["group_status"] == "completed"
+    [user] = reply(result)["users"]
     assert user["userId"] == 803 and pii_vault.VAULT.sources(user["email"]) >= {"colleague"}
     assert [a["command"] for a in read_audit(audit_log)] == ["search-users", "read-result"]
     assert "priya.nair@example.com" not in json.dumps(read_audit(audit_log))
@@ -105,7 +105,8 @@ def test_a_failed_sub_task_says_why(audit_log, engine, monkeypatch):
     monkeypatch.setattr(vira_results, "wait_for", lambda uuid: vira_results.group_from_rows(uuid, rows(
         ("sub_task_get_single_job_details", "failed", {"error": "x"}, "Job not found"))))
     result = jeni_tools.run("get_single_job_details", {"job_id": 7001})
-    assert (result["status"], result["failed_reason"]) == ("error", "Job not found")
+    assert not done(result) and result["subtasks"] == [{"status": "failed", "failed_reason": "Job not found",
+                                                        "result": {"error": "x"}}]
 
 
 @pytest.mark.parametrize("outcome", ["no source", "still queued", "database down"])
@@ -262,8 +263,8 @@ def test_an_info_reply_is_masked_and_projected_like_any_other(audit_log, engine,
     import requests
     monkeypatch.setattr(requests, "Session", info_api)
     result = jeni_tools.run("search_users", {"search_key": "Alice"})
-    assert result["status"] == "ok" and "@" not in json.dumps(result)
-    assert pii_vault.VAULT.sources(result["result"]["users"][0]["email"]) >= {"colleague"}
+    assert done(result) and "@" not in json.dumps(result)
+    assert pii_vault.VAULT.sources(reply(result)["users"][0]["email"]) >= {"colleague"}
 
 
 # --- vira_check --writes: the write test -------------------------------------------

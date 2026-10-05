@@ -250,13 +250,19 @@ def _normalise(args: dict) -> str:
 
 
 def _failed(message) -> bool:
-    """A tool result that reports a failure: an error status, in the message or its JSON."""
+    """A tool result that reports a failure: an error status, in the message or its JSON, or a
+    Jeni task (jeni_tools.project) that wasn't sent or has a failed sub-task."""
     if getattr(message, "status", None) == "error":
         return True
     try:
-        return json.loads(message.text).get("status") == "error"
+        result = json.loads(message.text)
     except (ValueError, AttributeError):
         return False
+    if not isinstance(result, dict):
+        return False
+    subtasks = result.get("subtasks") if isinstance(result.get("subtasks"), list) else []
+    return (result.get("status") == "error" or result.get("request_status") == "failed"
+            or any(isinstance(s, dict) and str(s.get("status")).lower() == "failed" for s in subtasks))
 
 
 class CallLedger:
