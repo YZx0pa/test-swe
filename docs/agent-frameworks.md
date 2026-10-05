@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 374 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 377 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -95,9 +95,10 @@ Guarantees that hold in every new runtime:
 - Every VIRA call lands in the audit log in the same format.
 - The host sets real/mock once (`vira_tools.configure`); the model never sees a mode parameter.
 - Tools pass `confirmed=False`, so a confirm-gated command can't run from them (see follow-ups).
-- In real mode, `score_candidates` and `candidate_insights` (they trigger calculations on VIRA)
-  always pause for a person's approval in the LangGraph and deepagents runners, subagents
-  included. Over MCP they are listed only with `--allow-side-effects`.
+- With `--approve-all`, `score_candidates` and `candidate_insights` (they trigger calculations
+  on VIRA) pause for a person's approval in the LangGraph and deepagents runners, subagents
+  included. Since 2026-10-05 real mode alone no longer pauses them there; mini still asks y/N in
+  real mode. Over MCP they are listed only with `--allow-side-effects`.
 - A failure comes back as `{"status": "error", …}` with the exception type only, never hosts or URLs.
   It is audited too (`status: "exception"`, `error: <type>`), and the CLI prints one JSON line
   instead of a traceback.
@@ -186,12 +187,13 @@ whiteboard.
 
 ### Human in the loop
 
-`agent_kit.interrupt_on()` decides which tools pause. `--approve-all` gates every tool that
-changes data; reads never pause. In real mode, `score_candidates` and `candidate_insights` are
-gated even without it, because they trigger calculations on VIRA; the reads (`find_talents`,
-`generate_jd`) run straight through. Jeni's shortlist, reject, share and transfer-ownership tasks
-(`ALWAYS_CONFIRM`) pause in every mode, mock included. The mode comes from
-`vira_tools.configure()`, so a real-mode agent can't be built without the gate.
+`agent_kit.interrupt_on()` decides which tools pause. `--approve-all` (`build_agent(gate_writes=True)`
+in code) gates every tool that changes data; reads never pause. Jeni's shortlist, reject, share
+and transfer-ownership tasks (`ALWAYS_CONFIRM`) pause in every mode, mock included. Since
+2026-10-05 (Yuzhe, "Decouple write approval from VIRA mode") the mode no longer decides: until
+then real mode gated every write, `score_candidates` and `candidate_insights` included, and now
+it gates only `ALWAYS_CONFIRM`, so a real-mode run that should ask before every change needs
+`--approve-all`. `interrupt_on()` still takes a `mode` argument, which it ignores.
 Each model turn raises one interrupt that batches all gated calls. The runner answers with one decision per call (`approve`, `edit` with new args, `reject`)
 via `Command(resume={"decisions": [...]})` on the same thread. A rejected call never reaches VIRA
 (tested). At the CLI, `ask_human` takes Enter or `y` to approve, `n` to reject, or `e` followed by
@@ -237,8 +239,8 @@ Our configuration:
 - **Subagents:** `sourcing-analyst` gets find, score and insights; `jd-writer` gets `generate_jd`.
   We also pass our own `general-purpose` spec, replacing the auto-added one.
 - **Middleware:** `TodoListMiddleware` plus the same guard and call cap as the LangGraph agent.
-- **Approval:** `interrupt_on` gates every write with `--approve-all`, and score/insights in real
-  mode; subagents inherit it (both tested).
+- **Approval:** `interrupt_on` gates every write with `--approve-all`; subagents inherit it
+  (tested).
 
 Security: keep the default **`StateBackend`**, where files live in graph state per thread and never
 touch the host disk. Never use `FilesystemBackend` (reads and writes real files, defaulting to the
@@ -459,7 +461,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 374 tests
+.venv/bin/python -m pytest -q                                   # offline, 377 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --mode mock --tools vira --task "Find potential talents for job 123"   # mock VIRA
@@ -537,7 +539,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Candidate PII reaches the model (and the model provider) | `_mask_pii`: emails in results become `pii_vault` tokens (`<email:…>`, a keyed hash; the address kept AES-GCM-encrypted in this process only) and other personal values are redacted; normalised keys matched against `PII_KEYS` and word patterns (`first_name`, `phone_number`, `linkedin_url`, …, but not `job_name_similarity`); emails and phone numbers replaced inside every string, including a non-JSON `raw` reply; uuids are kept whole (their digit groups looked like phone numbers to 6% of random uuids). Names in free text are not detected | `test_pii_keys_are_masked_by_name_and_pattern`, `test_other_keys_are_kept`, `test_emails_and_phones_inside_text_are_masked`, `test_non_json_reply_text_is_scrubbed` |
 | Cost or DoS amplification on VIRA's LLM endpoints; oversized text injected into VIRA's own JD prompt | Limits in the typed actions (`_input_problem`) and in the tool schemas: ≤50 positive ids, ≤200 characters per text, ≤30 list entries, `lang` a language code | `test_bad_input_is_refused_before_anything_is_sent`, `test_the_cli_reports_a_typo_in_ids`, `test_schemas_reject_oversized_or_malformed_input` |
 | An injected prompt sprays invented ids at VIRA | `ToolCallGuard` refuses id arguments found in neither the user's messages (any turn) nor an earlier result, before VIRA is called; reviewer edits count as user input; `grounding.summary` reports them as `ungrounded_blocked` | `test_an_invented_id_is_refused_before_vira`, `test_ids_from_an_earlier_result_are_not_invented`, `test_edit_runs_the_reviewers_args`, `test_an_invented_id_the_guard_refused_counts_as_blocked` |
-| An agent triggers calculations on VIRA (recal_briq) without a person | Real mode gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it) and with a y/N in mini; `interrupt_on()` reads the configured mode | `test_real_mode_always_gates_the_calls_that_change_vira`, `test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
+| An agent triggers calculations on VIRA (recal_briq) without a person | `--approve-all` gates score/insights with a LangGraph interrupt in the LangGraph and deepagents runners (subagents inherit it); mini asks y/N in real mode. Since 2026-10-05 real mode alone doesn't gate them in the LangGraph and deepagents runners (raised with Yuzhe) | `test_approval_follows_approve_all_not_the_mode`, `test_with_writes_gated_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read`, `test_with_approve_all_real_mode_subagents_pause_before_scoring`, `test_real_mode_side_effects_wait_for_approval` |
 | An MCP client (or an injected prompt in it) drives VIRA under the service identity | Real mode lists only the reads (find, match-id lookup, JD) unless `--allow-side-effects`; a per-process budget (`--max-calls`, default 50); score/insights annotated `destructiveHint` | `test_real_mode_lists_only_reads_unless_side_effects_are_allowed`, `test_the_server_stops_calling_vira_after_its_budget`, `test_tools_annotations_and_masked_results` |
 | Secrets, audit logs or traces committed by accident | `.gitignore` covers `.env`/`.env.*` (except `.env.example`), `*.env`, key and certificate files, `credentials*`, `secrets*`, `.netrc`/`.npmrc`/`.pypirc`, `*.jsonl` and `traces/` | `git ls-files -ci --exclude-standard` is empty |
 | Traces or reports readable by other users, or carrying the task's PII | `agent_kit.write_private()`: 0600 files (a missing directory is created 0700), emails and phone numbers scrubbed | `test_trace_json_is_owner_only_and_scrubbed` |
@@ -547,7 +549,7 @@ every control sits in code the model can't reach, and each one has a test.
 | Prompts and tool results shipped to LangSmith | All four tracing variables are set, and langsmith's cached lookup cleared | `test_tracing_stays_off_even_with_langsmith_tracing_v2_set` |
 | Jeni: a guessed candidate email or share recipient reaches VIRA (a CV sent to the wrong person) | `ToolCallGuard` refuses a `USER_ONLY` value (candidate name and email, new owner's email, share recipients) that isn't in the user's words, without echoing it; masked values from results fail the email pattern | `test_an_email_the_user_never_gave_is_refused`, `test_an_email_the_user_gave_is_used`, `test_invalid_input_never_reaches_vira` |
 | A token sends a CV or a job to the wrong person (a candidate's email from a result used as a recipient) | Only a colleague's token (from the user directory) or "me" (the signed-in user, set by the host) may stand in for a share recipient or new owner; a candidate's token, an unknown token or "me" with nobody signed in is refused, and candidate fields take a typed address only. Tokens are swapped back to addresses in `recruiter_cli._call`, after the guard and the approval; the audit log stays redacted | `tests/test_pii.py` |
-| Jeni: an agent changes jobs, applications or ownership without a person | Real mode gates all 16 tasks that change data; only the 6 reads run unasked | `test_real_mode_gates_every_task_that_changes_data`, `test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
+| Jeni: an agent changes jobs, applications or ownership without a person | `--approve-all` (`gate_writes`) gates all 16 tasks that change data; only the 6 reads run unasked. Without it, in any mode, only the 4 `ALWAYS_CONFIRM` tasks pause: since 2026-10-05 real mode alone no longer gates the rest (raised with Yuzhe) | `test_approve_all_gates_every_task_that_changes_data_and_the_mode_does_not`, `test_with_writes_gated_a_real_mode_agent_asks_before_a_write_but_not_before_a_read` |
 | The engine's `xrtoken` leaks or is sent elsewhere | `VIRA_XRTOKEN` is read from the environment and sent only as the `xrtoken` header to `VIRA_ACTUAL_LOCATION`, never to the other endpoints; the audit log records commands and masked bodies, not headers; no redirects are followed and proxy variables are ignored | `test_task_groups_go_to_the_engine_with_only_the_users_xrtoken` |
 | A task group sent with a missing or wrong engine setting | No location, plain http to a non-loopback host, or an empty token: nothing is sent, and the error names the setting, never the host | `test_the_engine_fails_closed_without_its_settings` |
 | An agent redoes what a reviewer removed (a skill edited off a change, a rejected change with other args) | `agent_kit.overruled()`: until the user writes again, a new call to a tool the reviewer edited or rejected gets no card (HITL's `when`) and `ToolCallGuard` refuses it. An `ALWAYS_CONFIRM` tool (shortlist, reject, share, transfer) gets a new card instead, for the reviewer to decide | `test_a_reviewers_edit_stands_until_the_user_writes_again`, `test_a_rejection_stands_and_gets_no_second_card`, `test_an_always_confirm_tool_gets_a_new_card_even_after_an_edit` |
@@ -610,8 +612,9 @@ How a call works:
   and the prompt says to read it. `ToolCallGuard` counts a result with a failed sub-task, or one
   that wasn't sent, as a failure (`agent_kit._failed`), so "make it public, then publish" can
   retry the publish that failed.
-- **Approvals.** Real mode and `--approve-all` pause all 16 writes, never the 6 reads.
-  Shortlist, reject, share and transfer ownership pause in mock mode too.
+- **Approvals.** `--approve-all` pauses all 16 writes, never the 6 reads. Shortlist, reject,
+  share and transfer ownership pause in every mode. Real mode without `--approve-all` pauses only
+  those four (since 2026-10-05).
 - **Asking.** `RULES` tells the model to ask only for what no tool can give it, not to have the
   user confirm values they already gave, to do each step once it has what that step needs, and,
   after a failure, to report the reason rather than offer a retry or another tool's workaround.
@@ -753,7 +756,7 @@ browser ─ chat UI ───────────── langgraph dev (127.0
 | File | Role |
 |---|---|
 | `langgraph.json` | Graph `jeni` from `demo/jeni_graph.py:make_graph`, the panel's routes from `demo/app.py:app`, env from `.env` (the model key; nothing reaches VIRA). |
-| `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=GATE_WRITES, own_checkpointer=False)`, with `GATE_WRITES = False`. `make_graph()` is the async factory: it builds once, on a worker thread. |
+| `demo/jeni_graph.py` | `mock_data_build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=GATE_WRITES, own_checkpointer=False)`. `make_graph()` is the async factory and builds once, from the settings `demo/run.sh` passes: `JENI_DEMO_MODE` (`mock`, or `real`: real VIRA and `jeni_db` on `TRON_POSTGRES_DSN`), `JENI_COMPANY_ID` (default 5143) and `JENI_GATE_WRITES` (default false). |
 | `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. `/demo/prompts` gives the chat its starter cards. |
 | `demo/script.py`, `demo/SCRIPT.md` | The script: eight presented acts and nine more to try (copy, edit, tidy and close a job; reject, compare and source applicants; share with "me"; hand a job over), each with its prompts, what to do at each approval card, a check over the data, and a starter group (Jobs, Applicants, Team & sharing, Guardrails). `SCRIPT.md` is the presenter's copy, with talking points and recovery; a test keeps its prompts identical. |
 | `demo/rehearse.py` | Plays the script against the running server through `langgraph_sdk`, the API the chat uses, and checks the data after each act. Every act starts from the starting data. |
@@ -765,12 +768,15 @@ What differs from `run_langgraph.py`, and why:
   from the mock's own data, so their ids agree with the tasks (§13). `remember_changes()` makes
   "make it public", then "publish it" work, and puts a created job where `find_job_by_title`
   finds it (§12).
-- **Routine writes run straight away; high-stakes ones ask.** With `GATE_WRITES = False` the demo
-  gets mock mode's rule: only the `ALWAYS_CONFIRM` tools (shortlist, reject, share an
-  application, transfer ownership) pause, as they do in every mode, and reads and lookups never
-  do. The script needs nothing more: its two cards with a decision (a rejected transfer, an
-  edited shortlist) are both `ALWAYS_CONFIRM`. `GATE_WRITES = True` makes `build_agent(gate_writes=True)`
-  pass `mode="real"` to `interrupt_on()`, so all 16 writes pause, as on real VIRA.
+- **Routine writes run straight away; high-stakes ones ask.** By default only the
+  `ALWAYS_CONFIRM` tools (shortlist, reject, share an application, transfer ownership) pause, as
+  they do in every mode, and reads and lookups never do. The script needs nothing more: its cards
+  with a decision are all `ALWAYS_CONFIRM`. `demo/run.sh --gate-writes` (`JENI_GATE_WRITES=true`)
+  makes `build_agent(gate_writes=True)` gate all 16 writes.
+- **Real mode** (since 2026-10-05). `demo/run.sh --real [--company-id N] [--gate-writes]` runs the
+  same chat on real VIRA and the TRON database for company N (default 5143). The data panel is
+  synthetic, so `run.sh` doesn't offer it, and the rehearsal checks the mock only. Without
+  `--gate-writes` a routine change reaches real VIRA without a card.
 - **No checkpointer of its own.** `langgraph dev` refuses a graph that brings one ("persistence is
   handled automatically by the platform") and keeps threads itself, in memory, flushed to
   `.langgraph_api/` (gitignored). `build_agent(own_checkpointer=False)`.
@@ -873,6 +879,9 @@ Open points:
   company is allowed, the check should exempt `share_application`.
 - The replies still run long now and then, and sometimes offer to redo what the reviewer removed
   (the code refuses it if asked in the same request).
+- **Real mode's start screen.** With `--real`, the chat still offers the 17 starter cards, which
+  name the synthetic jobs ("the backend engineer job"), and **Show data** still opens the
+  synthetic panel. Whether real mode hides both or gets cards of its own is open.
 
 ## 15. The real VIRA engine: Jeni's tasks in `--mode real`
 
@@ -885,8 +894,8 @@ How a call goes now:
   sample endpoints keep `VIRA_BASE_URL` and their `x-api-key` headers. The protections are the same
   for both (`recruiter_cli._target`, `_real_mode_problem`).
 - **The xrtoken is a user's.** v1 makes one per user (`generateXrtokenHelper({ userId })`). Every
-  task group runs with that user's rights, in that user's company, so real mode gates every write
-  (§3).
+  task group runs with that user's rights, in that user's company, so every write should wait for
+  a person: run real mode with `--approve-all` (since 2026-10-05 the mode alone doesn't gate; §3).
 - **A session is required.** Without one the engine answers 400: "Missing agent_session_uuid!
   Required: task_group_name, agent_session_uuid, tasks". v1 sends `null` there. v2 sends a fresh
   one with every task group (since 2026-10-04): the engine scopes a group's uniqueness by its

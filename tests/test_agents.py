@@ -331,15 +331,17 @@ def test_edit_runs_the_reviewers_args(vira):
     assert [v["body"]["app_ids"] for v in vira] == [[12]]
 
 
-def test_real_mode_always_gates_the_calls_that_change_vira(monkeypatch):
-    assert agent_kit.interrupt_on(False, "mock") == {}
-    assert set(agent_kit.interrupt_on(False, "real")) == {"score_candidates", "candidate_insights"}
-    assert set(agent_kit.interrupt_on(True, "mock")) == vira_tools.NAMES - vira_tools.READ_ONLY
-    monkeypatch.setattr(vira_tools, "_MODE", "real")            # the default follows configure()
-    assert set(agent_kit.interrupt_on(False)) == {"score_candidates", "candidate_insights"}
+def test_approval_follows_approve_all_not_the_mode(monkeypatch):
+    """Since 2026-10-05 the mode no longer gates writes: --approve-all (gate_writes) does, and
+    ALWAYS_CONFIRM, which has no VIRA endpoint tool."""
+    writes = vira_tools.NAMES - vira_tools.READ_ONLY
+    assert agent_kit.interrupt_on(False, "mock") == agent_kit.interrupt_on(False, "real") == {}
+    assert set(agent_kit.interrupt_on(True, "mock")) == set(agent_kit.interrupt_on(True, "real")) == writes
+    monkeypatch.setattr(vira_tools, "_MODE", "real")
+    assert agent_kit.interrupt_on(False) == {}
 
 
-def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, monkeypatch):
+def test_with_writes_gated_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, monkeypatch):
     monkeypatch.setattr(vira_tools, "_MODE", "real")
     asked = []
 
@@ -347,7 +349,7 @@ def test_a_real_mode_agent_pauses_before_scoring_but_not_before_a_read(vira, mon
         asked.extend(a["name"] for a in request["action_requests"])
         return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
 
-    agent = run_langgraph.build_agent(model=scripted(
+    agent = run_langgraph.build_agent(gate_writes=True, model=scripted(
         calls(call("find_talents", {"job_ids": [123]}, "c1")),
         calls(call("score_candidates", {"app_ids": [11]}, "c2")),
         say("Scoring was declined.")))

@@ -2,7 +2,6 @@
 import asyncio
 import json
 import os
-import threading
 import uuid
 from pathlib import Path
 
@@ -36,7 +35,7 @@ def stateless_after():
 
 def demo_agent(*replies, gate_writes=jeni_graph.GATE_WRITES):
     """The demo graph with a checkpointer of its own: the server supplies one in the demo."""
-    return jeni_graph.build(model=scripted(*replies), gate_writes=gate_writes).copy(
+    return jeni_graph.mock_data_build(model=scripted(*replies), gate_writes=gate_writes).copy(
         update={"checkpointer": InMemorySaver()})
 
 
@@ -54,7 +53,7 @@ def test_importing_the_demo_changes_nothing():
 def test_the_demo_agent_is_mock_only_and_brings_no_checkpointer(monkeypatch):
     monkeypatch.setattr(vira_tools, "_MODE", "real")
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
-    agent = jeni_graph.build(model=scripted(say("hi")))
+    agent = jeni_graph.mock_data_build(model=scripted(say("hi")))
     assert vira_tools.current_mode() == "mock" and agent.checkpointer is None
     assert mock_jeni._kept is not None
     assert all(os.environ[v] == "false" for v in agent_kit.TRACING_VARS)
@@ -137,16 +136,31 @@ def test_the_panel_shows_resets_and_never_writes_html_from_data():
     assert snap["activity"] == [] and "Kafka" not in json.dumps(snap) and state is mock_jeni._kept
 
 
-def test_the_factory_builds_once_off_the_event_loop(monkeypatch):
+def test_the_factory_builds_the_mock_demo_once_by_default(monkeypatch):
     built = []
-    monkeypatch.setattr(jeni_graph, "build", lambda: built.append(threading.current_thread()) or "graph")
+    monkeypatch.setattr(jeni_graph, "mock_data_build", lambda **kw: built.append(kw) or "graph")
     monkeypatch.setattr(jeni_graph, "_graph", None)
 
     async def twice():
         return await jeni_graph.make_graph(), await jeni_graph.make_graph()
 
     assert asyncio.run(twice()) == ("graph", "graph")
-    assert len(built) == 1 and built[0] is not threading.main_thread()
+    assert built == [{"model": None, "gate_writes": False}] and vira_tools.current_mode() == "mock"
+
+
+@pytest.mark.parametrize("settings,problem", [
+    ({"JENI_DEMO_MODE": "real"}, "TRON_POSTGRES_DSN"),             # real mode needs the database
+    ({"JENI_DEMO_MODE": "staging"}, "JENI_DEMO_MODE"),
+    ({"JENI_COMPANY_ID": "acme"}, "JENI_COMPANY_ID"),
+])
+def test_the_real_demo_is_set_up_by_run_sh_and_fails_clearly_without_it(monkeypatch, settings, problem):
+    monkeypatch.setattr(jeni_graph, "_graph", None)
+    monkeypatch.delenv("TRON_POSTGRES_DSN", raising=False)
+    for name, value in settings.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError, match=problem):
+        asyncio.run(jeni_graph.make_graph())
+    assert jeni_graph._graph is None
 
 
 # --- the script and its rehearsal (demo/script.py, demo/rehearse.py) --------------------

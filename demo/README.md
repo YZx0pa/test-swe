@@ -35,8 +35,15 @@ browser ─ chat UI (demo/ui, :3000) ──────────── langgr
 ## Run
 
 ```bash
-demo/run.sh
+demo/run.sh                                   # mock VIRA and synthetic data (the script's demo)
+demo/run.sh --gate-writes                     # every change waits for an approval card
+demo/run.sh --real --gate-writes              # real VIRA and the TRON database, company 5143
+demo/run.sh --real --company-id 5143          # the same; without --gate-writes, routine changes
+                                              # reach real VIRA with no card
 ```
+
+`--real` needs `TRON_POSTGRES_DSN` (and its tunnel) and the VIRA engine settings in `.env`. The
+data panel and the starter cards are for the synthetic data, so they don't apply to `--real`.
 
 It checks the setup, builds the UI when its sources changed, starts both servers, builds the
 agent (so the first request isn't slow), resets the data, and prints:
@@ -66,7 +73,7 @@ vary a little from run to run.
 | File | What it is |
 |---|---|
 | `../langgraph.json` | The server's config: graph `jeni`, the panel's routes, `.env`. |
-| `jeni_graph.py` | The demo agent: mock mode, the mock remembers changes, replies written for a chat window. Routine writes run straight away and the high-stakes ones (shortlist, reject, share, transfer ownership) wait for a card; `GATE_WRITES = True` puts every write behind one, as on real VIRA. |
+| `jeni_graph.py` | The demo agent: mock mode by default, the mock remembers changes. Routine writes run straight away and the high-stakes ones (shortlist, reject, share, transfer ownership) wait for a card; `demo/run.sh --gate-writes` puts every write behind one. `demo/run.sh --real` builds it on real VIRA and the TRON database instead. |
 | `app.py`, `panel.html` | The data panel and its routes, and `/demo/prompts` for the chat's starter cards. |
 | `script.py` | The acts: prompts, what to do at each card, and what the data must show afterwards. |
 | `SCRIPT.md` | The presenter's copy: what to type, what to click, what to point out. A test keeps its prompts identical to `script.py`. |

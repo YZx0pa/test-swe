@@ -115,7 +115,7 @@ def test_subagents_inherit_approval(audit_log):
     assert read_audit(audit_log) == []
 
 
-def test_real_mode_subagents_pause_before_scoring(audit_log, monkeypatch):
+def test_with_approve_all_real_mode_subagents_pause_before_scoring(audit_log, monkeypatch):
     monkeypatch.setattr(vira_tools, "_MODE", "real")
     monkeypatch.setattr(recruiter_cli, "_call", lambda *a: pytest.fail("VIRA must not be called"))
     model = scripted(
@@ -130,7 +130,8 @@ def test_real_mode_subagents_pause_before_scoring(audit_log, monkeypatch):
         seen.extend(a["name"] for a in request["action_requests"])
         return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
 
-    agent_kit.run_task(run_deepagent.build_agent(model=model), "score applicant 11", decide=decide)
+    agent_kit.run_task(run_deepagent.build_agent(approve_all=True, model=model), "score applicant 11",
+                       decide=decide)
     assert seen == ["score_candidates"] and read_audit(audit_log) == []
 
 

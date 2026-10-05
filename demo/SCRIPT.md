@@ -25,9 +25,8 @@ icon, top right).
 5. If anything looks off, press **Reset data** in the panel. Every act works from the starting
    data.
 6. Approvals: routine changes run straight away and the high-stakes ones (shortlist, reject,
-   share a CV, transfer ownership) show a card. To show a card for every change, as on real
-   VIRA, set `GATE_WRITES = True` in `demo/jeni_graph.py` and restart `demo/run.sh`; then
-   approve each extra card.
+   share a CV, transfer ownership) show a card. To show a card for every change, start the demo
+   with `demo/run.sh --gate-writes`; then approve each extra card.
 
 Starting data, for your reference:
 
@@ -46,7 +45,8 @@ Colleagues: Alice Johnson (801), Bob Tan (802), Priya Nair (803). You are Sam Le
   can't use what one step returns in the next, and it fills in defaults nobody chose.
 - v2 works one step at a time and reads real results before deciding the next step. Routine
   changes run straight away; high-stakes ones (shortlisting, rejecting, sharing a CV,
-  transferring ownership) always wait for a person. On real VIRA, every change does.
+  transferring ownership) always wait for a person. With approval turned on for every change
+  (`--gate-writes`), every change does.
 - Left: the chat. Right: the data. Watch the right side; it shows what really changed.
 
 ## 1. Finds the job by name and makes a routine change
@@ -57,7 +57,8 @@ Type: `Add Kubernetes and Terraform to the backend engineer job.`
 
 Point out:
 - Nobody typed a job id.
-- Adding skills is routine, so there's no card here. On real VIRA every change waits for one.
+- Adding skills is routine, so there's no card here. With `--gate-writes`, every change waits for
+  one.
 - In the panel, Senior Backend Engineer's skills gain Kubernetes and Terraform, and "What reached
   VIRA" shows the one write.
 
@@ -230,8 +231,8 @@ Type: `Transfer ownership of the Data Analyst job to Priya.`
 
 - Scroll the "What reached VIRA" feed: every call the demo made, reads and writes, and nothing
   the reviewer rejected.
-- What holds whatever the model does: high-stakes changes wait for a person (on real VIRA,
-  every change does); ids must come from the user or an earlier result and keep their kind; personal values must be the user's words;
+- What holds whatever the model does: high-stakes changes wait for a person (with
+  `--gate-writes`, every change does); ids must come from the user or an earlier result and keep their kind; personal values must be the user's words;
   inputs are bounded; results are masked before the model sees them; every call is audited.
 - What's next: VIRA's task-group endpoint (Jeni's writes return 404 on real VIRA today), the
   approval design for production, and hosting with auth.
@@ -245,10 +246,11 @@ Type: `Transfer ownership of the Data Analyst job to Priya.`
   231 seconds and about $0.09 on 2026-10-05.
 - **Is this real data?** No. The mock answers like VIRA and remembers changes for the demo. The
   tools go through the same guarded path as real mode.
-- **Can it run on real VIRA?** The lookups can (TRON's database). The tasks wait on VIRA serving
-  the task-group endpoint.
-- **What if the model goes wrong?** High-stakes changes wait for approval here, and every change
-  does on real VIRA. Whatever the mode, the guard refuses invented ids, ids of the wrong kind,
+- **Can it run on real VIRA?** Yes: `demo/run.sh --real --gate-writes` uses real VIRA and TRON's
+  database for one company. The starter cards and the data panel are for the synthetic data, so
+  type your own requests there.
+- **What if the model goes wrong?** High-stakes changes wait for approval, and with
+  `--gate-writes` every change does. Whatever the mode, the guard refuses invented ids, ids of the wrong kind,
   emails the user didn't type, and repeats.
 
 ## If something goes wrong

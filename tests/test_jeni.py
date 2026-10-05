@@ -529,17 +529,18 @@ def test_the_user_answers_the_agents_question_in_the_next_turn(audit_log):
     assert entry["command"] == "share-application"
 
 
-def test_real_mode_gates_every_task_that_changes_data(monkeypatch):
+def test_approve_all_gates_every_task_that_changes_data_and_the_mode_does_not(monkeypatch):
     jeni = agent_kit.toolset("jeni")
     writes = jeni_tools.names() - jeni_tools.READ_ONLY
     assert len(writes) == 11                        # of the test catalog's 15 (Jeni's real one: 16 of 22)
-    assert set(agent_kit.interrupt_on(False, "mock", toolset=jeni)) == {
-        "shortlist_multiple_application", "share_application", "transfer_job_ownership"}
-    assert set(agent_kit.interrupt_on(False, "real", toolset=jeni)) == writes
-    assert set(agent_kit.interrupt_on(True, "mock", toolset=jeni)) == writes
+    always = {"shortlist_multiple_application", "share_application", "transfer_job_ownership"}
+    assert set(agent_kit.interrupt_on(False, "mock", toolset=jeni)) == always
+    assert set(agent_kit.interrupt_on(False, "real", toolset=jeni)) == always    # since 2026-10-05
+    assert set(agent_kit.interrupt_on(True, "real", toolset=jeni)) == writes
 
 
-def test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read(monkeypatch, audit_log):
+def test_with_writes_gated_a_real_mode_agent_asks_before_a_write_but_not_before_a_read(monkeypatch,
+                                                                                        audit_log):
     monkeypatch.setattr(vira_tools, "_MODE", "real")
     monkeypatch.setattr(recruiter_cli, "_call", lambda path, query, body, mode: MockVira.call(path, query, body))
     asked = []
@@ -548,7 +549,7 @@ def test_a_real_mode_agent_asks_before_a_write_but_not_before_a_read(monkeypatch
         asked.extend(a["name"] for a in request["action_requests"])
         return [{"type": "reject", "message": "no"} for _ in request["action_requests"]]
 
-    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
+    agent = run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), gate_writes=True, model=scripted(
         calls(call("search_users", {"search_key": "Bob"}, "c1")),
         calls(call("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5}, "c2")),
         say("Declined.")))
