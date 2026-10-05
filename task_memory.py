@@ -16,6 +16,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
 import grounding
+import pii_vault
 
 
 STAGE_LOG = logging.getLogger("jeni.stages")
@@ -150,6 +151,28 @@ def _unwrap_resolver_result(data: dict) -> tuple[dict, bool]:
     return (outputs[0], True) if len(outputs) == 1 else (result, bool(outputs))
 
 
+_ROW_ID_COLUMNS = {"job_id": "job_ids", "app_id": "app_ids", "profile_id": "profile_ids",
+                   "user_id": "user_ids", "candidate_id": "candidate_ids"}
+_MAX_ROWS = 200
+
+
+def _email_token(key: str, value) -> bool:
+    # Only pii_vault tokens: a raw address must never be copied into memory.
+    return ("email" in key.lower() and isinstance(value, str)
+            and pii_vault.TOKEN.fullmatch(value) is not None)
+
+
+def _row_fields(row: dict, depth: int = 0):
+    """(key, value) pairs of one record, including nested objects but not nested lists."""
+    for key, value in row.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, dict) and depth < 3:
+            yield from _row_fields(value, depth + 1)
+        elif not isinstance(value, list):
+            yield key, value
+
+
 def _returned_compact_values(result: dict, input_args: dict) -> dict:
     """Keep declared-safe identifiers/statuses from a resolver's returned payload only."""
     values = {}
@@ -165,6 +188,33 @@ def _returned_compact_values(result: dict, input_args: dict) -> dict:
             return
         values.setdefault(field, value)
 
+    def add_rows(rows: list[dict]) -> None:
+        # A list of records becomes one id column per identifier.  Taking the
+        # first row's app_id would read as if the lookup found one application.
+        columns: dict[str, list] = {}
+        for row in rows[:_MAX_ROWS]:
+            for key, value in _row_fields(row):
+                field = _canonical_output_field(key)
+                if _email_token(key, value):
+                    columns.setdefault("emails", []).append(value)
+                elif field in _COMPACT_OUTPUT_FIELDS and value not in (None, ""):
+                    columns.setdefault(field, []).append(_normalise_output_value(field, value))
+        # Ids name the rows on their own; emails are only a fallback for rows
+        # without any (e.g. a user-directory search).
+        if any(field in _ROW_ID_COLUMNS for field in columns):
+            columns.pop("emails", None)
+        for field, column in columns.items():
+            distinct = list(dict.fromkeys(column))
+            if len(distinct) == 1 and field != "emails":
+                add(field, distinct[0])           # e.g. every row has job_id=683801
+            elif field in _ROW_ID_COLUMNS:
+                values.setdefault(_ROW_ID_COLUMNS[field], distinct)
+            elif field == "emails":
+                values.setdefault("emails", distinct)
+            # Mixed per-row statuses or company ids are left out: they are not
+            # useful without the row they belong to.
+        values["returned"] = max(values.get("returned", 0), len(rows))
+
     def visit(value, depth: int = 0) -> None:
         if depth > 6:
             return
@@ -174,13 +224,17 @@ def _returned_compact_values(result: dict, input_args: dict) -> dict:
                     add(key, nested)
                 visit(nested, depth + 1)
         elif isinstance(value, list):
-            for nested in value[:30]:
-                visit(nested, depth + 1)
+            rows = [item for item in value if isinstance(item, dict)]
+            if rows:
+                add_rows(rows)
 
     for key, value in (result.get("resolved_fields") or {}).items():
         if isinstance(key, str):
             add(key, value)
     visit(result)
+    total = result.get("total")
+    if isinstance(total, int) and not isinstance(total, bool):
+        values["total"] = total
     return values
 
 
@@ -318,11 +372,14 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
     if not kept:
         return ""
 
-    def short(value, limit=12):
+    def short(value, limit=50):
         if isinstance(value, list):
-            return "[" + ", ".join(str(item) for item in value[:limit]) + (
-                "…" if len(value) > limit else "") + "]"
+            more = f", … +{len(value) - limit} more" if len(value) > limit else ""
+            return "[" + ", ".join(str(item) for item in value[:limit]) + more + "]"
         return str(value)
+
+    def counts_first(values):
+        return sorted(values.items(), key=lambda item: item[0] not in ("returned", "total"))
 
     def args(values, origins):
         return ", ".join(f"{field}={short(value)}" +
@@ -338,7 +395,7 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
             if event["kind"] == "resolve":
                 result = event.get("result") or {}
                 output = ", ".join(f"{key}={short(value)}"
-                                   for key, value in (result.get("values") or {}).items())
+                                   for key, value in counts_first(result.get("values") or {}))
                 text = f"Resolve: {call} -> {output or result.get('status', 'no result')}"
             elif event["kind"] == "selection":
                 text = f"Selection: {call}"
