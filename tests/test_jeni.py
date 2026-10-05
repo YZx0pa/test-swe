@@ -92,7 +92,7 @@ def test_the_catalog_is_read_from_the_configured_file():
 def test_v2s_task_lists_name_real_v1_tasks():
     # READ_ONLY, FIXED_VALUES and NO_DEFAULT hold tool names; a typo would silently not apply.
     known = {name.removeprefix("task_") for name in mock_jeni.HANDLERS}
-    assert len(known) == 22 and len(jeni_tools.READ_ONLY) == 6
+    assert len(known) == 23 and len(jeni_tools.READ_ONLY) == 7
     assert jeni_tools.READ_ONLY | set(jeni_tools.FIXED_VALUES) | {t for t, _ in jeni_tools.NO_DEFAULT} <= known
     assert {t["task_name"] for t in jeni_tools.load_catalog()} <= set(mock_jeni.HANDLERS)
 

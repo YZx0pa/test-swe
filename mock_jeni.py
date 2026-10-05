@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import threading
 import time
 import uuid
@@ -357,6 +358,18 @@ def _page(f, rows: list) -> list:
     return rows[skip:skip + limit]
 
 
+def _get_jobs(f, s) -> Result:
+    """VIRA reads the request in free text; the mock only keeps jobs whose status, title,
+    country or a skill the request names, or all of them if it names none."""
+    words = set(re.findall(r"[a-z0-9.+#]+", str(f.get("search_query_text") or "").lower()))
+    jobs = sorted(s.jobs.values(), key=lambda j: j["jobId"])
+    def terms(j):
+        return {j["status"], *str(j["jobName"]).lower().split(), str(j.get("countryName") or "").lower(),
+                *(k.lower() for k in j["skills"])}
+    rows = [j for j in jobs if words & terms(j)] or jobs
+    return {"jobs": [{**j, "skills": list(j["skills"])} for j in rows], "total": len(rows)}, None
+
+
 def _get_applications(f, s) -> Result:
     key = str(f.get("search_key") or "").lower()
     rows = [_application(s, a) for a, r in s.apps.items()
@@ -426,6 +439,7 @@ HANDLERS: Dict[str, Handler] = {
     "task_reject_multiple_application": _per_application("rejected"),
     "task_shortlist_multiple_application": _per_application("shortlisted"),
     "task_share_application": _share_application,
+    "task_get_jobs": _get_jobs,
     "task_get_applications": _get_applications,
     "task_get_single_application_details": _get_single_application_details,
     "task_create_application_to_job": _create_application_to_job,

@@ -618,7 +618,7 @@ the proposals for engineering are in
 
 | File | What it is |
 |---|---|
-| `config/README.md` | Where Jeni's task catalog goes (`config/jeni_tasks.json`, or `JENI_TASKS_FILE`) and how to build or check it. The catalog, v1's `XAGENT_SUBTASK_API_CONFIG_SCHEMA` with 22 tasks, is internal and shared outside git; the rest of `config/` is gitignored. |
+| `config/README.md` | Where Jeni's task catalog goes (`config/jeni_tasks.json`, or `JENI_TASKS_FILE`) and how to build or check it. The catalog, v1's `XAGENT_SUBTASK_API_CONFIG_SCHEMA` with 23 tasks, is internal and shared outside git; the rest of `config/` is gitignored. |
 | `tests/fixtures/jeni_tasks.json` | A synthetic 15-task catalog in v1's format for the offline tests, with v1's field names but not its descriptions. |
 | `jeni_tools.py` | Reads the catalog on first use (`CatalogMissing` if it isn't there) and builds one typed tool per task from it (pydantic models: types, limits, descriptions), sends a call as a one-task group in v1's payload format through `recruiter_cli.execute()`, and hands the model only the sub-task result. `READ_ONLY` (6 tasks), `USER_ONLY` fields, `FIXED_VALUES` (`is_private`), `NO_DEFAULT` (`role_id`), `RULES` for the prompt. `python jeni_tools.py` lists the tasks and flags any the mock can't answer; `--from-js tasks.js` builds the catalog. |
 | `mock_jeni.py` | Mock of VIRA's task-group API: one handler per task over synthetic jobs, users and applications, answering in the shape of a real reply (group → task → sub-task, `agentSubTaskResponse`, `failedReason`). Stateless and deterministic unless `remember_changes()` is called (the demo). |

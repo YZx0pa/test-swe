@@ -76,7 +76,7 @@ RECIPIENT_RE = r"^(?:[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+|<email:[0-9a-f]{12}>|[Mm][Ee
 # result would be "<redacted>" anyway; ToolCallGuard refuses one the user didn't write.
 USER_ONLY = frozenset({"emails", "candidate_email", "candidate_name", "new_owner_user_email"})
 
-READ_ONLY = frozenset({"get_applications", "get_single_application_details",
+READ_ONLY = frozenset({"get_jobs", "get_applications", "get_single_application_details",
                        "get_single_job_details", "search_users",
                        "get_suggested_candidates_for_a_job",
                        "get_self_sourcing_candidates_for_a_job"})
@@ -138,6 +138,9 @@ Jeni rules:
   later step.
 - When a call fails, report the reason. Don't offer to retry it, or to get the same effect
   with a different tool.
+- After a change succeeds, you may suggest a natural next step (after shortlisting or
+  rejecting, sharing the applications; after publishing a job, reviewing its applications).
+  If a colleague's email isn't known, offer to look them up with search_users.
 """
 
 

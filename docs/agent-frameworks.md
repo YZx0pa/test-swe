@@ -84,7 +84,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `mini_policy.py` | What mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call; everything else is refused. Stdlib only, shared by `mini_env`, `grounding` and `compare_agents`. |
 | `terminal.py` | `printable()`: strips control, bidi and zero-width characters from model- or VIRA-written text before it is printed. |
 | `mini_env.py` | `RecruiterEnvironment`, mini's "bash" tool: runs what `mini_policy` allows as an argv list, with the host's mode and a minimal environment. |
-| `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
+| `jeni_tools.py` / `mock_jeni.py` | Jeni's own 23 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
 | `tests/` | 377 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
@@ -644,7 +644,7 @@ What v1's catalog shows, and what v2 changes (proposals for engineering):
   calls `job_id` mandatory but marks it optional; `task_get_jobs` is commented out, so no task
   finds a job by name.
 - v1's response schema accepts any `task_name` and any field in any task. v2's tools are exactly
-  the 22 tasks with their own fields.
+  the 23 tasks with their own fields.
 
 The mock (`mock_jeni.py`) holds synthetic jobs (7001–7003), users (801–803), applications
 (5101–5104, 5201–5202) and suggested and self-sourcing candidates. By default it is stateless:
@@ -674,7 +674,7 @@ Open points:
 
 Jeni's tasks take ids, but people name things: "the data scientist job", "Bob". v1 looks names
 up in Jeni's database before it plans (`handleSearchJobs`, `handleSearchUsers`). `jeni_db` gives
-the agent two lookups as read-only tools next to the 22 tasks, so it turns a job's title into an
+the agent two lookups as read-only tools next to the 23 tasks, so it turns a job's title into an
 id; people come from Jeni's own `search_users`. The other queries run as entity checks
 (`entities_db_validation.py`, since 2026-10-03) before a Jeni write executes: the job and
 application ids are in the company, recipients are active recruiters (tokens and "me" resolved
