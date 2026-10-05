@@ -6,9 +6,10 @@
     .venv/bin/python -m demo.rehearse --repeat 3       # three passes: how reliably each act lands
     .venv/bin/python -m demo.rehearse --act ask --act email
 
-Each pass resets the data first (POST /demo/reset) and runs each act in a new thread, as the
-presenter does with a new chat; at the end it deletes its threads, so the chat's history
-stays clean, and resets the data for the real run.  At an approval card it does what the script says: approve,
+Every act starts from the starting data (POST /demo/reset) in a new thread, as the presenter
+does with a new chat, so one act's changes (a copied job, say) can't change the next one's
+answer; at the end it deletes its threads, so the chat's history stays clean, and resets the
+data for the real run.  At an approval card it does what the script says: approve,
 reject or edit.  A turn marked if_needed is sent only while the act's check still fails, like
 the answer to "as a team member or an administrator?".  The check reads the data panel, so a
 pass means the data changed as the script says, not that the reply sounded right.  An act
@@ -157,8 +158,8 @@ def rehearse(server, acts, repeat: int = 1, out=print, keep_threads: bool = Fals
     results = []
     try:
         for n in range(1, repeat + 1):
-            server.reset()
             for act in acts:
+                server.reset()
                 out(printable(f"\n[pass {n}] {act.key}: {act.title}"))
                 result = run_act(server, act, out=lambda line: out(printable(line)))
                 out(f"  {'PASS' if result['ok'] else 'FAIL'}: {act.expect}"

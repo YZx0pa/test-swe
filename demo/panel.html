@@ -138,6 +138,7 @@ function detail(fields) {
   if (fields.is_private !== undefined) parts.push(fields.is_private ? "private" : "public");
   if (fields.min_exp !== undefined || fields.max_exp !== undefined)
     parts.push((fields.min_exp ?? "?") + "–" + (fields.max_exp ?? "?") + " yrs");
+  if (fields.vacancy) parts.push(fields.vacancy + (fields.vacancy > 1 ? " openings" : " opening"));
   if (fields.country_name) parts.push(fields.country_name);
   if (fields.recipients) parts.push(fields.recipients + (fields.recipients > 1 ? " recipients" : " recipient"));
   if (fields.reason_for_closure) parts.push("reason: " + fields.reason_for_closure);

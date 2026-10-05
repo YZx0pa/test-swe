@@ -19,6 +19,7 @@ import pii_vault
 import vira_tools
 from demo import app as demo_app
 from demo import jeni_graph, rehearse, script
+from conftest import STAND_INS, extend_catalog
 from fakes import call, calls, say, scripted
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -202,8 +203,17 @@ def test_the_presenters_copy_has_every_prompt_and_the_ui_gets_the_first_ones():
     text = (ROOT / "demo" / "SCRIPT.md").read_text(encoding="utf-8")
     missing = [t.say for a in script.ACTS for t in a.turns if f"`{t.say}`" not in text]
     assert missing == []
-    assert TestClient(demo_app.app).get("/demo/prompts").json() == [
-        {"key": a.key, "title": a.title, "prompt": a.turns[0].say} for a in script.ACTS]
+    served = TestClient(demo_app.app).get("/demo/prompts").json()
+    assert sorted(served, key=lambda p: p["number"]) == [
+        {"key": a.key, "number": n, "category": a.category, "title": a.title, "prompt": a.turns[0].say}
+        for n, a in enumerate(script.ACTS, 1)]
+    groups = [p["category"] for p in served]                   # grouped, in the UI's order
+    assert groups == sorted(groups, key=script.CATEGORIES.index)
+
+
+def test_every_act_has_a_starter_group_and_every_group_has_acts():
+    assert {a.category for a in script.ACTS} == set(script.CATEGORIES)
+    assert len({a.key for a in script.ACTS}) == len(script.ACTS) == 17
 
 
 def test_every_check_fails_on_the_starting_data_unless_its_cards_are_named():
@@ -268,3 +278,76 @@ def test_a_rehearsal_deletes_its_threads_and_leaves_the_starting_data(audit_log)
     assert result["ok"] and server.deleted == [result["thread"]]
     assert server.snapshot()["activity"] == []
     assert "| lookup | 1/1 |" in rehearse.summary([result], [act("lookup")])
+
+
+# --- more to try (acts 9-17): each check passes on the calls it describes ----------------
+def find(title, call_id="c1"):
+    return calls(call("find_job_by_title", {"title": title}, call_id))
+
+
+def more_to_try(key, priya):
+    return {
+        "clone": [find("backend engineer"), calls(call("clone_job", {"job_id": 7001}, "c2")),
+                  calls(call("add_job_skills", {"job_id": mock_jeni.cloned_job_id(7001), "skills": ["Rust"]},
+                             "c3")),
+                  say("Copied it as job 8001 and added Rust to the copy.")],
+        "tidy": [find("backend engineer"),
+                 calls(call("remove_job_skills", {"job_id": 7001, "skills": ["PostgreSQL"]}, "c2")),
+                 calls(call("make_job_public", {"job_id": 7001}, "c3")), say("Done.")],
+        "edit": [find("product designer"),
+                 calls(call("edit_job", {"job_id": 7003, "vacancy": 2, "min_exp": 2, "max_exp": 4}, "c2")),
+                 say("Updated.")],
+        "close": [find("product designer"),
+                  calls(call("make_job_closed", {"job_id": 7003, "reason_for_closure": "The role has been filled"},
+                             "c2")), say("Closed.")],
+        "reject_weakest": [find("backend engineer"), calls(call("get_applications", {"job_id": 7001}, "c2")),
+                           calls(call("reject_multiple_application", {"app_ids": [5104]}, "c3")),
+                           say("Rejected 5104.")],
+        "compare": [find("data analyst"), calls(call("get_applications", {"job_id": 7002}, "c2")),
+                    say("5201, at 0.88, is shortlisted.")],
+        "suggest": [find("backend engineer"),
+                    calls(call("get_suggested_candidates_for_a_job", {"job_id": 7001}, "c2")),
+                    say("Three suggested candidates.")],
+        "me": [calls(call("share_application", {"app_ids": [5103], "emails": ["me"], "message": "For later"},
+                          "c1")), say("Shared with you.")],
+        "hand_over": [find("data analyst"), calls(call("search_users", {"search_key": "Priya"}, "c2")),
+                      calls(call("transfer_job_ownership", {"job_id": 7002, "new_owner_user_email": priya}, "c3")),
+                      say("Priya owns it now.")],
+    }[key]
+
+
+@pytest.fixture
+def full_catalog(monkeypatch, tmp_path):
+    extend_catalog(monkeypatch, tmp_path, *STAND_INS)
+
+
+@pytest.mark.parametrize("key", ["clone", "tidy", "edit", "close", "reject_weakest", "compare", "suggest",
+                                 "me", "hand_over"])
+def test_each_act_to_try_passes_its_check_on_the_calls_it_describes(audit_log, full_catalog, key):
+    priya = pii_vault.VAULT.token("priya.nair@example.com", pii_vault.COLLEAGUE)
+    result, lines = rehearsed(InProcess(*more_to_try(key, priya)), key)
+    assert result["ok"], "\n".join(lines)
+
+
+def test_a_skill_added_to_the_original_fails_the_copy_act(audit_log, full_catalog):
+    result, _ = rehearsed(InProcess(
+        find("backend engineer"), calls(call("clone_job", {"job_id": 7001}, "c2")),
+        calls(call("add_job_skills", {"job_id": 7001, "skills": ["Rust"]}, "c3")), say("Done.")), "clone")
+    assert not result["ok"]
+
+
+def test_rejecting_the_wrong_applicant_fails_the_reject_act(audit_log, full_catalog):
+    result, _ = rehearsed(InProcess(
+        find("backend engineer"), calls(call("get_applications", {"job_id": 7001}, "c2")),
+        calls(call("reject_multiple_application", {"app_ids": [5101]}, "c3")), say("Rejected 5101.")),
+        "reject_weakest")
+    assert not result["ok"]
+
+
+def test_every_act_starts_from_the_starting_data(audit_log):
+    """One act's changes (a copied job makes "backend engineer" ambiguous) never reach the next."""
+    server = InProcess(say("That isn't supported."), say("That isn't supported."))
+    resets = []
+    server.reset = lambda: resets.append(len(resets))
+    rehearse.rehearse(server, [act("unsupported"), act("unsupported")], out=lambda line: None)
+    assert len(resets) == 3                                    # before each act, and at the end

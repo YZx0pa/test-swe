@@ -9,7 +9,7 @@ import pii_vault
 import recruiter_cli
 import vira_results
 import vira_tools
-from conftest import done, read_audit, reply
+from conftest import done, extend_catalog, read_audit, reply
 
 vira_tools.configure("mock")
 UUID = "6f1c2a52-0000-4000-8000-0000000000aa"
@@ -353,26 +353,12 @@ def test_the_callback_keeps_the_id_create_job_returned():
     assert not vira_check.is_closed(details({"isJobClosed": False}))
 
 
-def stand_in(name, description, *fields):
-    """A catalog entry in the fixture's style; fields are (name, mandatory)."""
-    return {"task_name": f"task_{name}", "description": description, "level": 1, "task_output": [],
-            "sub_tasks": [{"sub_task_name": f"sub_task_{name}", "description": description, "fields": [
-                {"field_name": f, "mandatory": m, "field_value": "{{to_be_filled}}"} for f, m in fields]}]}
-
-
 @pytest.fixture
 def kept_mock(monkeypatch, tmp_path):
     """The mock remembering changes, and a catalog with the three tasks the write test needs
-    that the shared fixture leaves out."""
-    import os
+    that the test catalog leaves out."""
     import mock_jeni
-    catalog = json.loads(open(os.environ["JENI_TASKS_FILE"], encoding="utf-8").read())
-    catalog["tasks"] += [
-        stand_in("remove_job_skills", "Remove skills from a job.", ("job_id", True), ("skills", True)),
-        stand_in("edit_job", "Edit a job.", ("job_id", True), ("job_title", False), ("job_description", False)),
-        stand_in("make_job_closed", "Close a job.", ("job_id", True), ("reason_for_closure", False))]
-    (tmp_path / "jeni_tasks.json").write_text(json.dumps(catalog), encoding="utf-8")
-    monkeypatch.setenv("JENI_TASKS_FILE", str(tmp_path / "jeni_tasks.json"))
+    extend_catalog(monkeypatch, tmp_path, "remove_job_skills", "edit_job", "make_job_closed")
     state = mock_jeni.remember_changes()
     state.reset()
     yield state

@@ -1,17 +1,22 @@
 # Jeni v2 demo script
 
-About 12 minutes: a 1-minute opening, eight short acts, a 2-minute close. Everything runs on
-mock VIRA with synthetic jobs, people and applicants. Nothing reaches VIRA or a real database.
+About 12 minutes: a 1-minute opening, eight short acts, a 2-minute close. Nine more acts
+("More to try", 9–17) show the rest of what Jeni can do, for questions or a longer session.
+Everything runs on mock VIRA with synthetic jobs, people and applicants. Nothing reaches VIRA or
+a real database.
 
 The prompts below are the ones `demo/rehearse.py` plays and checks, and the chat's starter cards
-offer each act's first prompt. Type them as written, or click the card and press Enter. Start
-each act in a **new chat** (the pencil icon, top right).
+offer each act's first prompt, grouped as Jobs, Applicants, Team & sharing and Guardrails. Type
+them as written, or click the card and press Enter. Start each act in a **new chat** (the pencil
+icon, top right).
 
 ## Before the audience arrives
 
 1. `demo/run.sh`, and wait for "Jeni v2 demo is up".
-2. Rehearse once: `.venv/bin/python -m demo.rehearse` (about 2 minutes, about $0.05). It should
-   end `8/8`. It deletes its chats and resets the data when it finishes.
+2. Rehearse once: `.venv/bin/python -m demo.rehearse` (all 17 acts: about 4 minutes, about
+   $0.09). It should end `17/17`. For the eight presented acts only, add `--act` for each
+   (`--act lookup --act reject …`). Every act starts from the starting data, and at the end it
+   deletes its chats and resets the data.
 3. Open <http://localhost:3000>. Zoom the browser to 110–125% so the back row can read it. The
    data panel is on the right; **Show data** / **Hide data** toggles it.
 4. The chat never shows tool calls, their payloads or raw results. An approval card says in
@@ -95,8 +100,8 @@ Type: `Shortlist the two strongest applicants for the backend engineer job.`
 Point out:
 - The pick came from the data, not from a guess.
 - What ran is the reviewer's version: in the panel only 5102 turns shortlisted. Jeni reports
-  the edit and doesn't go around it: until you write again, a new call to shortlist gets no card
-  and is refused in code. If it offers to shortlist 5103 as well, that's only an offer.
+  the edit. Shortlisting always comes back to a person: if Jeni tries 5103 again, that is a new
+  card, and you reject it.
 
 ## 5. Asks only for what it can't look up, then carries on
 
@@ -156,6 +161,71 @@ Type: `Share the Product Designer job on Facebook.`
 Point out:
 - No approximation and no card: nothing reached VIRA.
 
+## More to try (9–17)
+
+Not in the presented run. Each works from the starting data, in a new chat: press **Reset
+data** first. (After act 9 without a reset, "backend engineer" matches two jobs, and Jeni asks
+which one you mean.)
+
+### 9. Copies a job and changes only the copy
+
+Type: `Copy the backend engineer job and add Rust to the copy only.`
+
+- Jeni clones job 7001, reads the copy's new id (8001) and adds Rust to that id.
+- The panel shows a second Senior Backend Engineer with Rust; job 7001 doesn't have it.
+
+### 10. Makes two routine changes from one request
+
+Type: `Remove PostgreSQL from the backend engineer job and make it public.`
+
+- Two routine writes, no card: job 7001 loses PostgreSQL and turns public.
+
+### 11. Edits a job's details
+
+Type: `Set the Product Designer job to 2 openings, needing 2 to 4 years of experience.`
+
+- One edit on job 7003. The feed shows "2–4 yrs · 2 openings".
+
+### 12. Closes a job and records why
+
+Type: `Close the Product Designer job: the role has been filled.`
+
+- Job 7003 turns Closed, and the feed shows the reason.
+
+### 13. Rejects an applicant once a person approves
+
+Type: `Reject the weakest applicant for the backend engineer job.`
+
+- Jeni reads the scores and the card asks to reject application 5104 (0.64). **Approve.**
+- Rejecting, like shortlisting, always waits for a person.
+
+### 14. Answers from the data without changing anything
+
+Type: `Which applicant for the Data Analyst job has the best match score, and what stage are they at?`
+
+- Jeni reads the applications and answers: 5201, 0.88, shortlisted. Nothing changes.
+
+### 15. Finds suggested candidates for a job
+
+Type: `Find suggested candidates for the backend engineer job.`
+
+- Jeni lists the suggested candidates for job 7001 with their match scores. A read only.
+
+### 16. Knows who "me" is
+
+Type: `Share application 5103 with me, with a note: follow up next week.`
+
+- The card says "Share application 5103 with you, with the note …". **Approve.** You are Sam
+  Lee; the address is filled in only when the call is sent, and the model never sees it.
+- A share needs a note; without one, Jeni asks for it.
+
+### 17. Looks a colleague up and hands a job over, once approved
+
+Type: `Transfer ownership of the Data Analyst job to Priya.`
+
+- Jeni finds Priya in the company's users and the card asks to transfer job 7002 to her.
+  **Approve.** The panel shows Priya Nair as the owner. Compare act 2, where you said no.
+
 ## Close (2 minutes)
 
 - Scroll the "What reached VIRA" feed: every call the demo made, reads and writes, and nothing
@@ -171,7 +241,8 @@ Point out:
 - **Which model?** gpt-5-mini (`CHAT_MODEL`). Any tool-calling model works; the guard doesn't
   depend on it.
 - **Speed and cost?** 8–22 seconds per act including the approvals, about 145k tokens and about
-  $0.05 for the whole script (median of three `demo/rehearse.py` passes).
+  $0.05 for the eight presented acts (median of three `demo/rehearse.py` passes); all 17 took
+  231 seconds and about $0.09 on 2026-10-05.
 - **Is this real data?** No. The mock answers like VIRA and remembers changes for the demo. The
   tools go through the same guarded path as real mode.
 - **Can it run on real VIRA?** The lookups can (TRON's database). The tasks wait on VIRA serving

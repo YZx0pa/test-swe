@@ -86,8 +86,10 @@ without `.github/`, and the one after it holds every local change (`git log -- d
   upload (Jeni doesn't read files).
 - The data panel: **Show data** / **Hide data**, and a column with the server's `/demo` page, open
   by default (`?data=false` hides it).
-- Starter cards on an empty chat, from `/demo/prompts`. A click fills the input box; the presenter
-  sends it.
+- Starter cards on an empty chat, from `/demo/prompts`: all 17 acts, numbered as in `SCRIPT.md`
+  and grouped as Jobs, Applicants, Team & sharing and Guardrails. A click fills the input box and
+  brings it into view; the presenter sends it. The start screen scrolls to its last card (its top
+  offset is padding: a margin pushed the scroll area's bottom out of the window).
 - **No internal workings on screen.** Tool calls, their payloads and raw results are never shown,
   and the "Hide Tool Calls" switch and the API host badge are gone. The approval card shows the
   server's plain-language summary ("Shortlist applications 5102 and 5103.") instead of the tool

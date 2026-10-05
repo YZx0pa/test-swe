@@ -64,6 +64,50 @@ def reply(result: dict, i: int = 0):
     return result["subtasks"][i].get("result")
 
 
+def stand_in(name: str, description: str, *fields) -> dict:
+    """A catalog entry in the test catalog's style; fields are (name, mandatory)."""
+    return {"task_name": f"task_{name}", "description": description, "level": 1, "task_output": [],
+            "sub_tasks": [{"sub_task_name": f"sub_task_{name}", "description": description, "fields": [
+                {"field_name": f, "mandatory": m, "field_value": "{{to_be_filled}}"} for f, m in fields]}]}
+
+
+# Tasks the synthetic catalog leaves out, as stand-ins for the tests that need them.
+STAND_INS = {
+    "remove_job_skills": stand_in("remove_job_skills", "Remove skills from a job.",
+                                  ("job_id", True), ("skills", True)),
+    "edit_job": stand_in("edit_job", "Edit a job.", ("job_id", True), ("job_title", False),
+                         ("job_description", False), ("min_exp", False), ("max_exp", False),
+                         ("vacancy", False)),
+    "make_job_closed": stand_in("make_job_closed", "Close a job.", ("job_id", True),
+                                ("reason_for_closure", False)),
+    "make_job_open": stand_in("make_job_open", "Reopen a job.", ("job_id", True)),
+    "reject_multiple_application": stand_in("reject_multiple_application", "Reject applications.",
+                                            ("app_ids", True)),
+    "get_suggested_candidates_for_a_job": stand_in("get_suggested_candidates_for_a_job",
+                                                   "Suggested candidates for a job.", ("job_id", True)),
+}
+
+
+def extend_catalog(monkeypatch, tmp_path, *names) -> None:
+    """Point JENI_TASKS_FILE at the test catalog plus these stand-ins, for one test."""
+    catalog = json.loads(open(os.environ["JENI_TASKS_FILE"], encoding="utf-8").read())
+    catalog["tasks"] += [STAND_INS[n] for n in names]
+    path = tmp_path / "jeni_tasks.json"
+    path.write_text(json.dumps(catalog), encoding="utf-8")
+    monkeypatch.setenv("JENI_TASKS_FILE", str(path))
+    import agent_kit
+    agent_kit._jeni.cache_clear()              # its names come from the catalog in use
+
+
+@pytest.fixture(autouse=True)
+def jeni_toolset_from_the_catalog_in_use():
+    """agent_kit caches the jeni toolset, names included; a test that extends the catalog
+    must not leave its names to the next test (or meet an earlier test's)."""
+    yield
+    import agent_kit
+    agent_kit._jeni.cache_clear()
+
+
 def read_audit(path) -> list[dict]:
     if not path.exists():
         return []

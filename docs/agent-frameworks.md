@@ -87,7 +87,7 @@ recruiter_cli.execute(…, mode=…)   gate → _call → _audit → _mask_pii  
 | `jeni_tools.py` / `mock_jeni.py` | Jeni's own 22 tasks as typed tools, one task per call, on a mock of VIRA's task-group API (§12). `--tools jeni` in the LangGraph and deepagents runners. The task catalog is internal and read from `config/jeni_tasks.json`, outside git (`config/README.md`). |
 | `db_queries.py` / `db_lookup.py` / `db_tools.py` | Read-only lookups in Jeni's database (§13): a job by title, a user by name, a job's applications, and checks of ids and emails, scoped to the company the runner sets. `--tools jeni_db` (LangGraph's default) adds them to Jeni's tasks. |
 | `demo/`, `langgraph.json` | The demo (§14): the Jeni agent on LangGraph's dev server, on the mock with its changes kept and every write gated, plus a live data panel. |
-| `tests/` | 361 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
+| `tests/` | 374 offline tests: mock VIRA, a scripted fake model, `.env` disabled, audit log in `tmp_path`. |
 
 Guarantees that hold in every new runtime:
 - Results are masked by `_mask_pii` before they reach the model, the graph state or the checkpointer:
@@ -459,7 +459,7 @@ isn't in this suite, because its CLI doesn't cover Jeni's tasks.
 uv pip install -r requirements-dev.txt        # or, exact pins with hashes:
 # uv pip install --require-hashes -r requirements.lock.txt
 .venv/bin/pip-audit -r requirements.lock.txt --disable-pip      # known vulnerabilities in the pins
-.venv/bin/python -m pytest -q                                   # offline, 361 tests
+.venv/bin/python -m pytest -q                                   # offline, 374 tests
 
 JENI_MODE=mock python run_mini.py                                         # mini baseline, no shell
 python run_langgraph.py --mode mock --tools vira --task "Find potential talents for job 123"   # mock VIRA
@@ -755,8 +755,8 @@ browser ─ chat UI ───────────── langgraph dev (127.0
 | `langgraph.json` | Graph `jeni` from `demo/jeni_graph.py:make_graph`, the panel's routes from `demo/app.py:app`, env from `.env` (the model key; nothing reaches VIRA). |
 | `demo/jeni_graph.py` | `build()`: tracing off, `vira_tools.configure("mock")`, `mock_jeni.remember_changes()`, then `jeni_db` on the kept State's fixtures (`fake_db_queries`, company 5143) and `run_langgraph.build_agent(gate_writes=GATE_WRITES, own_checkpointer=False)`, with `GATE_WRITES = False`. `make_graph()` is the async factory: it builds once, on a worker thread. |
 | `demo/app.py`, `demo/panel.html` | The data panel: jobs with their status, visibility, LinkedIn posting, skills, team and applicants, and "What reached VIRA", every sub-task the mock ran, reads and writes. It polls `/demo/state` every second and highlights what changed; **Reset data** posts `/demo/reset`. `/demo/prompts` gives the chat its starter cards. |
-| `demo/script.py`, `demo/SCRIPT.md` | The script: eight acts, each with its prompts, what to do at each approval card, and a check over the data. `SCRIPT.md` is the presenter's copy, with talking points and recovery; a test keeps its prompts identical. |
-| `demo/rehearse.py` | Plays the script against the running server through `langgraph_sdk`, the API the chat uses, and checks the data after each act. |
+| `demo/script.py`, `demo/SCRIPT.md` | The script: eight presented acts and nine more to try (copy, edit, tidy and close a job; reject, compare and source applicants; share with "me"; hand a job over), each with its prompts, what to do at each approval card, a check over the data, and a starter group (Jobs, Applicants, Team & sharing, Guardrails). `SCRIPT.md` is the presenter's copy, with talking points and recovery; a test keeps its prompts identical. |
+| `demo/rehearse.py` | Plays the script against the running server through `langgraph_sdk`, the API the chat uses, and checks the data after each act. Every act starts from the starting data. |
 | `demo/run.sh`, `demo/README.md` | The launcher (preflight, UI build when needed, both servers, the agent built and the data reset before anyone types) and the setup guide. |
 | `requirements-demo.txt`, `requirements-demo.lock.txt` | `requirements.txt` plus `langgraph-cli[inmem]==0.4.32`. The lock keeps every pin of `requirements.lock.txt` and adds 27 packages (langgraph-api 0.15.1, the in-memory runtime, uvicorn extras, OpenTelemetry), all with hashes; no known vulnerabilities on 2026-10-01. |
 

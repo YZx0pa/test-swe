@@ -98,10 +98,17 @@ function DataToggle({
   );
 }
 
-type StarterPrompt = { key: string; title: string; prompt: string };
+type StarterPrompt = {
+  key: string;
+  number?: number;
+  category?: string;
+  title: string;
+  prompt: string;
+};
 
-// Jeni demo: each act's first prompt from the server (demo/script.py via /demo/prompts).
-// A click puts it in the input box; the presenter sends it.
+// Jeni demo: each act's first prompt from the server (demo/script.py via /demo/prompts),
+// grouped by category and numbered as in demo/SCRIPT.md.  A click puts it in the input box;
+// the presenter sends it.
 function StarterPrompts({
   apiUrl,
   onPick,
@@ -124,20 +131,45 @@ function StarterPrompts({
   }, [apiUrl]);
 
   if (!prompts.length) return null;
+  const groups: { category: string; items: StarterPrompt[] }[] = [];
+  prompts.forEach((p, i) => {
+    const item = { ...p, number: p.number ?? i + 1 };
+    const category = p.category ?? "";
+    const group = groups.find((g) => g.category === category);
+    if (group) group.items.push(item);
+    else groups.push({ category, items: [item] });
+  });
   return (
-    <div className="mx-auto mb-8 grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2">
-      {prompts.map((p, i) => (
-        <button
-          key={p.key}
-          type="button"
-          onClick={() => onPick(p.prompt)}
-          className="cursor-pointer rounded-xl border bg-white p-3 text-left text-sm transition-colors hover:bg-gray-50"
+    <div className="mx-auto mb-8 flex w-full max-w-3xl flex-col gap-5">
+      <p className="text-center text-sm text-gray-500">
+        Try one: a click puts it in the box above.
+      </p>
+      {groups.map((g) => (
+        <section
+          key={g.category || "prompts"}
+          className="flex flex-col gap-2"
         >
-          <span className="block text-xs font-medium text-gray-500">
-            {i + 1}. {p.title}
-          </span>
-          <span className="mt-1 block text-gray-900">{p.prompt}</span>
-        </button>
+          {g.category && (
+            <h2 className="text-xs font-semibold tracking-wide text-gray-500 uppercase">
+              {g.category}
+            </h2>
+          )}
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {g.items.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => onPick(p.prompt)}
+                className="cursor-pointer rounded-xl border bg-white p-3 text-left text-sm transition-colors hover:bg-gray-50"
+              >
+                <span className="block text-xs font-medium text-gray-500">
+                  {p.number}. {p.title}
+                </span>
+                <span className="mt-1 block text-gray-900">{p.prompt}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );
@@ -157,6 +189,15 @@ export function Thread() {
     parseAsBoolean.withDefault(true),
   );
   const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // A starter fills the box and brings it into view: the list can be longer than the window.
+  const pickStarter = (prompt: string) => {
+    setInput(prompt);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus({ preventScroll: true });
+      inputRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  };
   const {
     contentBlocks,
     setContentBlocks,
@@ -341,7 +382,7 @@ export function Thread() {
           }
         >
           {!chatStarted && (
-            <div className="absolute top-0 left-0 z-10 flex w-full items-center justify-between gap-3 p-2 pl-4">
+            <div className="absolute top-0 left-0 z-10 flex w-full items-center justify-between gap-3 bg-white p-2 pl-4">
               <div>
                 {(!chatHistoryOpen || !isLargeScreen) && (
                   <Button
@@ -432,7 +473,7 @@ export function Thread() {
             <StickyToBottomContent
               className={cn(
                 "absolute inset-0 overflow-y-scroll px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent",
-                !chatStarted && "mt-[12vh] flex flex-col items-stretch",
+                !chatStarted && "flex flex-col items-stretch pt-[12vh]",
                 chatStarted && "grid grid-rows-[1fr_auto]",
               )}
               contentClassName="pt-8 pb-16 max-w-3xl mx-auto flex flex-col gap-4 w-full"
@@ -508,6 +549,7 @@ export function Thread() {
                         onRemove={removeBlock}
                       />
                       <textarea
+                        ref={inputRef}
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onPaste={handlePaste}
@@ -556,7 +598,7 @@ export function Thread() {
                   {!chatStarted && (
                     <StarterPrompts
                       apiUrl={stream.apiUrl}
-                      onPick={setInput}
+                      onPick={pickStarter}
                     />
                   )}
                 </div>

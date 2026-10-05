@@ -59,7 +59,7 @@ confirm gate behave the same everywhere.
 | `grounding.py` | Pure functions that trace every tool argument, and every id or score in the final answer, back to the task or an earlier tool result. They also flag ids passed as the wrong kind (e.g. a `profile_id` sent as `match_ids` or `job_id`). `ToolCallGuard` and `compare_agents.py` use them. |
 | `mini_policy.py` | Stdlib-only parser for what mini's model may run: `echo …` or one `python3 recruiter_cli.py <subcommand>` call, with an optional `--mode` that must match the host's. Refuses shell operators, `VAR=` prefixes, newlines and `--confirmed`. |
 | `mini_env.py` | `RecruiterEnvironment(LocalEnvironment)`: answers `echo` itself and runs recruiter_cli as an argv list (`sys.executable -E -s`) without a shell, with the host's `--mode`, a minimal child environment and `VIRA_*` passed as secrets. Tracebacks never reach the model; in real mode, side-effecting subcommands ask for approval. |
-| `tests/` | 361 offline tests (section 3). |
+| `tests/` | 374 offline tests (section 3). |
 
 ### Behaviour that holds in every new runtime
 
@@ -193,7 +193,7 @@ No `.env`, no network, no LLM, no VIRA:
 ```bash
 python -m pytest -q
 # ........................................................   [100%]
-# 361 passed
+# 374 passed
 ```
 
 How the tests stay hermetic:
@@ -222,7 +222,7 @@ How the tests stay hermetic:
 | `tests/test_db.py` | 19 | The db lookups (section 8) on fixtures and on a fake asyncpg pool: the model never supplies the company and a query without one is an error; another company's job lists no applications and fails validation, and the real SQL filters by company; one match resolves, several come back with open dates, a title with "job" left on still finds the job, and a long list says it is cut short; the model is offered only `find_job_by_title` and `list_job_applications` and finds people with `search_users`, while `find_user` and the `validate_*` queries stay for the entity checks; validation names the ids not found; search terms match literally. `jeni_db` is Jeni's tasks plus those two read-only tools, which real mode doesn't gate; an agent acts on ids the database returned, the guard refuses invented ids for db tools too, and a failing query is an error result. The runner: mock mode looks up only ids the task mock knows and ignores a DSN; real mode opens the DSN and stops without one. |
 | `tests/test_vira_results.py` | 23 | Reading an engine group back (section 10): the info call polled until the group has run, the xrtoken only to the engine's host over https, an info reply masked like any other; the reply shape from the tables, polling until nothing is queued, the deadline, no read without a source; the read-back masked and audited, failures with reasons, queued otherwise; `vira_check.py`'s verdicts, read-only payloads and settings check; its write test sent only after the reads ran, approving only the planned cards (the new job's id from a callback), running through on the mock and closing its job, and failing when a skill goes to another job. |
 | `tests/test_pii.py` | 13 | Email tokens (section 11): a token hides the address and only its vault opens it; who may send a token or "me"; results carry tokens and the address goes out only at send time, with the audit log redacted; an unknown token sends nothing; the CLI redacts; a colleague found by search can be shared with, a candidate's token is refused, "me" is the signed-in user (and asks without one); candidate fields take a typed address only; the entity checks take "me" and a colleague's token as share recipients, and refuse a token never issued or an address outside the company, sending nothing. |
-| `tests/test_demo.py` | 17 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt is `jeni_db`'s, ending with the structured terminal response (no `SUMMARY:`, no `STATUS:`); routine writes run while a shortlist asks, and the changes show on the panel; with `gate_writes` every write asks; a rejected transfer never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. The script: `SCRIPT.md` has every prompt and `/demo/prompts` serves the first ones; every check fails on the starting data unless the act names its cards; the rehearsal (on the in-process graph with a scripted model) passes an edited shortlist, gives a second shortlist attempt a card of its own (the reviewer's edit holds), fails a reject act whose card never appeared, sends a follow-up only while the check fails, and deletes its threads and resets the data. |
+| `tests/test_demo.py` | 30 | The demo (section 9): `langgraph.json` serves the demo graph and the panel; importing the demo changes nothing; the demo agent is mock-only whatever the mode was, with tracing off and no checkpointer of its own; its prompt is `jeni_db`'s, ending with the structured terminal response (no `SUMMARY:`, no `STATUS:`); routine writes run while a shortlist asks, and the changes show on the panel; with `gate_writes` every write asks; a rejected transfer never reaches the mock; the panel resets on POST only and never writes HTML from data; the factory builds once, off the event loop. The script: `SCRIPT.md` has every prompt and `/demo/prompts` serves the first ones; every check fails on the starting data unless the act names its cards; the rehearsal (on the in-process graph with a scripted model) passes an edited shortlist, gives a second shortlist attempt a card of its own (the reviewer's edit holds), fails a reject act whose card never appeared, sends a follow-up only while the check fails, and deletes its threads and resets the data; every act starts from the starting data; `/demo/prompts` numbers the acts as `SCRIPT.md` does and groups them by category; and each of the nine acts to try passes its check on the calls it describes (a skill added to the original, or the wrong applicant rejected, fails). |
 
 Run a subset:
 
@@ -828,3 +828,17 @@ behaviour, and all 361 pass.
 With the cut-queue on, `python vira_check.py --writes` passed: every group ran, and the write test
 created job 686570, added Kafka to that id, made it private, removed Kafka, edited it and closed
 it (design doc §15).
+
+---
+
+## 13. The demo's start screen: every card reachable, and nine more acts (2026-10-05)
+
+| File | Change |
+|---|---|
+| `demo/ui/.../thread/index.tsx` | The start screen's offset is padding (`pt-[12vh]`), not a margin: the scroll area is `height: 100%`, so the margin pushed its bottom 94 px below the window and the last cards couldn't be scrolled into view. Starters are grouped under their category; a click fills the box, focuses it and scrolls it into view; the top bar has a background so cards don't show through it. |
+| `demo/script.py` | Nine acts to try, each with a check (section 9's model): copy a job and change only the copy, two routine changes in one request, edit a job's details, close a job with a reason, reject the weakest applicant (approved card), compare applicants (reads only), suggested candidates (reads only), share with "me", hand a job over to a colleague found by name (approved card). `Act.category`; `/demo/prompts` numbers the acts as `SCRIPT.md` does and groups them (Jobs, Applicants, Team & sharing, Guardrails). |
+| `demo/rehearse.py` | Every act starts from the starting data (a reset before each act, not each pass): a copied job made "backend engineer" ambiguous for the acts after it. |
+| `demo/SCRIPT.md`, `demo/panel.html`, `demo/README.md` | "More to try" (acts 9–17); act 4's note follows the always-confirm card; the panel shows openings; rehearsal figures. |
+| `tests/conftest.py`, `tests/test_demo.py` | Stand-in catalog entries shared by the tests (`STAND_INS`, `extend_catalog`), with `agent_kit`'s cached jeni toolset cleared around them. 13 new tests: groups and numbering, each new act passing on the calls it describes, two near misses failing, and a reset before every act. |
+
+Live on 2026-10-05 (gpt-5-mini, a second server): all 17 acts passed in 231 s, about $0.09.
