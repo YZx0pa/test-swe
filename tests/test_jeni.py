@@ -172,7 +172,8 @@ def test_a_call_sends_one_task_group_in_v1s_format(audit_log, monkeypatch):
     jeni_tools.run("add_job_collaborators", {"job_id": 7001, "user_ids": [802], "role_id": 5})
     [entry] = read_audit(audit_log)
     assert paths == [jeni_tools.PATH] and entry["command"] == "add-job-collaborators"
-    assert entry["body"]["task_group_name"] == "Jeni v2 - add_job_collaborators"
+    prefix, suffix = entry["body"]["task_group_name"].rsplit("-", 1)
+    assert prefix == "Jeni v2-add_job_collaborators" and uuid.UUID(suffix)    # unique per group
     [task] = entry["body"]["tasks"]
     assert (task["task_name"], task["level"]) == ("task_add_job_collaborators", 1)
     assert task["sub_tasks"][0]["sub_task_name"] == "sub_task_add_job_collaborators"
@@ -183,17 +184,19 @@ def test_a_call_sends_one_task_group_in_v1s_format(audit_log, monkeypatch):
     assert uuid.UUID(entry["body"]["agent_session_uuid"])                       # VIRA requires one
 
 
-def test_every_task_group_is_its_own_vira_session(audit_log):
-    """VIRA scopes a task group's uniqueness by agent_session_uuid, so even the same thread
-    sends each group in a session of its own (jeni_tools.session_uuid)."""
+def test_a_thread_keeps_one_vira_session_and_each_group_its_own_name(audit_log):
+    """A thread's groups share one agent_session_uuid (jeni_tools.session_uuid); VIRA scopes
+    group-name uniqueness by session, so every group's name is unique."""
     def agent():
         return run_langgraph.build_agent(toolset=agent_kit.toolset("jeni"), model=scripted(
             calls(call("get_single_job_details", {"job_id": 7001}, "c1")), say("Done.")))
     for thread in ("t1", "t1", "t2"):
         agent_kit.run_task(agent(), "Show job 7001.", thread_id=thread)
-    sessions = [a["body"]["agent_session_uuid"] for a in read_audit(audit_log)]
-    assert len(sessions) == len(set(sessions)) == 3 and all(uuid.UUID(s) for s in sessions)
-    assert jeni_tools.session_uuid("t1") != jeni_tools.session_uuid("t1")
+    bodies = [a["body"] for a in read_audit(audit_log)]
+    sessions = [b["agent_session_uuid"] for b in bodies]
+    assert sessions[0] == sessions[1] != sessions[2] and all(uuid.UUID(s) for s in sessions)
+    assert len({b["task_group_name"] for b in bodies}) == 3
+    assert jeni_tools.session_uuid("t1") == jeni_tools.session_uuid("t1") != jeni_tools.session_uuid("t2")
 
 
 def test_a_queued_task_is_reported_as_queued_not_done():

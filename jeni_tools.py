@@ -31,7 +31,6 @@ import logging
 import os
 import re
 import sys
-import time
 import uuid
 from pathlib import Path
 from typing import Annotated, Any, Dict, Literal
@@ -380,14 +379,10 @@ def description(task: dict) -> str:
 
 
 def session_uuid(thread_id: str | None = None) -> str:
-    """Return a new VIRA session UUID for every task-group submission.
-
-    The LangGraph ``thread_id`` remains stable for checkpointing and task memory.
-    VIRA's task-group uniqueness is scoped by ``agent_session_uuid``, however,
-    so each execution also incorporates the process session, thread and a
-    timestamp/nonce.  The result remains a valid UUID accepted by VIRA.
-    """
-    seed = f"{_PROCESS_SESSION}:{thread_id or 'no-thread'}:{time.time_ns()}:{uuid.uuid4().hex}"
+    """The agent_session_uuid VIRA requires on every task group: one per process and thread,
+    so a conversation's groups share a session. VIRA scopes group-name uniqueness by session,
+    so payload() makes each group's name unique instead."""
+    seed = f"{_PROCESS_SESSION}:{thread_id or 'no_thread'}"
     return str(uuid.uuid5(SESSION_NS, seed))
 
 
@@ -401,7 +396,7 @@ def payload(task: dict, args: dict, session: str | None = None) -> dict:
         if values.get(f["field_name"]) is not None:
             entry["field_value"] = values[f["field_name"]]
         fields.append(entry)
-    return {"agent_session_uuid": session or session_uuid(), "task_group_name": f"Jeni v2 - {name}",
+    return {"agent_session_uuid": session or session_uuid(), "task_group_name": f"Jeni v2-{name}-{uuid.uuid1().hex}",
             "tasks": [{"task_name": task["task_name"], "description": task["description"],
                        "level": task["level"],
                        "sub_tasks": [{"sub_task_name": sub["sub_task_name"],

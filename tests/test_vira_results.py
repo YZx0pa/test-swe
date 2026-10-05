@@ -176,7 +176,8 @@ def test_the_checks_only_read_and_name_their_groups():
     assert [f.get("field_value") for f in no_job["fields"] if f["field_name"] == "job_id"] == [None]
     assert all(body["agent_session_uuid"] and body["task_group_name"].startswith("Jeni v2 check ")
                for _, body in sent)
-    assert len({body["agent_session_uuid"] for _, body in sent}) == 3       # one session per group
+    assert len({body["agent_session_uuid"] for _, body in sent}) == 1       # one session for the check
+    assert len({body["task_group_name"] for _, body in sent}) == 3          # each group its own name
 
 
 def test_the_check_needs_its_settings_before_it_sends_anything(monkeypatch, capsys):
