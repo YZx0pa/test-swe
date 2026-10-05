@@ -544,10 +544,10 @@ def interrupt_on(approve_all: bool, mode: str | None = None, toolset: Toolset = 
     """
     if approve_all:
         names = toolset.names - toolset.read_only
-    elif (mode or vira_tools.current_mode()) == "real":
-        names = toolset.names - toolset.read_only
     else:
         names = set()
+
+
     names |= (ALWAYS_CONFIRM & toolset.names)      # always-confirm, whatever the mode
     return {name: {**DECISIONS, "when": _ask_unless_overruled, "description": _describe}
             for name in sorted(names)}

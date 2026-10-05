@@ -33,8 +33,8 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
     """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
     demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
     refuses a graph that brings its own checkpointer."""
-    gated = agent_kit.interrupt_on(approve_all, mode="real" if gate_writes else None,
-                                   toolset=toolset)
+    gated = agent_kit.interrupt_on(approve_all or gate_writes,
+    toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
     memory = [agent_kit.TaskMemoryMiddleware(toolset.read_only)] if task_memory else []
     agent_kit.stage("MEMORY_MIDDLEWARE_CONFIGURED", enabled=task_memory)
