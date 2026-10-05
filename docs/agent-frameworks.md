@@ -898,9 +898,13 @@ How a call goes now:
   the deadline, or with the database unreachable, the task is reported queued. The info call
   exists, so `api` is the source to use; `db` is the fallback.
 - **`python vira_check.py`** sends three read-only groups (v2's `search_users`, the sample's job
-  description, and a group whose first task has a sub-task that must fail before one that would
-  succeed, followed by a second task), waits, and reports what ran: whether sub-tasks are chained
-  and tasks independent. On 2026-10-02 all three were accepted and stayed queued.
+  description, and a group whose first task has a sub-task that must fail, job details without a
+  job id, before one that would succeed, a user search, followed by a second task), waits, and
+  reports what ran: whether sub-tasks are chained and tasks independent. On 2026-10-02 all three
+  were accepted and stayed queued. On 2026-10-05, with the cut-queue on, all three ran: the user
+  search completed, the engine answered that the sample's `sub_task_get_job_description` "is not
+  registered", and the failure group showed both tasks and sub-tasks independent (below). A
+  sub-task the engine doesn't know fails on its own, so it gives no verdict on chaining.
 - **`python vira_check.py --writes`** adds a write test on staging, sent only when the read-only
   groups have just run, because otherwise its writes would queue and run later with nobody
   watching. The agent creates "Jeni v2 test <time>" (Python, 1–2 years) and adds Kafka to it.
@@ -913,6 +917,11 @@ How a call goes now:
   read-back also asks the engine to run its group 10 s before the wait ends. That applies to the
   check's reads and then to each write, so the gate can open without the engine fix. Each
   group, read-only or write, goes in a VIRA session of its own (`jeni_tools.session_uuid`).
+  On 2026-10-05 it passed end to end: job 686570 was created, Kafka went to that id, and making it
+  private, checking, removing Kafka, editing and checking again all completed. The job was then
+  closed, and it reads closed (`isJobClosed`). The first attempt that day found that the real
+  engine returns `jobId` as a string (`"686569"`). The check missed the id and refused the
+  add-skill card, so that job got no Kafka, and it was then closed by hand.
   A real `job_create` response is the whole job record (dozens of fields), so real replies cost
   more tokens than the mock's.
 
@@ -922,23 +931,28 @@ What the engine runs, from its tables on staging (`hris.agenttaskgroup`, `agentt
   / `sub_task_get_applications`, `task_create_job`, …), plus `sub_task_get_jobs`, which v1's
   catalog comments out. The sample's `task_setup_job` with `sub_task_job_create`,
   `sub_task_job_board_linkedin_publish` and a transfer by `new_owner_user_id` appears only in our
-  probe: a newer or planned format.
+  probe: a newer or planned format. Asked on 2026-10-05, the engine answered that
+  `sub_task_get_job_description` and `sub_task_get_job_skills` aren't registered.
 - **Speed.** 130 groups completed in 30 days, with a median of 3 s from creation to done.
 - **Failure lives in the sub-tasks.** 404 sub-tasks failed (395 with a `failed_reason`), while every
   task and group ended `completed`, whatever its sub-tasks did.
 - **Tasks are independent.** In 117 groups where a task had a failed sub-task and more tasks
   followed, every later task ran: 60 completed fully, 112 had failures of their own, none was left
   unrun.
-- **Sub-tasks within a task are chained.** Every sub-task of a multi-sub-task task carries a
-  `next_sub_task_payload`, and after a failed sub-task every later one in the same task failed too
-  (42 of 42; no success ever followed a failure). Whether they fail because of the first one or for
-  reasons of their own needs a controlled run: the reasons are free text from real records and
-  weren't read.
+- **Sub-tasks within a task look chained, but aren't.** Every sub-task of a multi-sub-task task
+  carries a `next_sub_task_payload`, and after a failed sub-task every later one in the same task
+  failed too (42 of 42; no success ever followed a failure). A controlled run settled it on
+  2026-10-05 (`vira_check.py`, the "failure" group): job details without a job id failed ("Missing
+  job_id"), and the user search after it, in the same task, still completed. So the engine doesn't
+  stop a task at its first failure. The 42 later failures came from those sub-tasks themselves,
+  most likely because each needed the earlier one's output.
 
-So the expected behaviour holds, with one nuance: a failed task shows only in its sub-tasks, and
-the task itself reads `completed`.
+So tasks are independent, and so are the sub-tasks of a task, except where one needs another's
+output. A failed task shows only in its sub-tasks, and the task itself reads `completed`.
 
-Why nothing executes (checked 2026-10-02, statuses and counts only):
+Why nothing executes (checked 2026-10-02, statuses and counts only). Since Yuzhe's dev-mode
+cut-queue call (2026-10-03, `VIRA_result_trigger`), a group runs when the read-back asks for it:
+on 2026-10-05 every group sent ran. Without that call, the findings below still hold:
 - **The endpoint did run groups, unreliably, and stopped on 2026-08-10.** Groups created
   through it with the sample's names ("May 4 - …", `task_setup_job`) did execute in May and June;
   others with the same payload stayed `queued`, sometimes a minute apart ("May 4 - 013233" queued at

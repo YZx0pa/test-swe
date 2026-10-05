@@ -151,6 +151,16 @@ def test_the_failure_check_reads_chaining_and_independence():
     queued = group(("task_setup_job", [("sub_task_get_job_description", "queued")]),
                    ("task_search_users", [("sub_task_search_users", "queued")]))
     assert vira_check.verdicts(queued) == ["not run yet: no verdict"]
+    unknown = vira_results.group_from_rows(UUID, [
+        {"group_status": "completed", "task_no": t, "task_key": task, "task_status": "completed",
+         "sub_no": n, "sub_key": key, "sub_status": status, "sub_response": None, "failed_reason": reason}
+        for t, n, task, key, status, reason in (
+            (1, 1, "task_setup_job", "sub_task_get_job_description", "failed",
+             "agentSubTaskKey(sub_task_get_job_description) is not registered"),
+            (1, 2, "task_setup_job", "sub_task_get_job_skills", "failed",
+             "agentSubTaskKey(sub_task_get_job_skills) is not registered"),
+            (2, 1, "task_search_users", "sub_task_search_users", "completed", None))])
+    assert vira_check.verdicts(unknown)[0].startswith("no verdict on chaining: the engine doesn't know")
 
 
 def test_the_checks_only_read_and_name_their_groups():
@@ -158,7 +168,11 @@ def test_the_checks_only_read_and_name_their_groups():
     sent = vira_check.checks("20261002-120000")
     assert [label for label, _ in sent] == ["runs", "engine", "failure"]
     subs = {s["sub_task_name"] for _, body in sent for t in body["tasks"] for s in t["sub_tasks"]}
-    assert subs == {"sub_task_search_users", "sub_task_get_job_description", "sub_task_get_job_skills"}
+    assert subs == {"sub_task_search_users", "sub_task_get_job_description", "sub_task_get_single_job_details"}
+    [failing, _] = dict(sent)["failure"]["tasks"]
+    no_job = failing["sub_tasks"][0]                          # job details without a job id: must fail
+    assert no_job["sub_task_name"] == "sub_task_get_single_job_details"
+    assert [f.get("field_value") for f in no_job["fields"] if f["field_name"] == "job_id"] == [None]
     assert all(body["agent_session_uuid"] and body["task_group_name"].startswith("Jeni v2 check ")
                for _, body in sent)
     assert len({body["agent_session_uuid"] for _, body in sent}) == 3       # one session per group
@@ -317,11 +331,13 @@ def test_the_callback_keeps_the_id_create_job_returned():
     for name, reply in (("search_users", {"request_status": "ok", "subtasks": [{"result": {"jobId": 1}}]}),
                         ("create_job", {"request_status": "failed", "message": "no"}),
                         ("create_job", {"request_status": "ok", "group_status": "completed",
-                                        "subtasks": [{"status": "completed", "result": {"jobId": 7123}}]})):
+                                        "subtasks": [{"status": "completed", "result": {"jobId": 7123}}]}),
+                        ("create_job", {"request_status": "ok", "group_status": "completed",   # the real engine
+                                        "subtasks": [{"status": "completed", "result": {"jobId": "686569"}}]})):
         run = uuid_lib.uuid4()
         created.on_tool_start({"name": name}, "{}", run_id=run)
         created.on_tool_end(ToolMessage(json.dumps(reply), tool_call_id="c"), run_id=run)
-    assert created.ids == [7123]
+    assert created.ids == [7123, 686569]
     def details(reply):
         return {"request_status": "ok", "group_status": "completed",
                 "subtasks": [{"status": "completed", "result": reply}]}
@@ -331,6 +347,9 @@ def test_the_callback_keeps_the_id_create_job_returned():
     assert vira_check.succeeded(details({})) and not vira_check.succeeded(jeni_tools.QUEUED)
     failed = {**details({}), "subtasks": [{"status": "failed", "failed_reason": "Job not found"}]}
     assert not vira_check.succeeded(failed) and "Job not found" in vira_check.outcome(failed)
+    assert vira_check.is_closed(details({"isJobClosed": True, "jobStatus": "Both"}))     # the real engine
+    assert vira_check.is_closed(details({"status": "closed"}))                           # the mock
+    assert not vira_check.is_closed(details({"isJobClosed": False}))
 
 
 def stand_in(name, description, *fields):
@@ -381,7 +400,8 @@ def test_the_write_test_runs_through_on_the_mock_and_closes_its_job(audit_log, k
     assert record["status"] == "closed" and "Kafka" not in record["skills"] and record["jobDescription"]
     assert [a["command"] for a in read_audit(audit_log)] == [
         "create-job", "add-job-skills", "make-job-private", "get-single-job-details", "remove-job-skills",
-        "edit-job", "get-single-job-details", "make-job-closed"]
+        "edit-job", "get-single-job-details", "make-job-closed", "get-single-job-details"]
+    assert lines[-1] == f"job {job} reads closed: True"
 
 
 def test_a_skill_aimed_at_another_job_is_refused_and_the_test_fails(audit_log, kept_mock):

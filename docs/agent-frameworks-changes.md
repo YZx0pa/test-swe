@@ -735,8 +735,8 @@ Jeni's task groups in `--mode real` go to the VIRA engine. Findings and what isn
 | `.env.example`, `tests/conftest.py` | `VIRA_ACTUAL_LOCATION` and `VIRA_XRTOKEN` (placeholders); the tests blank both. |
 | `vira_results.py` (new) | Reads a task group's outcome back, up to `VIRA_RESULT_WAIT` seconds, in the engine's reply shape: `VIRA_RESULT_SOURCE=api` polls the engine's info call (`VIRA_RESULT_LOCATION`, `{uuid}` filled in, the xrtoken only to the engine's host over https, no redirects); `=db` its tables on `TRON_POSTGRES_DSN` (read-only, by the group's uuid). |
 | `jeni_tools.py` (read-back) | An engine acknowledgement makes `run()` wait for the outcome, mask it (`recruiter_cli.mask_result`), audit the read (`read-result`) and project it; still queued, or unreachable, is reported queued. |
-| `vira_check.py` (new) | `python vira_check.py [--wait N]`: three read-only groups to the real engine, read back (the info call when `VIRA_RESULT_LOCATION` is set, the tables otherwise), with verdicts on chaining and independence; exit 1 while anything is still queued. |
-| `vira_check.py --writes` | Then, only if those groups ran, a write test on a staging job of its own: the agent creates "Jeni v2 test <time>" and adds Kafka to it (cards approved only for that title, and for Kafka on the id `create_job` returned; anything else rejected), then it is made private, checked, Kafka removed, the description edited, checked, and the job closed whatever happened. |
+| `vira_check.py` (new) | `python vira_check.py [--wait N]`: three read-only groups to the real engine, read back (the info call when `VIRA_RESULT_LOCATION` is set, the tables otherwise), with verdicts on chaining and independence; exit 1 while anything is still queued. The failure group uses v2's registered sub-tasks (job details without a job id, then a user search), and a sub-task the engine doesn't know gives no verdict. |
+| `vira_check.py --writes` | Then, only if those groups ran, a write test on a staging job of its own: the agent creates "Jeni v2 test <time>" and adds Kafka to it (cards approved only for that title, and for Kafka on the id `create_job` returned; anything else rejected), then it is made private, checked, Kafka removed, the description edited, checked, and the job closed whatever happened and checked closed. It reads the new job's id as the real engine gives it, a string. Passed on staging on 2026-10-05 (job 686570). |
 | `tests/test_vira_results.py` | 23 offline tests: rows become the reply shape, polling stops when nothing is queued and reads only this group, a deadline returns it unfinished, nothing is read without a source; the outcome is read back masked and audited, a failed sub-task says why, no outcome means queued; the check's verdicts, its read-only payloads, and that it sends nothing without its settings; the write test is held while reads queue, approves only its planned cards, runs through on the mock (with stand-in catalog entries for the three tasks the shared fixture lacks), and fails when a skill goes to another job. |
 | `tests/test_recruiter_cli.py`, `tests/test_jeni.py` | Task groups go to the engine with only the xrtoken, and the other endpoints keep their auth; a relative location is under `VIRA_BASE_URL`; a missing location or token, or plain http, sends nothing; each conversation is one session; a queued reply is reported as queued. |
 
@@ -752,7 +752,9 @@ python run_langgraph.py --mode real --tools jeni --task "Show me the details of 
 ```
 
 On staging today groups stay queued (design doc §15); `vira_check.py` says so, and gives its
-verdicts once they run. `--writes` sends nothing until then.
+verdicts once they run. `--writes` sends nothing until then. With Yuzhe's cut-queue switched on
+(`cutqueque`, `VIRA_result_trigger`), groups run on demand: on 2026-10-05 the check and the
+write test both passed.
 
 ---
 

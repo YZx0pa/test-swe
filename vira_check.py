@@ -11,10 +11,12 @@ when VIRA_RESULT_LOCATION is set, from its tables on TRON_POSTGRES_DSN otherwise
 
   runs        v2's own payload for search_users: does a group run at all?
   engine      the engine's sample vocabulary: sub_task_get_job_description for a title (text only).
-  failure     two tasks in one group.  The first has a sub-task that must fail (no job title)
-              followed by one that would succeed alone; the second is a user search.  It shows
-              whether a failed sub-task stops the rest of its task (chained) and whether a
-              failed task stops the next task (independent).
+              On 2026-10-05 the engine answered that this key isn't registered.
+  failure     two tasks in one group, in v2's own (registered) vocabulary.  The first has a
+              sub-task that must fail (job details without a job id) followed by one that would
+              succeed alone (a user search); the second is a user search.  It shows whether a
+              failed sub-task stops the rest of its task (chained) and whether a failed task
+              stops the next task (independent).
 
 Without --writes, nothing here creates or changes a job, an application or a user.  It prints
 statuses and failure reasons of these groups only, never their contents, the URL or the token.
@@ -25,7 +27,7 @@ run (otherwise its writes would sit queued and run later with nobody watching):
      it, using the id create_job returns: cards are approved for exactly those two calls on that
      title, and any other card is rejected;
   2. directly: make it private, check Kafka is on it, remove Kafka, edit its description, check;
-  3. close it (the cleanup), whatever happened before.
+  3. close it (the cleanup), whatever happened before, and check it reads closed.
 No LinkedIn, no shares, no candidates, no collaborators, no ownership change.
 Exit status: 0 everything ran, 1 something is still queued or failed to send, 2 not set up.
 """
@@ -62,13 +64,14 @@ def checks(stamp: str) -> list[tuple[str, dict]]:
     search = jeni_tools.payload(jeni_tools.catalog()["search_users"], {"search_key": "a", "limit": 3},
                                 new_session(f"vira-check-{stamp}"))
     title = [{"field_name": "job_title", "field_value": "Software Engineer"}]
+    no_job = jeni_tools.payload(jeni_tools.catalog()["get_single_job_details"], {})["tasks"][0]
+    must_fail = {**no_job, "sub_tasks": [*no_job["sub_tasks"], search["tasks"][0]["sub_tasks"][0]]}
     return [
         ("runs", {**search, "task_group_name": f"Jeni v2 check {stamp} - runs"}),
         ("engine", _group(f"Jeni v2 check {stamp} - engine", new_session(f"vira-check-{stamp}"),
                           [_setup_job(("sub_task_get_job_description", title))])),
-        ("failure", _group(f"Jeni v2 check {stamp} - failure", new_session(f"vira-check-{stamp}"), [
-            _setup_job(("sub_task_get_job_description", []), ("sub_task_get_job_skills", title)),
-            search["tasks"][0]])),
+        ("failure", _group(f"Jeni v2 check {stamp} - failure", new_session(f"vira-check-{stamp}"),
+                           [must_fail, search["tasks"][0]])),
     ]
 
 
@@ -88,7 +91,11 @@ def verdicts(group: dict | None) -> list[str]:
         return ["not run yet: no verdict"]
     first, second = tasks[0][1], tasks[1][1]
     out = []
-    if first[0][1] == "failed":
+    unregistered = [k for k, s, reason in first[1:] if s == "failed" and "not registered" in str(reason)]
+    if first[0][1] == "failed" and unregistered:
+        out.append(f"no verdict on chaining: the engine doesn't know {unregistered}, so they failed "
+                   f"on their own")
+    elif first[0][1] == "failed":
         later = [s for _, s, _ in first[1:]]
         out.append("sub-tasks are chained: after a failed sub-task, the rest of its task failed"
                    if later and all(s == "failed" for s in later)
@@ -124,9 +131,18 @@ def outcome(result: dict) -> str:
 
 
 def job_id(result: dict) -> int | None:
-    """The job's id in a projected Jeni task result (VIRA's job record has jobId)."""
+    """The job's id in a projected Jeni task result.  VIRA's job record has jobId, as a string
+    ("686569") from the real engine and as a number from the mock."""
     value = next((r["jobId"] for r in _replies(result) if "jobId" in r), None)
-    return value if isinstance(value, int) and value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def is_closed(result: dict) -> bool:
+    """The job reads closed: isJobClosed from the real engine, status "closed" from the mock."""
+    return succeeded(result) and any(r.get("isJobClosed") is True or r.get("status") == "closed"
+                                     for r in _replies(result))
 
 
 def has_skill(result: dict, skill: str) -> bool:
@@ -223,7 +239,9 @@ def run_writes(stamp: str, out=print, *, model=None, mode: str = "real") -> bool
     finally:
         r = jeni_tools.run("make_job_closed", {"job_id": created, "reason_for_closure": "Jeni v2 test, done"})
         out(f"make_job_closed (cleanup): {outcome(r)}")
-        ok = ok and succeeded(r)
+        closed = is_closed(jeni_tools.run("get_single_job_details", {"job_id": created}))
+        out(f"job {created} reads closed: {closed}" + ("" if closed else f": close '{title}' by hand"))
+        ok = ok and succeeded(r) and closed
     return ok
 
 
