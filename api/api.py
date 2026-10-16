@@ -1,50 +1,4 @@
-"""Jeni over HTTP: one user turn per request; the reply comes back in the response.
 
-    uvicorn api.api:app --port 8000          # from the repo root
-
-    POST /v1/chat?company_id=5143&user_id=804          X-Client-Name: tron
-                                                       Authorization: Bearer <JENI_API_KEY>
-         {"user_input": "shortlist the top 3", "thread_id": "abc123",
-          "context": {"job_id": 686476}}
-      -> {"thread_id": "abc123", "status": "done", "reply": "...", "approvals": []}
-
-    POST /v1/chat/resume?company_id=5143&user_id=804   X-Client-Name: tron
-                                                       Authorization: Bearer <JENI_API_KEY>
-         {"thread_id": "abc123", "decisions": [{"type": "approve"}]}
-
-Inputs:
-  X-Client-Name         header: which database the request runs against, tron or live
-                        (see CLIENT_DSN_VARS).  Anything else is refused with 422.
-  Authorization         header: "Bearer <key>", the API's key (JENI_API_KEY), one for every
-                        client.  A missing or wrong key gets 401.
-  company_id, user_id   query parameters: who is asking.  The API trusts them, so run it behind
-                        a gateway that authenticates the caller.
-  user_input            what the user typed.
-  thread_id             the conversation.  Leave it out to start one (the reply carries the new
-                        id), or send a new id of your own (8-64 of A-Z a-z 0-9 _ -); the first
-                        caller to use an id owns it, and other callers get 403.
-  context               the UI page the user is on, e.g. {"job_id": 686476}.  It is put in front
-                        of this turn's message as "[page context: job_id=686476]", so the model
-                        knows what "this job" is and the id counts as the user's own for
-                        grounding.  Send it with every message: the page can change.
-
-Output: status done (reply is Jeni's answer), needs_user (reply is Jeni's question: answer it
-with the next /v1/chat on the same thread) or approval_required (approvals holds the card:
-answer it with /v1/chat/resume, one decision per action request: approve, edit with
-edited_action {name, args}, or reject).
-
-One agent per (client, company_id) (the client's pool and the company are bound into the db
-tools and entity validation when an agent is built); every user and conversation of that
-company on that client shares it.  A thread belongs to its client, company and user.  A conversation's
-state, task memory included, lives in the shared checkpointer under its thread_id.  user_id
-owns the thread and is in config["configurable"]; it is not yet sent to VIRA, whose identity is
-still the process-wide VIRA_USER_ID / VIRA_XRTOKEN.  Threads are in memory: lost on restart.
-
-The API runs in real mode only, and every data-changing tool pauses for approval.  VIRA is
-called for real (one VIRA for every client), and the db lookups and validation use the
-client's Postgres pool.  Every pool in CLIENT_DSN_VARS is opened at startup, so each DSN must
-be set, as must JENI_API_KEY.  JENI_STAGE_LOG is the stage log.
-"""
 from __future__ import annotations
 
 import argparse
@@ -102,9 +56,21 @@ class Decision(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    user_input: str = Field(min_length=1)
+    """One turn: what the user typed, or -- while an approval waits -- explicit decisions."""
+    user_input: str | None = Field(default=None, min_length=1)
     thread_id: str | None = Field(default=None, pattern=_THREAD_ID)
     context: dict[str, int | str] = Field(default_factory=dict)
+    # Answers to the waiting approval card: one per action request (approve / edit / reject).
+    # Several waiting at once: {interrupt_id: [decision, ...]}.
+    decisions: list[Decision] | dict[str, list[Decision]] | None = None
+
+    @model_validator(mode="after")
+    def _input_or_decisions(self):
+        if (self.user_input is None) == (self.decisions is None):
+            raise ValueError("send either user_input or decisions, not both")
+        if self.decisions is not None and self.thread_id is None:
+            raise ValueError("decisions need the thread_id of the approval they answer")
+        return self
 
     @field_validator("thread_id", mode="before")
     @classmethod
@@ -125,12 +91,6 @@ class ChatRequest(BaseModel):
                                           or any(c in item for c in "\n\r[]")):
                 raise ValueError(f"context value of {key!r} must be one short line, no brackets")
         return value
-
-
-class ResumeRequest(BaseModel):
-    thread_id: str = Field(pattern=_THREAD_ID)
-    # One card: its decisions.  Several cards at once: {interrupt_id: decisions}.
-    decisions: list[Decision] | dict[str, list[Decision]]
 
 
 class Approval(BaseModel):
@@ -169,6 +129,20 @@ def approvals_from(interrupts) -> list[Approval]:
             for i in interrupts]
 
 
+APPROVAL_REPLY = "Jeni needs approval before it continues."
+
+
+# A typed answer to a waiting approval, as in the terminal (agent_kit.ask_human): a fixed yes
+# or no, never free text.  Edits go through decisions with edited_action.
+_YES, _NO = frozenset({"y", "yes"}), frozenset({"n", "no"})
+
+
+def answer_kind(user_input: str) -> Literal["yes", "no", "other"]:
+    """A typed reply to a waiting approval: yes / no, or anything else (asked again)."""
+    word = user_input.strip().lower().rstrip(".!")
+    return "yes" if word in _YES else "no" if word in _NO else "other"
+
+
 # --- the service --------------------------------------------------------------
 @dataclass
 class _Thread:
@@ -176,6 +150,7 @@ class _Thread:
     company_id: int
     user_id: int
     pending: dict[str, int] = field(default_factory=dict)   # interrupt id -> action requests
+    approvals: list[Approval] = field(default_factory=list)   # the open cards, while pending
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -221,10 +196,14 @@ class JeniService:
             return self._agents[key]
 
 
+    def _query_tools(self, client: str):
+        """The client's db queries: entity validation's lookups (not given to the model)."""
+        from db_queries import build_db_queries
+        return build_db_queries(self.pools[client])
+
     def _build(self, client: str, company_id: int):
-        from db_queries import build_db_queries    
         context = {"auth_profile": {"company_id": company_id}}
-        query_tools = build_db_queries(self.pools[client])
+        query_tools = self._query_tools(client)
         # toolset= agent_kit.toolset("jeni_db",query_tools,context)
         toolset= agent_kit.toolset("jeni")
         return  run_langgraph.build_agent(approve_all=True, 
@@ -251,19 +230,30 @@ class JeniService:
 
     async def chat(self, client: str, company_id: int, user_id: int,
                    body: ChatRequest) -> ChatResponse:
+        if body.decisions is not None:          # buttons: approve / edit / reject
+            return await self._decide(client, company_id, user_id, body)
         thread_id, thread = self._thread(body.thread_id, client, company_id, user_id, claim=True)
         async with thread.lock:
-            if thread.pending:
-                raise HTTPException(409, "an approval is pending on this thread: answer it with "
-                                         "/v1/chat/resume first")
             agent = await self.agent_for(client, company_id)
-            message = with_page_context(body.user_input, body.context)
+            if thread.pending:                  # a typed yes / no answers the waiting approval
+                kind = answer_kind(body.user_input)
+                agent_kit.stage("API_APPROVAL", thread=thread_id, answer=kind)
+                if kind == "other":             # not a yes or no: nothing changes, same card again
+                    return ChatResponse(thread_id=thread_id, status="approval_required",
+                                        reply=f"{APPROVAL_REPLY} Please answer yes or no.",
+                                        approvals=thread.approvals)
+                decision = ({"type": "approve"} if kind == "yes" else
+                            {"type": "reject", "message": "The user declined this call."})
+                return await self._run(agent, thread_id, thread,
+                                       Command(resume=self._resume_all(thread, decision)))
+            text = with_page_context(body.user_input, body.context)
             return await self._run(agent, thread_id, thread,
-                                   {"messages": [{"role": "user", "content": message}]},
+                                   {"messages": [{"role": "user", "content": text}]},
                                    context_keys=",".join(sorted(body.context)) or None)
 
-    async def resume(self, client: str, company_id: int, user_id: int,
-                     body: ResumeRequest) -> ChatResponse:
+    async def _decide(self, client: str, company_id: int, user_id: int,
+                      body: ChatRequest) -> ChatResponse:
+        """Explicit decisions for the waiting approval card: approve, edit or reject."""
         thread_id, thread = self._thread(body.thread_id, client, company_id, user_id,
                                          claim=False)
         async with thread.lock:
@@ -289,6 +279,13 @@ class JeniService:
             agent = await self.agent_for(client, company_id)
             return await self._run(agent, thread_id, thread, Command(resume=resume))
 
+    @staticmethod
+    def _resume_all(thread: _Thread, decision: dict):
+        """The same decision for every action request on every open card."""
+        answers = {interrupt_id: {"decisions": [dict(decision) for _ in range(count)]}
+                   for interrupt_id, count in thread.pending.items()}
+        return next(iter(answers.values())) if len(answers) == 1 else answers
+
     async def _run(self, agent, thread_id: str, thread: _Thread, payload,
                    context_keys: str | None = None) -> ChatResponse:
         """One run of the graph, up to its reply or its next approval card (never prompts)."""
@@ -308,11 +305,11 @@ class JeniService:
             raise HTTPException(502, f"the agent run failed ({type(exc).__name__})") from None
         if out.interrupts:
             thread.pending = {i.id: len(i.value.get("action_requests", [])) for i in out.interrupts}
+            thread.approvals = approvals_from(out.interrupts)
             response = ChatResponse(thread_id=thread_id, status="approval_required",
-                                    reply="Jeni needs approval before it continues.",
-                                    approvals=approvals_from(out.interrupts))
+                                    reply=APPROVAL_REPLY, approvals=thread.approvals)
         else:
-            thread.pending = {}
+            thread.pending, thread.approvals = {}, []
             status, reply = reply_from(out.value)
             response = ChatResponse(thread_id=thread_id, status=status, reply=reply)
         agent_kit.stage("API_RESPONSE", thread=thread_id, status=response.status,
@@ -358,23 +355,7 @@ def create_app(service: JeniService | None = None) -> FastAPI:
                    client: str = Depends(client_name)) -> ChatResponse:
         return await service.chat(client, company_id, user_id, body)
 
-    @app.post("/v1/chat/resume", response_model=ChatResponse)
-    async def resume(body: ResumeRequest, company_id: int = Query(..., gt=0),
-                     user_id: int = Query(..., gt=0),
-                     client: str = Depends(client_name)) -> ChatResponse:
-        return await service.resume(client, company_id, user_id, body)
-
     return app
 
-# {"thread_id": "7ba3afda64f74c6f8b74cfb7b9ad2eb7",
-#  "decisions": [{"type": "approve"}]}
-
-# {"thread_id": "7ba3afda64f74c6f8b74cfb7b9ad2eb7",
-#  "decisions": [{"type": "edit",
-#                 "edited_action": {"name": "add_job_skills",
-#                                   "args": {"job_id": 686288, "skills": ["Python", "Django"]}}}]}
-
-# {"thread_id": "7ba3afda64f74c6f8b74cfb7b9ad2eb7",
-#  "decisions": [{"type": "reject", "message": "Don't add skills to this job"}]}
 
 app = create_app()
