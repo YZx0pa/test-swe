@@ -290,8 +290,7 @@ class JeniService:
                    context_keys: str | None = None) -> ChatResponse:
         """One run of the graph, up to its reply or its next approval card (never prompts)."""
         counter = agent_kit.UsageCounter()
-        config = {"configurable": {"thread_id": thread_id, "company_id": thread.company_id,
-                                   "user_id": thread.user_id},
+        config = {"configurable": {"thread_id": thread_id},
                   "callbacks": [counter]}
         agent_kit.stage("API_REQUEST", thread=thread_id, client=thread.client,
                         company_id=thread.company_id,
