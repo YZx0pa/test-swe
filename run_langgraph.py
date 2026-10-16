@@ -29,10 +29,11 @@ ASYNC_TOOLSETS = {"db", "jeni_db"}
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
                 toolset: agent_kit.Toolset = agent_kit.VIRA, gate_writes: bool = False,
                 own_checkpointer: bool = True, query_tools=None, context=None,
-                task_memory: bool = False):
+                task_memory: bool = False, checkpointer=None):
     """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
     demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
-    refuses a graph that brings its own checkpointer."""
+    refuses a graph that brings its own checkpointer.  checkpointer: one saver shared by
+    several agents (api.py builds one agent per company over the same threads store)."""
     gated = agent_kit.interrupt_on(approve_all or gate_writes,
     toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
@@ -55,9 +56,11 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
         middleware=[*memory, *entity_pre, *approval,
                     *agent_kit.middleware(step_limit, toolset=toolset,
                                           execution_validation=(entity_execute[0]
-                                                                if entity_execute else None))],
+                                                                if entity_execute else None)),
+                    *agent_kit.model_input_dump()],
         # needed to pause at an interrupt and resume
-        checkpointer=InMemorySaver() if own_checkpointer else None,
+        checkpointer=checkpointer if checkpointer is not None
+        else InMemorySaver() if own_checkpointer else None,
         name="vira-langgraph",
     )
 

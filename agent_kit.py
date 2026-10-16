@@ -699,6 +699,47 @@ def show(messages, start: int = 0, *, terminal: dict | None = None) -> None:
         print(printable("[final] assistant : " + terminal["message"]))
 
 
+class ModelInputDump(AgentMiddleware):
+    """Debug: append every model call's input messages to a file, in show()'s format.
+
+    Innermost middleware, so it records what the model receives after every other
+    middleware (task memory packing included) has rewritten the request.  Unlike the
+    trajectory printout, assistant text is never hidden.
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path, self.calls = Path(path), 0
+
+    def _dump(self, request) -> None:
+        import contextlib
+        import io
+        self.calls += 1
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            show(request.messages)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(recruiter_cli._scrub_text(
+                f"\n=== model call {self.calls} ({time.strftime('%H:%M:%S')}, "
+                f"{len(request.messages)} messages) ===\n{buffer.getvalue()}"))
+
+    def wrap_model_call(self, request, handler):
+        self._dump(request)
+        return handler(request)
+
+    async def awrap_model_call(self, request, handler):
+        self._dump(request)
+        return await handler(request)
+
+
+def model_input_dump() -> list:
+    """[ModelInputDump] when JENI_DUMP_MODEL_INPUT names a file, else []."""
+    path = os.environ.get("JENI_DUMP_MODEL_INPUT")
+    return [ModelInputDump(path)] if path else []
+
+
 def final_text(result: dict) -> str:
     terminal = terminal_response_data(result)
     if terminal:
@@ -753,7 +794,7 @@ def parser(description: str, *, toolsets: tuple = TOOLSET_NAMES,
 
 
 def setup(args: argparse.Namespace) -> None:
-    set_tracing(args.trace)
+    set_tracing(getattr(args, "trace", False))   # LangSmith: off unless asked for
     vira_tools.configure(args.mode)
     log_path = getattr(args, "stage_log", None)
     if log_path:

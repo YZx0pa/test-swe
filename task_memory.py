@@ -56,6 +56,24 @@ def packed_task_messages(messages: list, records: list[dict], task_start: int) -
     return [HumanMessage(content=f"{digest}\n\nUser latest input follows.")] + active
 
 
+# create_agent(response_format=TerminalResponse) delivers the user-facing reply
+# as a call to this tool.  It is conversation, not an action.
+TERMINAL_TOOL = "TerminalResponse"
+
+
+def _terminal_json(text: str) -> dict | None:
+    """A TerminalResponse sent as the message's JSON text (a provider's structured output)
+    rather than as a call to TERMINAL_TOOL."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if (isinstance(data, dict) and isinstance(data.get("message"), str)
+            and data.get("status") in {"done", "needs_user"}):
+        return data
+    return None
+
+
 def last_ai_text(messages) -> str:
     for message in reversed(messages):
         if message.type == "ai" and not message.tool_calls and message.text:
@@ -128,6 +146,8 @@ def _canonical_output_field(key: str) -> str:
 
 
 def _normalise_output_value(field: str, value):
+    if isinstance(value, str):
+        value = value.strip()                  # VIRA statuses carry trailing spaces
     if field.endswith("_id") and isinstance(value, str) and value.isdigit():
         return int(value)
     if field.endswith("_ids") and isinstance(value, list):
@@ -154,6 +174,8 @@ def _unwrap_resolver_result(data: dict) -> tuple[dict, bool]:
 _ROW_ID_COLUMNS = {"job_id": "job_ids", "app_id": "app_ids", "profile_id": "profile_ids",
                    "user_id": "user_ids", "candidate_id": "candidate_ids"}
 _MAX_ROWS = 200
+# Empty lists that describe the request, not an empty result.
+_NOT_RESULT_LISTS = frozenset({"invalid_values", "valid_values", "candidates"})
 
 
 def _email_token(key: str, value) -> bool:
@@ -171,6 +193,18 @@ def _row_fields(row: dict, depth: int = 0):
             yield from _row_fields(value, depth + 1)
         elif not isinstance(value, list):
             yield key, value
+
+
+def _id_kinds(row: dict) -> set[str]:
+    """The identifiers a record carries: its row ids, and emails for rows without any."""
+    kinds = set()
+    for key, value in _row_fields(row):
+        field = _canonical_output_field(key)
+        if _email_token(key, value):
+            kinds.add("emails")
+        elif field in _ROW_ID_COLUMNS and value not in (None, ""):
+            kinds.add(field)
+    return kinds
 
 
 def _returned_compact_values(result: dict, input_args: dict) -> dict:
@@ -215,17 +249,25 @@ def _returned_compact_values(result: dict, input_args: dict) -> dict:
             # useful without the row they belong to.
         values["returned"] = max(values.get("returned", 0), len(rows))
 
-    def visit(value, depth: int = 0) -> None:
+    def visit(value, depth: int = 0, owner: frozenset = frozenset()) -> None:
         if depth > 6:
             return
         if isinstance(value, dict):
+            owner = owner | _id_kinds(value)
             for key, nested in value.items():
                 if isinstance(key, str):
                     add(key, nested)
-                visit(nested, depth + 1)
+                    # An empty result list is an answer ("0 found"), not a missing one.
+                    if nested == [] and not owner and key not in _NOT_RESULT_LISTS:
+                        values.setdefault("returned", 0)
+                visit(nested, depth + 1, owner)
         elif isinstance(value, list):
             rows = [item for item in value if isinstance(item, dict)]
-            if rows:
+            # Inside a record, a list whose rows add no identifier of their own (a
+            # candidate's workExperience, education, briqs, score breakdown) is part of
+            # that record, not rows the lookup returned: its companyId is a past
+            # employer, and its length is not a result count.
+            if rows and (not owner or any(_id_kinds(row) - owner for row in rows)):
                 add_rows(rows)
 
     for key, value in (result.get("resolved_fields") or {}).items():
@@ -270,10 +312,6 @@ def _resolver_result(text: str, input_args: dict | None = None) -> dict:
         value = result.get(key)
         if isinstance(value, list) and all(isinstance(item, int) for item in value):
             values.setdefault("app_ids" if key == "applications" else key, value)
-    if result.get("status") == "ambiguous" and isinstance(result.get("candidates"), list):
-        candidates = [row for row in result["candidates"][:10] if isinstance(row, dict)]
-        if candidates:
-            values["candidates"] = candidates
     status = result.get("status") or ("resolved" if from_task_group
                                         and str(data.get("request_status", "")).lower() == "ok"
                                         else None)
@@ -314,9 +352,25 @@ def extract_record(messages, read_only: frozenset) -> dict:
                   if message.type == "tool"])
     events, actions = [], []
     for index, message in enumerate(messages):
+        if message.type == "human":
+            # Every user turn, not only the first: a needs_user reply often
+            # carries the id or the constraint the rest of the task relied on.
+            if message.text:
+                events.append({"kind": "user", "text": message.text})
+            continue
         if message.type != "ai":
             continue
+        if not message.tool_calls and message.text:
+            terminal = _terminal_json(message.text)
+            events.append({"kind": "reply", "status": terminal["status"] if terminal else None,
+                           "text": terminal["message"] if terminal else message.text})
         for call in message.tool_calls:
+            if call["name"] == TERMINAL_TOOL:
+                reply = call.get("args") or {}
+                if isinstance(reply.get("message"), str) and reply["message"].strip():
+                    events.append({"kind": "reply", "status": reply.get("status"),
+                                   "text": reply["message"]})
+                continue
             result = next((candidate for candidate in messages[index + 1:]
                            if candidate.type == "tool"
                            and candidate.tool_call_id == call.get("id")), None)
@@ -357,20 +411,61 @@ def extract_record(messages, read_only: frozenset) -> dict:
             "actions": actions, "outcome": last_ai_text(messages)}
 
 
+def _conversation(record: dict) -> list[dict]:
+    """Timeline events, with conversation turns filled in for records stored before
+    user/reply events existed (only ``instruction`` and ``outcome`` were kept then)."""
+    events = list(record.get("events", []))
+    if not any(event["kind"] == "user" for event in events) and record.get("instruction"):
+        events.insert(0, {"kind": "user", "text": record["instruction"]})
+    outcome = record.get("outcome")
+    replies = [event for event in events if event["kind"] == "reply"]
+    if outcome and (not replies or replies[-1]["text"] != outcome):
+        events.append({"kind": "reply", "status": "done", "text": outcome})
+    return events
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + " … (truncated)"
+
+
 def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int = 1800,
-                  hard_cap: int = 15) -> str:
-    """Render recent completed task records for the next model call."""
+                  hard_cap: int = 15, full_tasks: int = 2, conversation_budget: int = 4000,
+                  brief_user_chars: int = 200) -> str:
+    """Render recent completed task records for the next model call.
+
+    Tool payloads are compacted to ids and counts.  The conversation (the user's
+    turns, and Jeni's replies, which are the model's own summary of those
+    payloads: the part a follow-up like "email the top 3" refers to) is kept
+    verbatim for the newest ``full_tasks`` tasks, while their user turns and
+    replies fit ``conversation_budget`` (approx. tokens); the newest task is
+    always whole.  Older tasks keep their timeline with every user turn, each
+    clipped to ``brief_user_chars``, and drop Jeni's replies: a reply is never
+    cut part way through.
+    """
     now = time.time()
+
+    def useful(record):
+        return record.get("actions") or record.get("events") or record.get("outcome")
+
     kept = [record for index, record in enumerate(records)
             if now - record.get("ts", 0) <= max_age_sec or index >= len(records) - keep_last]
-    # A completed read-only lookup can be decisive (for example, "0
-    # applications for job 674347").  Keep it for the next task even though
-    # no write action ran; records with neither actions nor resolver events
-    # contain no useful state and remain excluded.
-    kept = [record for record in kept[-hard_cap:]
-            if record.get("actions") or record.get("events")]
+    kept = [record for record in kept[-hard_cap:] if useful(record)]
     if not kept:
         return ""
+    omitted = sum(1 for record in records if useful(record)) - len(kept)
+
+    timelines = [_conversation(record) for record in kept]
+    # Newest first: a task keeps its conversation while it fits; once one doesn't,
+    # every older task is timeline only.
+    budget, full = conversation_budget * 4, set()            # ~4 characters per token
+    for task_index in reversed(range(len(timelines))):
+        size = sum(len(event["text"]) for event in timelines[task_index]
+                   if event["kind"] in ("user", "reply"))
+        if len(full) >= full_tasks or (full and size > budget):
+            break
+        full.add(task_index)
+        budget = max(0, budget - size)
 
     def short(value, limit=50):
         if isinstance(value, list):
@@ -386,22 +481,41 @@ def memory_digest(records: list[dict], *, keep_last: int = 5, max_age_sec: int =
                          (f" ({origins[field]})" if field in origins else "")
                          for field, value in values.items())
 
+    def block(label, text):
+        lines = text.splitlines() or [""]
+        return "\n".join([f"{label}: {lines[0]}"] + [f"      {line}" for line in lines[1:]])
+
+    def brief(timeline):
+        """Every user turn and tool event, in order; Jeni's replies go."""
+        return [event for event in timeline if event["kind"] != "reply"]
+
     lines = ["[earlier in this session - for reference]"]
-    for task_no, record in enumerate(kept, 1):
-        lines.append(f"{task_no}. Instruction: {' '.join(record['instruction'].split())}")
-        lines.append("   Timeline:")
-        for seq, event in enumerate(record.get("events", []), 1):
-            call = f"{event.get('tool')}({args(event.get('args', {}), event.get('input_origins', {}))})"
-            if event["kind"] == "resolve":
+    if omitted:
+        lines.append(f"({omitted} earlier task{'s' if omitted > 1 else ''} omitted)")
+    for task_no, timeline in enumerate(timelines, 1):
+        is_full = task_no - 1 in full
+        lines.append(f"{task_no}. Task timeline:" if is_full
+                     else f"{task_no}. Task timeline (conversation omitted):")
+        for seq, event in enumerate(timeline if is_full else brief(timeline), 1):
+            if event["kind"] == "user":
+                text = block("User", event["text"].strip() if is_full
+                             else " ".join(_clip(event["text"], brief_user_chars).split()))
+            elif event["kind"] == "reply":
+                label = "Jeni asked" if event.get("status") == "needs_user" else "Jeni replied"
+                text = block(label, event["text"].strip())
+            elif event["kind"] == "resolve":
+                call = f"{event.get('tool')}({args(event.get('args', {}), event.get('input_origins', {}))})"
                 result = event.get("result") or {}
                 output = ", ".join(f"{key}={short(value)}"
                                    for key, value in counts_first(result.get("values") or {}))
                 text = f"Resolve: {call} -> {output or result.get('status', 'no result')}"
             elif event["kind"] == "selection":
+                call = f"{event.get('tool')}({args(event.get('args', {}), event.get('input_origins', {}))})"
                 text = f"Selection: {call}"
                 if not event.get("input_origins"):
                     text += f" ({event.get('from', 'user-selected')})"
             else:
+                call = f"{event.get('tool')}({args(event.get('args', {}), event.get('input_origins', {}))})"
                 result = event.get("result") or {}
                 suffix = f" -> status={result.get('status', 'unknown')}"
                 if result.get("failure_reason"):
