@@ -152,6 +152,12 @@ class _Thread:
     pending: dict[str, int] = field(default_factory=dict)   # interrupt id -> action requests
     approvals: list[Approval] = field(default_factory=list)   # the open cards, while pending
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Tokens and cost.  A task is every run up to and including one that ends "done" (a card
+    # or a question to the user keeps it open), as in task memory; task_no is the open task's
+    # number (1st, 2nd, …) and so also the thread's task count.  The thread's total spans them all.
+    task_no: int = 1
+    task_usage: agent_kit.Usage = field(default_factory=agent_kit.Usage)
+    usage: agent_kit.Usage = field(default_factory=agent_kit.Usage)
 
 
 class JeniService:
@@ -214,16 +220,17 @@ class JeniService:
                                         task_memory=True,
                                         checkpointer=InMemorySaver())
 
-    def _thread(self, thread_id: str | None, client: str, company_id: int, user_id: int,
-                *, claim: bool) -> tuple[str, _Thread]:
-        """The caller's thread: a new id when none is given; an unused id is claimed."""
+    def _thread(self, thread_id: str | None, client: str, company_id: int,
+                user_id: int) -> tuple[str, _Thread]:
+        """The caller's thread: a new one when no id is given.  Ids are only ever issued here,
+        so an unknown id (made up, or lost in a restart) is a 404, never a fresh thread."""
         if thread_id is None:
             thread_id = uuid.uuid4().hex
+            return thread_id, self._threads.setdefault(thread_id,
+                                                       _Thread(client, company_id, user_id))
         thread = self._threads.get(thread_id)
         if thread is None:
-            if not claim:
-                raise HTTPException(404, "unknown thread_id")
-            thread = self._threads.setdefault(thread_id, _Thread(client, company_id, user_id))
+            raise HTTPException(404, "unknown thread_id")
         if (thread.client, thread.company_id, thread.user_id) != (client, company_id, user_id):
             raise HTTPException(403, "this thread belongs to another client, company or user")
         return thread_id, thread
@@ -232,7 +239,7 @@ class JeniService:
                    body: ChatRequest) -> ChatResponse:
         if body.decisions is not None:          # buttons: approve / edit / reject
             return await self._decide(client, company_id, user_id, body)
-        thread_id, thread = self._thread(body.thread_id, client, company_id, user_id, claim=True)
+        thread_id, thread = self._thread(body.thread_id, client, company_id, user_id)
         async with thread.lock:
             agent = await self.agent_for(client, company_id)
             if thread.pending:                  # a typed yes / no answers the waiting approval
@@ -254,8 +261,7 @@ class JeniService:
     async def _decide(self, client: str, company_id: int, user_id: int,
                       body: ChatRequest) -> ChatResponse:
         """Explicit decisions for the waiting approval card: approve, edit or reject."""
-        thread_id, thread = self._thread(body.thread_id, client, company_id, user_id,
-                                         claim=False)
+        thread_id, thread = self._thread(body.thread_id, client, company_id, user_id)
         async with thread.lock:
             if not thread.pending:
                 raise HTTPException(409, "no approval is pending on this thread")
@@ -289,7 +295,8 @@ class JeniService:
     async def _run(self, agent, thread_id: str, thread: _Thread, payload,
                    context_keys: str | None = None) -> ChatResponse:
         """One run of the graph, up to its reply or its next approval card (never prompts)."""
-        counter = agent_kit.UsageCounter()
+        counter = agent_kit.UsageCounter(thread=thread_id, task_no=thread.task_no,
+                                         totals={"task": thread.task_usage, "thread": thread.usage})
         config = {"configurable": {"thread_id": thread_id},
                   "callbacks": [counter]}
         agent_kit.stage("API_REQUEST", thread=thread_id, client=thread.client,
@@ -313,7 +320,14 @@ class JeniService:
             response = ChatResponse(thread_id=thread_id, status=status, reply=reply)
         agent_kit.stage("API_RESPONSE", thread=thread_id, status=response.status,
                         model_calls=counter.calls, input_tokens=counter.input_tokens,
-                        output_tokens=counter.output_tokens)
+                        full_input_tokens=counter.run.full_input, cached_tokens=counter.run.cached,
+                        output_tokens=counter.output_tokens,
+                        cost_usd=f"{counter.run.cost():.6f}", task_no=thread.task_no)
+        if response.status == "done":           # the task is finished: log it, start the next
+            agent_kit.stage("TASK_DONE", thread=thread_id, task_no=thread.task_no,
+                            **thread.task_usage.fields("task_"))
+            thread.task_no += 1
+            thread.task_usage = agent_kit.Usage()
         return response
 
 

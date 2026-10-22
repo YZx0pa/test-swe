@@ -587,11 +587,68 @@ def write_private(path, text: str) -> None:
         f.write(recruiter_cli._scrub_text(text))
 
 
-class UsageCounter(BaseCallbackHandler):
-    """Counts every chat-model call in a run, subagents included."""
+# USD per million tokens, defaults gpt-5-mini's list prices (.env.example).  The chat model's
+# input_tokens include its cached tokens: those are billed at the cached price, the rest
+# ("full_input") at the input price.
+PRICE_DEFAULTS = {"CHAT_PRICE_INPUT": 0.25, "CHAT_PRICE_CACHED": 0.025, "CHAT_PRICE_OUTPUT": 2.00}
 
-    def __init__(self) -> None:
-        self.calls = self.input_tokens = self.output_tokens = 0
+
+def price(name: str) -> float:
+    """One per-million price, from the environment or PRICE_DEFAULTS."""
+    try:
+        return float(os.environ.get(name) or PRICE_DEFAULTS[name])
+    except ValueError:
+        return PRICE_DEFAULTS[name]
+
+
+@dataclass
+class Usage:
+    """Tokens spent, and what they cost: a run's, a task's or a thread's."""
+    gpt_calls: int = 0
+    full_input: int = 0             # chat-model input not served from the prompt cache
+    cached: int = 0                 # chat-model input served from it
+    output: int = 0
+
+    def add(self, other: "Usage") -> None:
+        for name in self.__dataclass_fields__:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    def cost(self) -> float:
+        return (self.full_input * price("CHAT_PRICE_INPUT") + self.cached * price("CHAT_PRICE_CACHED")
+                + self.output * price("CHAT_PRICE_OUTPUT")) / 1_000_000
+
+    def fields(self, prefix: str = "") -> dict:
+        """For a stage record: the counts and the cost, each name prefixed."""
+        return {f"{prefix}gpt_calls": self.gpt_calls, f"{prefix}full_input_tokens": self.full_input,
+                f"{prefix}cached_tokens": self.cached, f"{prefix}output_tokens": self.output,
+                f"{prefix}cost_usd": f"{self.cost():.6f}"}
+
+
+class UsageCounter(BaseCallbackHandler):
+    """Counts every chat-model call in a run, subagents included.
+
+    totals: running Usage records the API keeps per thread ({"task": …, "thread": …}); each
+    call is added to them too, and a USAGE_TOTAL record logs the thread's total after it
+    (the task's is logged once, by the API's TASK_DONE).  task_no: the open task's number.
+    """
+
+    def __init__(self, *, thread: str | None = None, task_no: int | None = None,
+                 totals: dict[str, Usage] | None = None) -> None:
+        self.calls = 0                  # chat-model calls started (AGENT_ANALYSING)
+        self.run = Usage()
+        self.thread, self.task_no, self.totals = thread, task_no, totals or {}
+
+    # The run's figures, as API_RESPONSE and the runners have always read them.
+    input_tokens = property(lambda self: self.run.full_input + self.run.cached)
+    output_tokens = property(lambda self: self.run.output)
+
+    def _count(self, call: Usage) -> None:
+        self.run.add(call)
+        for total in self.totals.values():
+            total.add(call)
+        if "thread" in self.totals:     # the open task included
+            stage("USAGE_TOTAL", thread=self.thread, thread_task_count=self.task_no,
+                  **self.totals["thread"].fields("thread_"))
 
     def on_chat_model_start(self, serialized, messages, **kwargs) -> None:
         self.calls += 1
@@ -601,8 +658,16 @@ class UsageCounter(BaseCallbackHandler):
         for generations in response.generations:
             for gen in generations:
                 usage = getattr(getattr(gen, "message", None), "usage_metadata", None) or {}
-                self.input_tokens += usage.get("input_tokens", 0)
-                self.output_tokens += usage.get("output_tokens", 0)
+                if not usage:
+                    continue
+                cached = (usage.get("input_token_details") or {}).get("cache_read") or 0
+                call = Usage(gpt_calls=1, full_input=usage.get("input_tokens", 0) - cached,
+                             cached=cached, output=usage.get("output_tokens", 0))
+                stage("CHAT_MODEL_CALL", thread=self.thread, task_no=self.task_no,
+                      model_call=self.calls,
+                      input_tokens=usage.get("input_tokens", 0), full_input_tokens=call.full_input,
+                      cached_tokens=cached, output_tokens=call.output)
+                self._count(call)
 
 
 def _ask_args() -> dict:
