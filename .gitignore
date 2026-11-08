@@ -45,3 +45,6 @@ demo/ui/.env.local
 
 # demo/run.sh logs
 demo/.run/
+
+# redteam/run_live.py reports: transcripts and replies
+logs/redteam/

@@ -23,3 +23,6 @@ mcp==1.30.0              # FastMCP stdio server in vira_mcp.py (v1 line: mcp.ser
 
 # --- Jeni's database: run_langgraph.py --tools jeni_db --mode real ---
 asyncpg==0.31.0          # asyncpg pool behind db_queries.build_db_queries (db_lookup.py)
+
+fastapi==0.141.1         # api.py's HTTP endpoints (0.143+ needs opentelemetry-api>=1.44, which breaks the sdk pin)
+uvicorn==0.54.0          # serves api.py: uvicorn api:app

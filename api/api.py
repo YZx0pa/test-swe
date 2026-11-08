@@ -22,6 +22,9 @@ import run_langgraph
 _THREAD_ID = r"^[A-Za-z0-9_-]{8,64}$"
 _CONTEXT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _CONTEXT_MAX_KEYS, _CONTEXT_MAX_CHARS = 10, 200
+# One typed message.  It stays in the thread, so it is billed again on every later model call
+# of the task; a recruiter's request fits easily.  Limits the request only, never the reply.
+_INPUT_MAX_CHARS = 1000
 
 # X-Client-Name -> the environment variable holding that client's Postgres DSN.
 ClientName = Literal["tron", "live"]
@@ -57,7 +60,7 @@ class Decision(BaseModel):
 
 class ChatRequest(BaseModel):
     """One turn: what the user typed, or -- while an approval waits -- explicit decisions."""
-    user_input: str | None = Field(default=None, min_length=1)
+    user_input: str | None = Field(default=None, min_length=1, max_length=_INPUT_MAX_CHARS)
     thread_id: str | None = Field(default=None, pattern=_THREAD_ID)
     context: dict[str, int | str] = Field(default_factory=dict)
     # Answers to the waiting approval card: one per action request (approve / edit / reject).
@@ -218,6 +221,7 @@ class JeniService:
                                         query_tools=query_tools, 
                                         context=context,
                                         task_memory=True,
+                                        input_guard=True,
                                         checkpointer=InMemorySaver())
 
     def _thread(self, thread_id: str | None, client: str, company_id: int,
@@ -279,6 +283,14 @@ class JeniService:
                     raise HTTPException(400, f"approval {interrupt_id} has "
                                              f"{thread.pending[interrupt_id]} action request(s): "
                                              f"send one decision for each")
+                # An edit changes the arguments, never the action: the card showed this tool,
+                # and an always-confirm one must get its own card.
+                proposed = [action["name"] for card in thread.approvals
+                            if card.interrupt_id == interrupt_id for action in card.action_requests]
+                for decision, name in zip(decisions, proposed):
+                    if decision.type == "edit" and decision.edited_action.name != name:
+                        raise HTTPException(400, f"an edit must keep the tool ({name}): reject it "
+                                                 f"and ask for {decision.edited_action.name} instead")
             answers = {iid: {"decisions": [d.model_dump(exclude_none=True) for d in ds]}
                        for iid, ds in given.items()}
             resume = next(iter(answers.values())) if len(answers) == 1 else answers

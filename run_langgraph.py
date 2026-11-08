@@ -29,11 +29,12 @@ ASYNC_TOOLSETS = {"db", "jeni_db"}
 def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
                 toolset: agent_kit.Toolset = agent_kit.VIRA, gate_writes: bool = False,
                 own_checkpointer: bool = True, query_tools=None, context=None,
-                task_memory: bool = False, checkpointer=None):
+                task_memory: bool = False, checkpointer=None, input_guard: bool = False):
     """gate_writes: every write pauses for approval, as in real mode, whatever the mode (the
     demo).  own_checkpointer=False: a server keeps the threads (langgraph dev), and it
     refuses a graph that brings its own checkpointer.  checkpointer: one saver shared by
-    several agents (api.py builds one agent per company over the same threads store)."""
+    several agents (api.py builds one agent per company over the same threads store).
+    input_guard: screen each new user message first (input_guard.py)."""
     gated = agent_kit.interrupt_on(approve_all or gate_writes,
     toolset=toolset)
     approval = [HumanInTheLoopMiddleware(interrupt_on=gated)] if gated else []
@@ -46,14 +47,19 @@ def build_agent(*, approve_all: bool = False, step_limit: int = 12, model=None,
         read_only=toolset.read_only,
         pre_approval_names=gated,
     )
+    model = model or agent_kit.build_chat_model()
+    guard = []
+    if input_guard:
+        import input_guard as guard_mod
+        guard = [guard_mod.InputGuard(guard_mod.model_judge(model, toolset.tools()))]
     return create_agent(
-        model or agent_kit.build_chat_model(),
+        model,
         toolset.tools(),
         system_prompt=toolset.prompt,
         response_format=agent_kit.TerminalResponse,
         # Pre-card validation is outermost; execution validation is inside HITL so it
         # sees reviewer-edited arguments, then ToolCallGuard performs provenance checks.
-        middleware=[*memory, *entity_pre, *approval,
+        middleware=[*memory, *guard, *entity_pre, *approval,
                     *agent_kit.middleware(step_limit, toolset=toolset,
                                           execution_validation=(entity_execute[0]
                                                                 if entity_execute else None)),

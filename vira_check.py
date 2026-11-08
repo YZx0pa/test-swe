@@ -59,7 +59,7 @@ def _setup_job(*subs) -> dict:
 
 
 def checks(stamp: str) -> list[tuple[str, dict]]:
-    """Each group has a session of its own, as jeni_tools.session_uuid gives every submission."""
+    """The groups share the check's session (jeni_tools.session_uuid), each with a name of its own."""
     new_session = jeni_tools.session_uuid
     search = jeni_tools.payload(jeni_tools.catalog()["search_users"], {"search_key": "a", "limit": 3},
                                 new_session(f"vira-check-{stamp}"))
@@ -230,7 +230,7 @@ def run_writes(stamp: str, out=print, *, model=None, mode: str = "real") -> bool
              ("edit_job", {"job_id": created, "job_description": "A test job made by Jeni v2's end-to-end "
                                                                  "check. Safe to delete."}, succeeded),
              ("get_single_job_details", {"job_id": created}, lambda r: succeeded(r) and not has_skill(r, "Kafka"))]
-    try:                    # each call its own VIRA session (jeni_tools.session_uuid)
+    try:                    # one VIRA session for the run, a unique group name per call
         for name, args, expect in steps:
             r = jeni_tools.run(name, args)
             good = expect(r)

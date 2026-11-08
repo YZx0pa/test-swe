@@ -20,3 +20,17 @@ shared internally, not through the repository.
   any task the mock VIRA (`mock_jeni.py`) can't answer yet.
 
 The offline tests don't need it: they use the synthetic `tests/fixtures/jeni_tasks.json`.
+
+## `guard_tools.json`: the input guard's tool summary
+
+The API's input guard (`input_guard.py`) describes Jeni's tools to its model in a short
+summary made from the catalog above, saved here with a hash of the tool descriptions. After
+the catalog changes, regenerate it and read it before use:
+
+```bash
+python -m input_guard            # up to date? (exit 1 when missing or stale)
+python -m input_guard --refresh  # regenerate it with the chat model
+```
+
+While it is stale, the guard uses a plain one-line-per-tool list and logs
+`INPUT_GUARD tool_summary_stale`.

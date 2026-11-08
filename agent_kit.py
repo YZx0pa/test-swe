@@ -74,12 +74,29 @@ def set_tracing(enabled: bool) -> None:
 
 set_tracing(False)  # before any run; runners re-enable it only for --trace
 
+# The first rule's kinds of out-of-scope work are also screened by input_guard.GUARD_PROMPT:
+# keep the two aligned.
 SYSTEM_PROMPT = """\
 You operate a recruiter platform through the VIRA tools. Call a tool, read its JSON result,
 then decide the next step.
 
 Rules:
 - Do ONLY what the user's task asks. Do not add extra steps.
+- Do ONLY what your tools can do. For anything else, even hiring-related, politely say it's
+  beyond what you can do, without offering to do it another way, and say in plain words what
+  your tools can do that is closest to the request. Never do these yourself, in your reply
+  or in a value you pass to a tool, only through a tool that does them:
+  - writing on a topic, suggesting content of your own (e.g. related skills for a job), or
+    writing, summarizing, extracting from or translating text the user gives (pasted text
+    or files), except filling a tool's fields with values the text states for that field
+    (e.g. "Skills: SQL, Excel"); don't pick values out of other prose: ask the user;
+  - your own verdict on candidates: who is best, a fit or worth hiring, or scores and
+    rankings by your own criteria;
+  - inventing a field value (e.g. "fill in a salary for me"): see the rule below;
+  - rewriting tool results, including summarizing, extracting from or translating them
+    (e.g. "make the job details sound better", "extract the skills from job 12's
+    description"): you may pick out the returned fields relevant to the request and show
+    them as returned.
 - match_id, app_id, profile_id and job_id are DISTINCT. Never pass one where another is
   expected. If you need an id type you don't have and no tool returns it, do not substitute
   another id: finish as described below and say which id is missing.
@@ -107,7 +124,7 @@ Rules:
   `message`. Set `status` to `done` when the task is finished (including when it cannot
   proceed), or `needs_user` only when you are genuinely blocked on the user. Otherwise, if
   more tool calls are needed, make them instead of returning a terminal response.
-"""
+  """
 
 
 class TerminalResponse(BaseModel):
@@ -143,7 +160,7 @@ TOOLSET_NAMES = ("jeni", "jeni_db", "vira")
 def _jeni() -> Toolset:
     names = jeni_tools.names()          # reads the catalog; CatalogMissing without it
     return Toolset("jeni", jeni_tools.langchain_tools, names, jeni_tools.READ_ONLY & names,
-                   jeni_tools.USER_ONLY, SYSTEM_PROMPT + jeni_tools.RULES)
+                   jeni_tools.USER_ONLY, SYSTEM_PROMPT + jeni_tools.RULES + jeni_tools.GUARDRAILS)
 
 
 def _db(query_tools, context) -> Toolset:
@@ -171,7 +188,7 @@ def _jeni_db(query_tools, context) -> Toolset:
         jt.names | dbt.names,
         jt.read_only | dbt.read_only,
         jt.user_only | dbt.user_only,
-        SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES,
+        SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES + jeni_tools.GUARDRAILS,
     )
 
 
