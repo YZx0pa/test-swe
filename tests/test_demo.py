@@ -63,8 +63,7 @@ def test_the_demo_prompt_is_jeni_db_s_and_ends_with_the_terminal_response():
     """The closing rules are agent_kit's own: a structured TerminalResponse (message, status)
     instead of SUMMARY/STATUS lines, so the demo no longer rewrites the prompt."""
     prompt = jeni_graph.demo_toolset(mock_jeni.State()).prompt
-    assert prompt == (agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES
-                      + jeni_tools.GUARDRAILS)
+    assert prompt == agent_kit.SYSTEM_PROMPT + jeni_tools.RULES + db_tools.RULES
     assert "SUMMARY:" not in prompt and "STATUS:" not in prompt and "terminal response" in prompt
 
 

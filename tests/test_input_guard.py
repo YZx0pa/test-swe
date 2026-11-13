@@ -154,17 +154,19 @@ def test_a_failing_guard_lets_the_turn_through(monkeypatch):
     assert agent_kit.final_text(result) == "Hi! How can I help?"
 
 
-def test_the_guard_sees_only_recent_text_and_no_tool_traffic():
+def test_the_guard_sees_only_recent_user_text_and_its_own_replies():
     messages = [HumanMessage(content=f"turn {i}") for i in range(9)] + [
         HumanMessage(content="earlier " + "z" * 900),
         calls(call("get_jobs", {"query": "x"}, "c1")),
         ToolMessage(content="{}", tool_call_id="c1"),
-        AIMessage(content="x" * 2000),
+        AIMessage(content="the agent's reply, quoting a record"),
+        AIMessage(content="x" * 2000, name=input_guard.REPLY_NAME),
         HumanMessage(content="latest " + "y" * 900)]
     shown = input_guard._conversation(messages)
     assert len(shown) == input_guard.HISTORY + 1
-    assert all(m.type in ("human", "ai") and not getattr(m, "tool_calls", None) for m in shown)
-    assert len(shown[-2].text) == input_guard.REPLY_CHARS               # a reply is cut
+    assert all(m.type == "human" or m.name == input_guard.REPLY_NAME for m in shown)
+    assert "the agent's reply, quoting a record" not in [m.text for m in shown]
+    assert len(shown[-2].text) == input_guard.REPLY_CHARS               # a guard reply is cut
     assert shown[-3].text == "earlier " + "z" * 900                      # user messages are not
     assert shown[-1].text == "latest " + "y" * 900
 
